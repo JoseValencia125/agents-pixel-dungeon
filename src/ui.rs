@@ -382,8 +382,10 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
 
     // While the agent is asking something, ↑/↓ move its highlighted option
     // and ⏎ (with nothing typed) picks it, as in its own terminal.
+    // The "/" menu under the box keeps ↑/↓ for itself.
+    let slash_open = !slash_matches(state, agent).is_empty();
     let (up, down, escape) = ui.input_mut(|i| {
-        let plain = i.modifiers.is_none();
+        let plain = i.modifiers.is_none() && !slash_open;
         (plain && i.consume_key(egui::Modifiers::NONE, Key::ArrowUp), plain && i.consume_key(egui::Modifiers::NONE, Key::ArrowDown), i.key_pressed(Key::Escape))
     });
     // esc goes to the agent's terminal, as if typed there: it closes the
@@ -469,10 +471,12 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
                     for (index, line) in screen.iter().enumerate() {
                         if prompt_line == Some(index) {
                             // The prompt's glyph, then the box in the terminal's own font.
-                            ui.horizontal(|ui| {
+                            // Top-aligned, the glyph lowered by the box's margin,
+                            // so it sits on the typed text's line.
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                                 ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
                                 if let Some(glyph) = line.iter().find(|s| !s.text.trim().is_empty()).map(|s| Span { text: s.text.trim_start().chars().take(1).collect(), ..s.clone() }) {
-                                    ui.add(screen_line(&[glyph], size));
+                                    ui.vertical(|ui| { ui.add_space(3.0); ui.add(screen_line(&[glyph], size)); });
                                 }
                                 input_row(ui, monitor, agent, state, &menu, sending, size, false);
                             });
@@ -535,19 +539,16 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
 /// question or a run gets. `font` is its text size; `roomy` pads it as the
 /// widget's own row (a line and a half tall).
 fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatState, menu: &MenuOptions, sending: bool, font: f32, roomy: bool) {
-    ui.horizontal(|ui| {
+    // On the prompt line the box keeps to the top, level with the glyph,
+    // instead of centring in a row taller than itself.
+    ui.with_layout(egui::Layout::left_to_right(if roomy { egui::Align::Center } else { egui::Align::Min }), |ui| {
         let picker = agent.status != "blocked" && !monitor.standalone() && picker_open(&state.screen);
         let hint = if picker { tr("↑↓ y Enter eligen · esc cancela") } else if agent.status == "blocked" { trf("↑↓ y Enter eligen · o responde a {}…", &[&agent.name]) } else { trf("Escribir a {}…", &[&agent.name]) };
         let buttons_width = match agent.status.as_str() { "blocked" => 150.0, "working" => 80.0, _ => 26.0 };
         let mut draft = state.draft.clone();
         // The "/" menu: the harness's commands matching what is typed so
         // far. ↑↓ move, tab or ⏎ complete (⏎ then sends), a click too.
-        let matches: Vec<(String, String)> = if agent.status != "blocked" && draft.starts_with('/') {
-            let commands = state.slash.get_or_insert_with(|| crate::commands::slash_commands(crate::herdr::harness_for(&agent.name), &agent.cwd, &crate::herdr::home_dir()));
-            crate::commands::matching(commands, &draft).into_iter().map(|c| (c.name.clone(), c.about.clone())).collect()
-        } else {
-            vec![]
-        };
+        let matches = slash_matches(state, agent);
         let menu_open = !matches.is_empty();
         let mut complete: Option<String> = None;
         if menu_open {
@@ -642,6 +643,13 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
             }
         }
     });
+}
+
+/// The harness's "/" commands matching what is typed, with what each does.
+fn slash_matches(state: &mut ChatState, agent: &Agent) -> Vec<(String, String)> {
+    if agent.status == "blocked" || !state.draft.starts_with('/') { return vec![]; }
+    let commands = state.slash.get_or_insert_with(|| crate::commands::slash_commands(crate::herdr::harness_for(&agent.name), &agent.cwd, &crate::herdr::home_dir()));
+    crate::commands::matching(commands, &state.draft).into_iter().map(|c| (c.name.clone(), c.about.clone())).collect()
 }
 
 /// How many rows the box needs for what is typed, up to three: its lines,

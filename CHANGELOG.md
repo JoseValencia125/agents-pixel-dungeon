@@ -37,6 +37,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or ⏎ picks it.
 - In full screen, text that quotes a picker's footer no longer takes the box
   off the prompt line, and the box under the console is no longer cut off.
+- ↑/↓ move through the "/" command menu again.
+- In full screen, the typed text sits on the same line as the prompt's ❯.
 
 ### Privacy
 - Claude's HP comes from the last `/usage` Claude Code cached, and no
