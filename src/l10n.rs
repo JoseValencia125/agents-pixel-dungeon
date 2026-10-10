@@ -195,6 +195,27 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("Listo para la próxima tarea", ["Ready for the next task", "Prêt pour la prochaine tâche", "Pronto per il prossimo compito", "Pronto para a próxima tarefa"]),
         ("Documentación actualizada", ["Documentation updated", "Documentation à jour", "Documentazione aggiornata", "Documentação atualizada"]),
         ("Ajustando el movimiento", ["Tuning the movement", "Réglage du mouvement", "Regolo il movimento", "Ajustando o movimento"]),
+        // Saved SSH machines
+        ("Máquinas", ["Machines", "Machines", "Macchine", "Máquinas"]),
+        ("Máquina", ["Machine", "Machine", "Macchina", "Máquina"]),
+        ("Proyecto", ["Project", "Projet", "Progetto", "Projeto"]),
+        ("Todas", ["All", "Toutes", "Tutte", "Todas"]),
+        ("Este equipo", ["This computer", "Cet ordinateur", "Questo computer", "Este computador"]),
+        ("conectando", ["connecting", "connexion", "connessione", "conectando"]),
+        ("sin conexión", ["unreachable", "injoignable", "irraggiungibile", "sem conexão"]),
+        ("{} sin conexión", ["{} unreachable", "{} injoignable", "{} irraggiungibile", "{} sem conexão"]),
+        ("{} (sin conexión)", ["{} (unreachable)", "{} (injoignable)", "{} (irraggiungibile)", "{} (sem conexão)"]),
+        ("{} (desactivada en Herdr)", ["{} (disabled in Herdr)", "{} (désactivée dans Herdr)", "{} (disattivata in Herdr)", "{} (desativada no Herdr)"]),
+        ("Ninguna guardada en Herdr", ["None saved in Herdr", "Aucune enregistrée dans Herdr", "Nessuna salvata in Herdr", "Nenhuma salva no Herdr"]),
+        ("{} conectada · {} agentes", ["{} connected · {} agents", "{} connectée · {} agents", "{} connessa · {} agenti", "{} conectada · {} agentes"]),
+        ("{} reconectada", ["{} reconnected", "{} reconnectée", "{} riconnessa", "{} reconectada"]),
+        ("{} sin conexión: {}", ["{} unreachable: {}", "{} injoignable : {}", "{} irraggiungibile: {}", "{} sem conexão: {}"]),
+        ("Sin conexión con la máquina. Reintentamos automáticamente.", ["Cannot reach the machine. Retrying automatically.", "Machine injoignable. Nouvel essai automatique.", "Macchina irraggiungibile. Nuovo tentativo automatico.", "Sem conexão com a máquina. Tentando novamente automaticamente."]),
+        ("Sin conexión con {}; reintentamos automáticamente.", ["Cannot reach {}; retrying automatically.", "{} injoignable ; nouvel essai automatique.", "{} irraggiungibile; nuovo tentativo automatico.", "Sem conexão com {}; tentando novamente automaticamente."]),
+        ("Escribe una ruta absoluta de esa máquina.", ["Type an absolute path on that machine.", "Saisissez un chemin absolu de cette machine.", "Scrivi un percorso assoluto di quella macchina.", "Digite um caminho absoluto dessa máquina."]),
+        ("Ruta en esa máquina", ["Path on that machine", "Chemin sur cette machine", "Percorso su quella macchina", "Caminho nessa máquina"]),
+        ("Una carpeta de {}, con su ruta absoluta", ["A folder on {}, as an absolute path", "Un dossier de {}, en chemin absolu", "Una cartella di {}, con percorso assoluto", "Uma pasta de {}, com caminho absoluto"]),
+        ("Filtrar por máquina y proyecto", ["Filter by machine and project", "Filtrer par machine et projet", "Filtra per macchina e progetto", "Filtrar por máquina e projeto"]),
     ];
     rows.iter().copied().collect()
 });

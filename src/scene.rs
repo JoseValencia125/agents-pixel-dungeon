@@ -346,6 +346,8 @@ pub struct Room {
     color: Color32,
     activity: String,
     place: String,
+    /// The agent runs on a saved SSH machine: no local terminal for it.
+    remote: bool,
     action: Option<String>,
     subagents: usize,
     subagent_actions: Vec<String>,
@@ -390,6 +392,7 @@ impl Room {
             color: agent_color(&agent.status),
             activity: String::new(),
             place: String::new(),
+            remote: false,
             action: None,
             subagents: usize::MAX,
             subagent_actions: vec![],
@@ -450,7 +453,12 @@ impl Room {
         self.name = agent.name.clone();
         self.color = agent_color(&agent.status);
         self.activity = agent.activity.clone();
-        self.place = agent.folder() + &agent.branch.as_ref().map(|b| format!(" · {b}")).unwrap_or_default();
+        // A remote room says where it is: its machine, then its project.
+        self.place = match &agent.machine {
+            Some(machine) => format!("@{} · {}", machine.label, agent.project),
+            None => agent.folder() + &agent.branch.as_ref().map(|b| format!(" · {b}")).unwrap_or_default(),
+        };
+        self.remote = agent.is_remote();
         self.harness = harness_for(&agent.name);
         self.limit_resets = agent.limit_resets;
         if agent.action != self.action {
@@ -1324,6 +1332,8 @@ pub struct Scene {
     asking_before: HashSet<String>,
     scroll_request: Option<ScrollRequest>,
     pub selected: Option<String>,
+    /// Rooms whose machine cannot be reached: drawn faded, as last seen.
+    pub stale: HashSet<String>,
     pub reduced_motion: bool,
     pub empty_text: String,
     /// A spare room after the last one, with a "+" to summon an agent.
@@ -1344,6 +1354,7 @@ impl Scene {
             asking_before: HashSet::new(),
             scroll_request: None,
             selected: None,
+            stale: HashSet::new(),
             reduced_motion: false,
             empty_text: tr("Sin agentes en la sesión"),
             summon_tile: false,
@@ -1444,13 +1455,17 @@ impl Scene {
                     room_rects.push(rect);
                     let hit = ui.interact(rect, ui.id().with(id), egui::Sense::click());
                     room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
+                    if self.stale.contains(id) {
+                        ui.painter().rect_filled(rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(13, 15, 17, 140));
+                    }
                     if hit.clicked() { response.clicked = Some(id.clone()); }
+                    let (remote, stale) = (room.remote, self.stale.contains(id));
                     hit.context_menu(|ui| {
-                        if ui.button(tr("Abrir una terminal en esta carpeta")).clicked() {
+                        if !remote && ui.button(tr("Abrir una terminal en esta carpeta")).clicked() {
                             response.terminal = Some(id.clone());
                             ui.close_menu();
                         }
-                        if ui.button(tr("Finalizar agente (/exit)")).clicked() {
+                        if !stale && ui.button(tr("Finalizar agente (/exit)")).clicked() {
                             response.finish = Some(id.clone());
                             ui.close_menu();
                         }

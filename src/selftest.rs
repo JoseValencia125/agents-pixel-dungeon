@@ -312,7 +312,167 @@ pub fn run() {
     let _ = std::fs::remove_dir_all(&daemon);
     assert!(natural_cmp("w2:p1", "w10:p1") == std::cmp::Ordering::Less && natural_cmp("a", "A") == std::cmp::Ordering::Equal);
     assert_eq!(l10n::trf("Tú → {}: {}", &[&"a", &"b"]), l10n::text("Tú → {}: {}", &l10n::CURRENT).replacen("{}", "a", 1).replacen("{}", "b", 1));
-    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, {} bundled sprites", ROOM_FILES.len() + 1);
+    multi_machine();
+    println!("PASS: snapshot states, local + SSH machines, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, {} bundled sprites", ROOM_FILES.len() + 1);
+}
+
+// Shapes of real Herdr 0.9.3 replies (`herdr machine list --json`, `herdr
+// [--machine <id>] api snapshot`), anonymized and trimmed to the fields read.
+const MACHINES_JSON: &str = r#"[{"id":"0a1b2c3d4e5f60718293a4b5c6d7e8f9","label":"Build box","target":"buildbox","session":"default","enabled":true,"selected":false},{"id":"ffeeddccbbaa99887766554433221100","label":"Old VPS","target":"ssh://me@old:2222","session":"default","enabled":false,"selected":false}]"#;
+const UP: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f9";
+
+fn snapshot_json(rows: &[(&str, &str, &str, &str)], workspace: &str) -> String {
+    let agents: Vec<String> = rows.iter().map(|(pane, agent, status, cwd)| format!(
+        r#"{{"agent":"{agent}","agent_session":{{"agent":"{agent}","kind":"id","source":"herdr:{agent}","value":"0000-{pane}"}},"agent_status":"{status}","cwd":"{cwd}","focused":false,"foreground_cwd":"{cwd}","pane_id":"{pane}","revision":3,"state_change_seq":1,"tab_id":"w1:t1","terminal_id":"term_1","terminal_title":"✳ Task","terminal_title_stripped":"Task","workspace_id":"w1"}}"#
+    )).collect();
+    format!(r#"{{"id":"cli:api:snapshot","result":{{"snapshot":{{"agents":[{}],"focused_pane_id":"w1:p1","focused_tab_id":"w1:t1","focused_workspace_id":"w1","layouts":[],"panes":[],"protocol":22,"tabs":[],"version":"0.9.3","workspaces":[{{"active_tab_id":"w1:t1","agent_status":"working","focused":true,"label":"{workspace}","number":1,"pane_count":1,"tab_count":1,"workspace_id":"w1"}}]}}}}}}"#, agents.join(","))
+}
+
+/// Local and remote agents together, driven through a fake `herdr` (HERDR_BIN)
+/// that logs every call: identity, routing, unreachable machines, reconnects.
+fn multi_machine() {
+    let machines = decode_machines(MACHINES_JSON.as_bytes()).expect("machine list");
+    assert!(machines.len() == 2 && machines[0].machine.label == "Build box" && machines[0].enabled && !machines[1].enabled);
+    assert!(decode_machines(b"[]").unwrap().is_empty() && decode_machines(b"oops").is_none());
+    assert_eq!(HerdrTarget::Session("default".into()).prefix(), Vec::<String>::new());
+    assert_eq!(HerdrTarget::Session("work".into()).prefix(), vec!["--session", "work"]);
+    assert_eq!(HerdrTarget::Machine(UP.into()).prefix(), vec!["--machine", UP], "--machine never goes with --session");
+
+    // The same pane id on both servers: two rooms, each sent to its own server.
+    let build = machines[0].machine.clone();
+    let repo = std::env::temp_dir().join(format!("hpd-multi-{}", std::process::id()));
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/local-only\n").unwrap();
+    let path = repo.to_string_lossy().to_string();
+    let local = decode_snapshot(snapshot_json(&[("w1:p1", "claude", "working", &path)], "Website").as_bytes()).unwrap();
+    let remote = decode_remote_snapshot(snapshot_json(&[("w1:p1", "codex", "blocked", &path)], "API").as_bytes(), &build).unwrap();
+    assert!(local[0].id == "w1:p1" && local[0].pane == "w1:p1" && local[0].machine.is_none());
+    assert!(remote[0].id == format!("{UP}/w1:p1") && remote[0].pane == "w1:p1" && remote[0].project == "API" && remote[0].cwd == path);
+    assert_eq!(remote[0].target("work"), HerdrTarget::Machine(UP.into()), "A remote agent never targets the local session");
+    assert_eq!(local[0].target("work"), HerdrTarget::Session("work".into()));
+    // Local files never describe a remote agent, even at the same path.
+    let shown = enrich(vec![local[0].clone(), remote[0].clone()]);
+    assert!(shown[0].branch.as_deref() == Some("local-only") && shown[1].branch.is_none() && shown[1].action.is_none());
+    let both = vec![local[0].clone(), remote[0].clone()];
+    let only = |scope: Scope| both.iter().filter(|a| scope.admits(a)).map(|a| a.id.clone()).collect::<Vec<_>>();
+    assert_eq!(only(Scope { machine: Some(LOCAL.into()), project: None }), vec!["w1:p1"]);
+    assert_eq!(only(Scope { machine: Some(UP.into()), project: None }), vec![remote[0].id.clone()]);
+    assert_eq!(only(Scope { machine: None, project: Some("Website".into()) }), vec!["w1:p1"]);
+    assert_eq!(filter_agents(&both, StatusFilter::All, "build box").len(), 1, "Search matches the machine");
+
+    // A fake herdr: canned replies, every call logged.
+    let fake = repo.join("herdr");
+    let calls = repo.join("calls.log");
+    let script = format!(
+        "#!/bin/sh\nD='{dir}'\necho \"$*\" >> \"$D/calls.log\"\ncase \"$*\" in\n  'machine list --json') cat \"$D/machines.json\" ;;\n  '--machine {UP} api snapshot') if [ -f \"$D/down\" ]; then cat \"$D/down\" >&2; exit 1; fi; cat \"$D/remote.json\" ;;\n  'api snapshot') cat \"$D/local.json\" ;;\n  '--machine {UP} workspace create'*) echo '{{\"result\":{{\"workspace\":{{\"workspace_id\":\"w9\"}},\"tab\":{{\"tab_id\":\"w9:t1\"}},\"root_pane\":{{\"pane_id\":\"w9:p1\"}}}}}}' ;;\n  'session list --json') echo '{{\"sessions\":[]}}' ;;\n  *) echo '{{\"result\":{{}}}}' ;;\nesac\n",
+        dir = repo.to_string_lossy()
+    );
+    std::fs::write(&fake, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(repo.join("machines.json"), MACHINES_JSON).unwrap();
+    std::fs::write(repo.join("local.json"), snapshot_json(&[("w1:p1", "claude", "working", &path)], "Website")).unwrap();
+    std::fs::write(repo.join("remote.json"), snapshot_json(&[("w1:p1", "codex", "blocked", "/srv/api"), ("w2:p1", "claude", "idle", "/srv/web")], "API")).unwrap();
+    let saved_bin = std::env::var("HERDR_BIN").ok();
+    let saved_off = std::env::var("HPD_NO_HERDR").ok();
+    std::env::set_var("HERDR_BIN", &fake);
+    std::env::remove_var("HPD_NO_HERDR");
+    let wait = |monitor: &mut Monitor, what: &str, done: &dyn Fn(&Monitor) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !done(monitor) {
+            assert!(Instant::now() < deadline, "Timed out waiting for {what}");
+            monitor.poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let log = || std::fs::read_to_string(&calls).unwrap_or_default();
+
+    let mut monitor = Monitor::new("default".into(), StatusFilter::All);
+    wait(&mut monitor, "local and remote rooms", &|m| m.agents.len() == 3);
+    let remote_id = format!("{UP}/w1:p1");
+    assert!(m_ids(&monitor).contains(&"w1:p1".to_string()) && m_ids(&monitor).contains(&remote_id), "Same pane id on two machines collided: {:?}", m_ids(&monitor));
+    assert_eq!(monitor.agents[0].id, remote_id, "A remote agent asking for help leads the grid");
+    assert!(monitor.machines.len() == 1 && monitor.machines[0].link == crate::monitor::Link::Up, "Only machines enabled in Herdr are read");
+    assert!(!log().contains("--machine ffeeddccbbaa99887766554433221100"), "A machine disabled in Herdr was contacted");
+    assert!(log().lines().all(|l| !(l.contains("--machine") && l.contains("--session"))));
+    assert!(monitor.events.iter().any(|e| e.text.contains("Build box")), "Machine connection not logged");
+
+    // Actions go to the agent's own server and pane, never to the local one with the same id.
+    let remote_agent = monitor.agents.iter().find(|a| a.id == remote_id).cloned().unwrap();
+    let local_agent = monitor.agents.iter().find(|a| a.id == "w1:p1").cloned().unwrap();
+    let _ = std::fs::remove_file(&calls);
+    assert_eq!(monitor.press(&["esc".into()], &remote_agent).recv().unwrap(), None);
+    assert_eq!(monitor.send_erasing(0, "yes", &remote_agent).recv().unwrap(), None);
+    assert_eq!(monitor.focus(&remote_agent).recv().unwrap(), None);
+    let remote_calls = log();
+    assert!(remote_calls.contains(&format!("--machine {UP} agent send-keys w1:p1 esc")), "{remote_calls}");
+    assert!(remote_calls.contains(&format!("--machine {UP} pane send-text w1:p1 yes")) && remote_calls.contains(&format!("--machine {UP} pane send-keys w1:p1 enter")), "{remote_calls}");
+    assert!(remote_calls.contains(&format!("--machine {UP} agent focus w1:p1")));
+    assert!(remote_calls.lines().all(|l| l.starts_with("--machine ")), "A remote action reached the local server: {remote_calls}");
+    let _ = std::fs::remove_file(&calls);
+    assert_eq!(monitor.press(&["esc".into()], &local_agent).recv().unwrap(), None);
+    assert_eq!(log().trim(), "agent send-keys w1:p1 esc", "A local action left this computer");
+    let _ = monitor.screen(&remote_agent, false).recv();
+    assert!(log().contains(&format!("--machine {UP} agent read w1:p1")), "Terminal read from the wrong server");
+    let idle = monitor.agents.iter().find(|a| a.id == format!("{UP}/w2:p1")).cloned().unwrap();
+    assert_eq!(monitor.send_erasing(0, "hi", &idle).recv().unwrap(), None);
+    assert!(log().contains(&format!("--machine {UP} agent prompt w2:p1 hi")), "Prompt sent to the wrong server");
+    // Summoning on the machine: every step there, in its own folder; `~` is refused before any call.
+    let _ = std::fs::remove_file(&calls);
+    assert!(monitor.create("codex", "~/api", "", Some(&build)).recv().unwrap().is_some() && log().is_empty(), "A ~ folder must be refused on a machine");
+    assert_eq!(monitor.create("codex", "/srv/api/", "go", Some(&build)).recv().unwrap(), None);
+    let summon = log();
+    assert!(summon.contains(&format!("--machine {UP} workspace create --cwd /srv/api --label api --no-focus")), "{summon}");
+    assert!(summon.contains(&format!("--machine {UP} agent start codex-api-")) && summon.contains("--pane w9:p1"), "{summon}");
+    assert!(summon.contains(&format!("--machine {UP} agent prompt codex-api-")) && summon.lines().all(|l| l.starts_with("--machine ")), "{summon}");
+
+    // The machine drops: its rooms stay, faded, without alerts; then it comes back.
+    // What herdr 0.9.3 prints when the SSH connection fails.
+    std::fs::write(repo.join("down"), "Error: Custom { kind: Other, error: \"machine 'Build box': remote platform detection failed: ssh: connect to host buildbox port 22: Connection refused\" }\n").unwrap();
+    monitor.retry_machines();
+    wait(&mut monitor, "the machine to drop", &|m| matches!(m.machines[0].link, crate::monitor::Link::Down(_)));
+    match &monitor.machines[0].link { crate::monitor::Link::Down(why) => assert!(why.starts_with("machine 'Build box'") && why.ends_with("Connection refused"), "{why}"), _ => unreachable!() }
+    assert!(monitor.agents.len() == 3 && monitor.stale_ids().contains(&remote_id) && !monitor.stale_ids().contains("w1:p1"));
+    assert!(monitor.read_only(&remote_agent) && !monitor.read_only(&local_agent));
+    assert!(monitor.machines_note(Instant::now()).map(|n| n.contains("Build box")).unwrap_or(false));
+    monitor.alerts.clear();
+    std::fs::remove_file(repo.join("down")).unwrap();
+    std::fs::write(repo.join("remote.json"), snapshot_json(&[("w1:p1", "codex", "done", "/srv/api")], "API")).unwrap();
+    monitor.retry_machines();
+    wait(&mut monitor, "the reconnection", &|m| m.machines[0].link == crate::monitor::Link::Up);
+    assert_eq!(monitor.agents.len(), 2, "A reconnection must replace the machine's rooms, not add to them: {:?}", m_ids(&monitor));
+    assert!(monitor.stale_ids().is_empty() && monitor.agents.iter().any(|a| a.id == remote_id && a.status == "done"));
+    assert!(monitor.alerts.iter().any(|a| a.agent.id == remote_id && a.kind == AlertKind::Finished), "Status change after reconnecting not alerted");
+    assert!(monitor.events.iter().any(|e| e.text.contains("Build box")));
+
+    // Hidden in the menu, or no machines saved: only the local rooms, as before.
+    monitor.events.clear();
+    monitor.set_hidden_machines(vec![UP.into()]);
+    assert!(monitor.machines.is_empty() && m_ids(&monitor) == vec!["w1:p1".to_string()]);
+    assert_eq!(monitor.events.len(), 1, "A hidden machine leaves in one line: {:?}", monitor.events.iter().map(|e| &e.text).collect::<Vec<_>>());
+    monitor.set_scope(Scope { machine: Some(UP.into()), project: None });
+    monitor.set_demo(true);
+    assert!(monitor.scope.machine.is_none() && monitor.machines.is_empty(), "Demo rooms must not be hidden by a machine scope");
+    std::fs::write(repo.join("machines.json"), "[]").unwrap();
+    let _ = std::fs::remove_file(&calls);
+    let mut plain = Monitor::new("default".into(), StatusFilter::All);
+    wait(&mut plain, "local rooms", &|m| m.agents.len() == 1);
+    std::thread::sleep(Duration::from_millis(200));
+    plain.poll();
+    assert!(plain.machines.is_empty() && !plain.shows_hud() && !log().contains("--machine"), "No saved machines must mean no SSH");
+
+    match saved_bin { Some(v) => std::env::set_var("HERDR_BIN", v), None => std::env::remove_var("HERDR_BIN") }
+    if let Some(v) = saved_off { std::env::set_var("HPD_NO_HERDR", v); }
+    let _ = std::fs::remove_dir_all(&repo);
+    assert!(crate::monitor::remote_folder_ok("/srv/api") && !crate::monitor::remote_folder_ok("~/code") && !crate::monitor::remote_folder_ok("code"), "Herdr does not expand ~ on a machine");
+    assert!(crate::monitor::remote_folder_ok("C:\\work") && crate::monitor::remote_folder_ok("d:/x") && crate::monitor::remote_folder_ok("\\\\host\\share") && !crate::monitor::remote_folder_ok("C:work"));
+    assert!(crate::monitor::remote_backoff(1) == Duration::from_secs(5) && crate::monitor::remote_backoff(3) == Duration::from_secs(20) && crate::monitor::remote_backoff(30) == Duration::from_secs(60));
+    let old: Prefs = serde_json::from_str(r#"{"sound_enabled":false,"filter":"blocked","favorite_folders":["/x"]}"#).unwrap();
+    assert!(old.hidden_machines.is_empty() && old.machine_scope.is_none() && old.create_machine.is_empty() && !old.sound_enabled, "Old settings must still load");
+}
+
+fn m_ids(monitor: &Monitor) -> Vec<String> {
+    monitor.agents.iter().map(|a| a.id.clone()).collect()
 }
 
 #[cfg(test)]

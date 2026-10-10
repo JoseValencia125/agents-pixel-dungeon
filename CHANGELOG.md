@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Several machines: agents on the SSH machines saved in Herdr join the
+  dungeon beside the local ones, marked `@machine · project`, and are
+  answered, interrupted, ended and summoned through `herdr --machine`. An
+  unreachable machine keeps its rooms faded with a banner and is retried with
+  a back-off; the `@` button filters by machine and project, and the menu's
+  Machines hides one.
+
 ## [2.1.0] - 2026-10-10
 
 ### Added

@@ -11,6 +11,12 @@ pub struct SlashCommand {
     pub about: String,
 }
 
+/// The harness's own commands only: for an agent on another machine, whose
+/// project and home folders are not here.
+pub fn built_in_commands(harness: &str) -> Vec<SlashCommand> {
+    built_in(harness).iter().map(|(n, a)| SlashCommand { name: n.to_string(), about: a.to_string() }).collect()
+}
+
 fn built_in(harness: &str) -> &'static [(&'static str, &'static str)] {
     match harness {
         "claude" => &[
@@ -191,7 +197,7 @@ fn plugin_commands(cache: &Path, out: &mut Vec<SlashCommand>) {
 
 /// The commands for a harness working in `cwd`, built-ins first.
 pub fn slash_commands(harness: &str, cwd: &str, home: &Path) -> Vec<SlashCommand> {
-    let mut out: Vec<SlashCommand> = built_in(harness).iter().map(|(n, a)| SlashCommand { name: n.to_string(), about: a.to_string() }).collect();
+    let mut out = built_in_commands(harness);
     if harness == "claude" {
         let project = Path::new(cwd);
         command_files(&project.join(".claude/commands"), "", &mut out);

@@ -27,6 +27,8 @@ pub enum TrayAction {
     NotifyHelp,
     NotifyDone,
     Session(String),
+    /// Show or hide a saved machine (its profile id) in the dungeon.
+    Machine(String),
     Demo,
     OpenHerdr,
     OpenAtStart,
@@ -54,11 +56,23 @@ pub struct MenuState {
     pub login: bool,
     pub sessions: Vec<HerdrSession>,
     pub session: String,
+    pub machines: Vec<MachineEntry>,
     pub demo: bool,
     pub attention: usize,
     pub open_at_start: bool,
     pub text_scale: f32,
     pub console_scale: f32,
+}
+
+/// A saved Herdr machine in the menu: shown in the dungeon or not, disabled
+/// in Herdr (greyed out), or shown but unreachable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineEntry {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+    pub shown: bool,
+    pub unreachable: bool,
 }
 
 /// Menu bar icon: a pixel knight's great helm (T visor, breathing holes,
@@ -155,6 +169,24 @@ fn build_menu(state: &MenuState) -> (Menu, HashMap<MenuId, TrayAction>) {
     let _ = sessions.append_items(&[&PredefinedMenuItem::separator(), &demo]);
     add(&demo, TrayAction::Demo);
 
+    // Machines saved in Herdr (`herdr machine add`): which ones the dungeon shows.
+    let machines = Submenu::new(tr("Máquinas"), true);
+    if state.machines.is_empty() {
+        let _ = machines.append(&MenuItem::new(tr("Ninguna guardada en Herdr"), false, None));
+    }
+    for entry in &state.machines {
+        let title = if !entry.enabled {
+            trf("{} (desactivada en Herdr)", &[&entry.label])
+        } else if entry.unreachable {
+            trf("{} (sin conexión)", &[&entry.label])
+        } else {
+            entry.label.clone()
+        };
+        let item = check(&title, entry.enabled && !state.demo, entry.enabled && entry.shown);
+        let _ = machines.append(&item);
+        add(&item, TrayAction::Machine(entry.id.clone()));
+    }
+
     let open_herdr = item(&tr("Abrir Herdr"));
     let open_at_start = check(&tr("Abrir Herdr al iniciar"), true, state.open_at_start);
     add(&open_herdr, TrayAction::OpenHerdr);
@@ -180,7 +212,7 @@ fn build_menu(state: &MenuState) -> (Menu, HashMap<MenuId, TrayAction>) {
 
     let about = item(&tr("Acerca de Herdr Pixel Dungeon"));
     let quit = item(&tr("Salir"));
-    let _ = menu.append_items(&[&sounds, &notify, &text, &console, &PredefinedMenuItem::separator(), &sessions, &open_herdr, &open_at_start, &PredefinedMenuItem::separator(), &about, &quit]);
+    let _ = menu.append_items(&[&sounds, &notify, &text, &console, &PredefinedMenuItem::separator(), &sessions, &machines, &open_herdr, &open_at_start, &PredefinedMenuItem::separator(), &about, &quit]);
     add(&about, TrayAction::About);
     add(&quit, TrayAction::Quit);
     (menu, actions)
