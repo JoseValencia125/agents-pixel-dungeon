@@ -1156,9 +1156,21 @@ pub fn resize_grip(ctx: &Context, visible: bool) -> bool {
 
 // ---- HP viewer (full screen)
 
-/// The HP viewer's height for these harnesses: a title and one row each.
-pub fn usage_height(usages: &[crate::usage::HarnessUsage]) -> f32 {
-    if usages.is_empty() { 0.0 } else { 26.0 + usages.len() as f32 * 60.0 }
+/// The HP viewer's height for these harnesses: a title and one row each,
+/// the one opened with a click taller by its options.
+pub fn usage_height(ctx: &egui::Context, usages: &[crate::usage::HarnessUsage]) -> f32 {
+    if usages.is_empty() { return 0.0; }
+    let open = usage_open(ctx);
+    26.0 + usages.iter().map(|u| 54.0 + if open.as_deref() == Some(u.harness) && has_options(u.harness) { 22.0 } else { 0.0 }).sum::<f32>()
+}
+
+/// The hero whose options (Claude's source, Kiro's plan) are showing.
+fn usage_open(ctx: &egui::Context) -> Option<String> {
+    ctx.data(|d| d.get_temp::<String>(egui::Id::new("hp-open")))
+}
+
+fn has_options(harness: &str) -> bool {
+    matches!(harness, "claude" | "kiro")
 }
 
 fn hp_color(hp: f32) -> Color32 {
@@ -1198,13 +1210,18 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
     ui.spacing_mut().item_spacing = vec2(6.0, 3.0);
     ui.add_space(5.0);
     ui.label(mono(&tr("HP de la guild (uso restante)"), 10.0).strong().color(DIM));
+    let open = usage_open(ui.ctx());
+    let mut toggled: Option<&str> = None;
     for usage in usages {
+        let expanded = open.as_deref() == Some(usage.harness);
         let name = match usage.harness { "claude" => "Claude", "codex" => "Codex", "kiro" => "Kiro", other => other };
         let health = usage.meters.iter().find(|m| m.window != "5h");
         let mana = usage.meters.iter().find(|m| m.window == "5h");
         let hp = health.map(|m| m.hp(unix));
         ui.horizontal(|ui| {
-            let (icon, _) = ui.allocate_exact_size(vec2(28.0, 40.0), egui::Sense::hover());
+            // A click on the hero or its name shows its options.
+            let (icon, hero) = ui.allocate_exact_size(vec2(28.0, 40.0), if has_options(usage.harness) { egui::Sense::click() } else { egui::Sense::hover() });
+            if hero.clicked() { toggled = Some(usage.harness); }
             // Out of HP or mana, the hero stops and greys out.
             let spent = hp == Some(0.0) || mana.map(|m| m.hp(unix) <= 0.0).unwrap_or(false);
             let frame = if spent { 0 } else { (now * 2.0) as usize };
@@ -1213,7 +1230,9 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 2.0);
                 let row = ui.horizontal(|ui| {
-                    ui.label(mono(name, 11.0).strong().color(Color32::WHITE));
+                    let label = ui.add(egui::Label::new(mono(&format!("{name}{}", if !has_options(usage.harness) { "" } else if expanded { " ▾" } else { " ▸" }), 11.0).strong().color(Color32::WHITE)).sense(if has_options(usage.harness) { egui::Sense::click() } else { egui::Sense::hover() }));
+                    if label.clicked() { toggled = Some(usage.harness); }
+                    if has_options(usage.harness) && (label.hovered() || hero.hovered()) { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let text = match (health, &usage.credits) {
                             (Some(_), Some((spent, Some(plan)))) => format!("HP {:.0}/{plan}", (*plan as f64 - spent).max(0.0)),
@@ -1239,11 +1258,13 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
                     ui.horizontal(|ui| {
                         let plan = usage.credits.and_then(|c| c.1);
                         let shown = plan.and_then(|p| crate::usage::KIRO_PLANS.iter().find(|(_, c)| *c == p)).map(|(n, _)| n.to_string()).unwrap_or_else(|| tr("Elegir plan…"));
-                        egui::ComboBox::from_id_salt("kiro-plan").selected_text(mono(&shown, 9.0)).width(70.0).show_ui(ui, |ui| {
-                            for (label, credits) in crate::usage::KIRO_PLANS {
-                                if ui.selectable_label(plan == Some(credits), format!("{label} · {credits}")).clicked() { picked.kiro_plan = Some(credits); }
-                            }
-                        });
+                        if expanded {
+                            egui::ComboBox::from_id_salt("kiro-plan").selected_text(mono(&shown, 9.0)).width(70.0).show_ui(ui, |ui| {
+                                for (label, credits) in crate::usage::KIRO_PLANS {
+                                    if ui.selectable_label(plan == Some(credits), format!("{label} · {credits}")).clicked() { picked.kiro_plan = Some(credits); }
+                                }
+                            });
+                        }
                         // The month's credits come back on the 1st.
                         if let Some(at) = health.filter(|m| m.used > 0.0).and_then(|m| m.resets).and_then(|r| crate::usage::reset_label(r, chrono::Local::now(), false)) {
                             ui.label(mono(&format!("↻ {at}"), 9.0).color(DIM));
@@ -1252,7 +1273,7 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
                 }
                 // Where Claude's numbers come from: the last /usage Claude
                 // Code cached, or live with its token (opt-in).
-                if usage.harness == "claude" {
+                if usage.harness == "claude" && expanded {
                     let source = |live: bool| if live { tr("En vivo (token)") } else { tr("Último /usage") };
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("claude-source").selected_text(mono(&source(claude_live), 9.0)).width(110.0).show_ui(ui, |ui| {
@@ -1277,6 +1298,10 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
                 if !tip.is_empty() { row.on_hover_text(tip); }
             });
         });
+    }
+    if let Some(harness) = toggled {
+        let next = (open.as_deref() != Some(harness)).then(|| harness.to_string());
+        ui.ctx().data_mut(|d| match next { Some(h) => d.insert_temp(egui::Id::new("hp-open"), h), None => d.remove::<String>(egui::Id::new("hp-open")) });
     }
     picked
 }

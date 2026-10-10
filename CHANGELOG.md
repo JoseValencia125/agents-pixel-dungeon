@@ -47,6 +47,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it; ⌘-click still opens links and paths.
 - esc (or Stop) on a working agent puts the message it was working on back in
   the box, to edit and send again.
+- The guild's HP options (Claude's source, Kiro's plan) show when you click
+  that hero or its name, and hide with another click; the rows no longer get
+  cut off.
 
 ### Privacy
 - Claude's HP comes from the last `/usage` Claude Code cached, and no

@@ -766,7 +766,7 @@ impl eframe::App for App {
         if let Some(rx) = &self.usage_rx {
             if let Ok(found) = rx.try_recv() { self.usages = found; self.usage_rx = None; }
         }
-        let usage_h = if fullscreen { ui::usage_height(&self.usages) } else { 0.0 };
+        let usage_h = if fullscreen { ui::usage_height(ctx, &self.usages) } else { 0.0 };
         egui::CentralPanel::default().frame(Frame::NONE).show(ctx, |ui| {
             let full = ui.max_rect();
             // The widget has rounded corners; full screen has the screen's.
