@@ -27,7 +27,7 @@ pub const ROOM_FILES: [(&str, &[u8]); 7] = [
     ("room_working", include_bytes!("../Resources/Sprites/rooms/room_working.png")),
     ("room_working_front", include_bytes!("../Resources/Sprites/rooms/room_working_front.png")),
     ("room_blocked", include_bytes!("../Resources/Sprites/rooms/room_blocked.png")),
-    // The sealed room in violet: the usage limit (derived from room_blocked).
+    // The infirmary: the usage limit (drawn by scripts/room_limited.py).
     ("room_limited", include_bytes!("../Resources/Sprites/rooms/room_limited.png")),
     ("room_idle", include_bytes!("../Resources/Sprites/rooms/room_idle.png")),
     ("room_done", include_bytes!("../Resources/Sprites/rooms/room_done.png")),
@@ -126,16 +126,13 @@ impl Assets {
         prop("alert", pixel_image(&["..wwwww..", ".wkkkkkw.", "wkRWRRdkw", "wkRWRRdkw", "wkRRRRdkw", ".wkRRdkw.", ".wkRRdkw.", ".wkRRdkw.", ".wkRRdkw.", "..wkRkw..", "..wkRkw..", "..wkkkw..", ".wwkkkww.", ".wkRRdkw.", ".wkRRdkw.", ".wkkkkkw.", "..wwwww.."],
             &[('k', INK), ('R', rgb(0.894, 0.231, 0.267)), ('d', rgb(0.635, 0.149, 0.2)), ('W', Color32::WHITE), ('w', Color32::WHITE)]), nearest);
         prop("z", pixel_image(&["kkkkkk.", "kwwwwk.", "kkkwkk.", ".kwkk..", "kwkkkk.", "kwwwwk.", "kkkkkk."], &[('k', INK), ('w', rgb(0.92, 0.95, 1.0))]), nearest);
-        // The usage limit's cage, drawn over the hero (bars one pixel wide so it shows through), padlocked.
-        let bar = "..i...i...i...i...i..";
-        prop("cage", pixel_image(&["..........k..........", ".........kik.........", "...kkkkkkkkkkkkkkk...", "..kiiiiiiiiiiiiiiik..", "..kkkkkkkkkkkkkkkkk..",
-                                    bar, bar, bar, bar, bar,
-                                    "..i...i..kkk..i...i..", "..i...i..k.k..i...i..", "..i...i.kYYYk.i...i..", "..i...i.kYdYk.i...i..", "..i...i.kkkkk.i...i..",
-                                    bar, bar, bar, bar, bar, bar,
-                                    "..kkkkkkkkkkkkkkkkk..", ".kiiiiiiiiiiiiiiiiik.", ".kkkkkkkkkkkkkkkkkkk."],
-            &[('k', INK), ('i', rgb(0.62, 0.6, 0.72)), ('Y', rgb(0.996, 0.906, 0.38)), ('d', rgb(0.45, 0.3, 0.1))]), nearest);
         prop("hourglass", pixel_image(&["fffffff", ".fYYYf.", "..fYf..", "...f...", "..fYf..", ".fYYYf.", "fffffff"],
             &[('f', rgb(0.85, 0.62, 0.33)), ('Y', rgb(0.996, 0.906, 0.38))]), nearest);
+        // The chamber's armchair: its back goes behind the reader, its arms
+        // and the seat's front over the reader's legs.
+        let chair_colors = [('k', INK), ('w', rgb(0.635, 0.376, 0.235)), ('d', rgb(0.408, 0.22, 0.141)), ('r', rgb(0.769, 0.204, 0.235)), ('p', rgb(0.886, 0.33, 0.337)), ('s', rgb(0.545, 0.118, 0.157))];
+        prop("chair_back", pixel_image(&["..kkkkkkkkkkkkkk..", ".krrrrrrrrrrrrrrk.", ".krppprrrrrrrrrrk.", ".krprrrrrrrrrrrrk.", ".krrrrrrrrrrrrrrk.", ".krrrrrrrrrrrrrrk.", ".krrrrrrrrrrrrrrk.", ".ksrrrrrrrrrrrrsk.", "kkkkkkkkkkkkkkkkkk", "kwwksssssssssskwwk"], &chair_colors), nearest);
+        prop("chair_front", pixel_image(&["kwwk..........kwwk", "kwdk..........kdwk", "kwdk..........kdwk", "kwdk..........kdwk", "kwdk..........kdwk", "kkkkkkkkkkkkkkkkkk", "kdrrrrrrrrrrrrrrdk", "kkkkkkkkkkkkkkkkkk"], &chair_colors), nearest);
         prop("glow", radial(64, Color32::WHITE, &[(0.0, 1.0), (0.45, 0.35), (1.0, 0.0)], 0.0), TextureOptions::LINEAR);
         prop("darkness", radial(128, rgb(0.02, 0.01, 0.04), &[(0.0, 0.0), (0.1, 0.12), (0.28, 0.6), (0.5, 0.82), (1.0, 0.86)], 0.86), TextureOptions::LINEAR);
         Assets { rooms, heroes, sleepers, arms, props }

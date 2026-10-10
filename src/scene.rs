@@ -1,7 +1,7 @@
 //! The dungeon: one room per agent, drawn with egui's painter. Each room
 //! shows the art of the agent's state and a hero that works at the right
-//! station, jumps for attention, celebrates, sleeps or wanders; status
-//! changes walk the hero out through the door and into the new room.
+//! station, jumps for attention, rests exhausted, reads, celebrates or
+//! wanders; status changes walk the hero out through the door and into the new room.
 //! Animation is driven by elapsed time, so Reduce Motion simply stops it.
 
 use crate::assets::{Assets, Sprite};
@@ -23,6 +23,7 @@ pub const BOTTOM_PAD: f32 = 6.0;
 pub const BACKGROUND: Color32 = Color32::from_rgb(13, 15, 17);
 const GOLD: Color32 = Color32::from_rgb(254, 231, 97);
 const ORANGE: Color32 = Color32::from_rgb(247, 118, 34);
+const MINT: Color32 = Color32::from_rgb(140, 230, 180);
 const CYAN: Color32 = Color32::from_rgb(44, 232, 245);
 const RED: Color32 = Color32::from_rgb(228, 59, 68);
 const GREEN: Color32 = Color32::from_rgb(99, 199, 77);
@@ -30,7 +31,6 @@ const VIOLET: Color32 = Color32::from_rgb(181, 80, 136);
 const PINK: Color32 = Color32::from_rgb(245, 153, 204);
 /// The usage limit's colour.
 pub const LIMITED: Color32 = Color32::from_rgb(175, 82, 222);
-const IRON: Color32 = Color32::from_rgb(158, 153, 184);
 
 /// Rooms wrap like a flex row: as many columns as fit the width.
 pub fn columns_fitting(width: f32) -> usize {
@@ -59,11 +59,12 @@ pub struct RoomStyle {
 
 pub const STYLES: [RoomStyle; 6] = [
     RoomStyle { status: "blocked", title: "ATENCIÓN", background: "room_blocked", color: Color32::from_rgb(255, 69, 58), bubble: None, spot: pos2(72.0, 64.0), roam: 8.0, lying: false, route: &[] },
-    RoomStyle { status: "limited", title: "ATRAPADO", background: "room_limited", color: LIMITED, bubble: None, spot: pos2(72.0, 58.0), roam: 0.0, lying: false, route: &[] },
+    RoomStyle { status: "limited", title: "AGOTADO", background: "room_limited", color: LIMITED, bubble: None, spot: pos2(63.0, 57.0), roam: 0.0, lying: true,
+                route: &[pos2(72.0, 80.0), pos2(52.0, 72.0)] },
     RoomStyle { status: "working", title: "TRABAJANDO", background: "room_working", color: Color32::from_rgb(255, 159, 10), bubble: None, spot: pos2(72.0, 34.0), roam: 0.0, lying: false,
                 route: &[pos2(72.0, 80.0), pos2(36.0, 74.0), pos2(36.0, 36.0)] },
-    RoomStyle { status: "idle", title: "EN ESPERA", background: "room_idle", color: Color32::from_rgb(152, 152, 157), bubble: Some("z"), spot: pos2(63.0, 57.0), roam: 0.0, lying: true,
-                route: &[pos2(72.0, 80.0), pos2(52.0, 72.0)] },
+    RoomStyle { status: "idle", title: "EN ESPERA", background: "room_idle", color: Color32::from_rgb(152, 152, 157), bubble: None, spot: pos2(88.0, 40.0), roam: 0.0, lying: false,
+                route: &[pos2(72.0, 80.0), pos2(98.0, 74.0), pos2(98.0, 42.0)] },
     RoomStyle { status: "done", title: "LISTO", background: "room_done", color: Color32::from_rgb(48, 209, 88), bubble: None, spot: pos2(72.0, 66.0), roam: 0.0, lying: false, route: &[] },
     RoomStyle { status: "unknown", title: "SIN ESTADO", background: "room_unknown", color: Color32::from_rgb(152, 152, 157), bubble: Some("…"), spot: pos2(72.0, 62.0), roam: 24.0, lying: false, route: &[] },
 ];
@@ -166,6 +167,13 @@ fn draw_summon_room(painter: &Painter, rect: Rect, active: bool, hovered: bool) 
     let ink = if lit { Color32::from_gray(230) } else { Color32::from_gray(140) };
     painter.text(frame.center() - vec2(0.0, 14.0), Align2::CENTER_CENTER, "+", FontId::monospace(56.0), ink);
     painter.text(frame.center() + vec2(0.0, 34.0), Align2::CENTER_CENTER, tr("Invocar un agente"), FontId::monospace(13.0), ink);
+}
+
+/// The spare room while it holds the summon form: lit, in summoning green.
+fn draw_summon_frame(painter: &Painter, rect: Rect) {
+    let frame = rect.shrink(2.0);
+    painter.rect_filled(frame, CornerRadius::same(6), Color32::from_rgb(23, 20, 28));
+    painter.rect_stroke(frame, CornerRadius::same(6), Stroke::new(2.0_f32, Color32::from_rgb(140, 217, 115)), egui::StrokeKind::Inside);
 }
 
 /// Draw a sprite centred at `center`, optionally mirrored and rotated.
@@ -321,7 +329,7 @@ struct Mini {
 
 const WORKING_GLINTS: [Pos2; 9] = [pos2(52.0, 12.0), pos2(88.0, 20.0), pos2(119.0, 37.0), pos2(129.0, 41.0), pos2(76.0, 46.0), pos2(114.0, 71.0), pos2(26.0, 16.0), pos2(72.0, 8.0), pos2(124.0, 12.0)];
 const COINS: [Pos2; 14] = [pos2(16.0, 41.0), pos2(32.0, 66.0), pos2(46.0, 75.0), pos2(20.0, 81.0), pos2(64.0, 86.0), pos2(86.0, 89.0), pos2(116.0, 83.0), pos2(126.0, 41.0), pos2(127.0, 75.0), pos2(107.0, 46.0), pos2(26.0, 32.0), pos2(72.0, 8.0), pos2(20.0, 8.0), pos2(124.0, 8.0)];
-const CAGE_GLINTS: [Pos2; 6] = [pos2(60.0, 44.0), pos2(85.0, 50.0), pos2(58.0, 70.0), pos2(87.0, 68.0), pos2(72.0, 12.0), pos2(72.0, 30.0)];
+const COT_GLINTS: [Pos2; 6] = [pos2(58.0, 47.0), pos2(70.0, 45.0), pos2(84.0, 47.0), pos2(90.0, 51.0), pos2(64.0, 43.0), pos2(78.0, 43.0)];
 const RUIN_GLINTS: [Pos2; 5] = [pos2(21.0, 9.0), pos2(124.0, 9.0), pos2(112.0, 79.0), pos2(70.0, 28.0), pos2(14.0, 34.0)];
 
 /// One agent living in a room that reflects its state. Positions inside
@@ -485,15 +493,15 @@ impl Room {
         let mut steps = vec![];
         let old = self.style;
         for p in old.route.iter().rev() {
-            if !old.lying || p.y > 71.0 { steps.push(walk(&mut walker, *p, 44.0)); }
+            if !old.lying || p.y > 71.0 { steps.push(walk(&mut walker, *p, TRANSITION_SPEED)); }
         }
-        steps.push(walk(&mut walker, DOOR, 44.0));
-        steps.push(walk(&mut walker, OUTSIDE, 44.0));
+        steps.push(walk(&mut walker, DOOR, TRANSITION_SPEED));
+        steps.push(walk(&mut walker, OUTSIDE, TRANSITION_SPEED));
         steps.push(Step { kind: StepKind::Swap, dur: 0.0 });
         walker = OUTSIDE;
-        steps.push(walk(&mut walker, DOOR, 44.0));
-        for p in next.route { steps.push(walk(&mut walker, *p, 44.0)); }
-        if !next.lying { steps.push(walk(&mut walker, next.spot, 44.0)); }
+        steps.push(walk(&mut walker, DOOR, TRANSITION_SPEED));
+        for p in next.route { steps.push(walk(&mut walker, *p, TRANSITION_SPEED)); }
+        if !next.lying { steps.push(walk(&mut walker, next.spot, TRANSITION_SPEED)); }
         steps.push(Step { kind: StepKind::Place, dur: 0.0 });
         steps.push(Step { kind: StepKind::Wait, dur: 1.0 });
         self.pending_style = Some(next);
@@ -530,9 +538,9 @@ impl Room {
         match self.style.status {
             "working" => { let from = self.style.spot; self.start_working(from); }
             "blocked" => self.start_blocked(),
-            "limited" => self.start_limited(),
+            "limited" => self.start_recovering(),
             "done" => self.start_done(),
-            "idle" => self.start_sleeping(),
+            "idle" => self.start_reading(),
             _ => self.start_wandering(),
         }
     }
@@ -609,28 +617,20 @@ impl Room {
         self.emit(EmitterKind::Brazier, 0.25, 0.15);
     }
 
-    /// Usage limit: a cage drops from the ceiling on its chain and traps the
-    /// hero, who looks around and now and then rattles the bars; violet
-    /// light pulses over the sealed room and a countdown says when it resets.
-    fn start_limited(&mut self) {
-        self.pose = Pose::Idle(0.5);
-        self.light(pos2(33.0, 33.0), 12.0, LIMITED, 0.12, 0.3, None);
-        self.light(pos2(109.0, 33.0), 12.0, LIMITED, 0.12, 0.3, None);
-        self.light(self.style.spot, 26.0, LIMITED, 0.06, 0.2, Some(2.4));
+    /// The usage limit: the hero rests on a cot in the infirmary until it
+    /// resets, sleeping it off (the blanket breathes, z's drift up), under
+    /// the braziers' warm light, with healing sparkles over the cot and the
+    /// time left to recover on a tag at its foot.
+    fn start_recovering(&mut self) {
+        self.pose = Pose::Still;
+        self.shuffle_period = self.rng.range(9.0, 13.0);
+        self.shuffle_at = self.shuffle_period;
+        self.light(pos2(33.0, 33.0), 12.0, ORANGE, 0.12, 0.3, None);
+        self.light(pos2(109.0, 33.0), 12.0, ORANGE, 0.12, 0.3, None);
+        self.light(pos2(72.0, 58.0), 26.0, Color32::WHITE, 0.04, 0.12, Some(3.6));
         self.emit(EmitterKind::Brazier, 0.3, 0.15);
-        self.emit(EmitterKind::Glints(&CAGE_GLINTS, PINK, 8.0), 0.7, 0.3);
-    }
-
-    /// The trapped hero's motion: the cage's drop (points above its rest,
-    /// only in the first moments), and the rattle (a sideways shake).
-    fn limited_motion(&self) -> (f32, f32, bool) {
-        let rt = self.routine_clock;
-        let drop = if rt < 0.45 { -110.0 * (1.0 - (rt / 0.45).powi(2)) } else { 0.0 };
-        let bounce = if (0.45..0.6).contains(&rt) { -3.0 * (std::f32::consts::PI * (rt - 0.45) / 0.15).sin() } else { 0.0 };
-        let p = (rt - 0.6).max(0.0) % 3.4;
-        let rattling = rt > 0.6 && p > 2.5;
-        let shake = if rattling { 1.6 * (p * 70.0).sin() } else { 0.0 };
-        (drop + bounce, shake, rattling)
+        self.emit(EmitterKind::Zs, 1.4, 0.0);
+        self.emit(EmitterKind::Glints(&COT_GLINTS, MINT, 8.0), 0.8, 0.3);
     }
 
     /// Done: the hero jumps for joy in the middle of the treasure room,
@@ -670,14 +670,11 @@ impl Room {
         self.emit(EmitterKind::Glints(&RUIN_GLINTS, CYAN, 9.0), 0.5, 0.3);
     }
 
-    /// Sleeping in the inn: the blanket rises and falls with each breath,
-    /// pixel z's drift up from the pillow, the sleeper turns over now and
-    /// then, and the fireplace throws a flickering warm light with embers.
-    fn start_sleeping(&mut self) {
-        self.pose = Pose::Still;
-        self.shuffle_period = self.rng.range(9.0, 13.0);
-        self.shuffle_at = self.shuffle_period;
-        self.emit(EmitterKind::Zs, 1.2, 0.0);
+    /// Waiting in its chamber: the hero reads a book by the fireplace,
+    /// turning a page now and then, while the fire throws a flickering warm
+    /// light with embers.
+    fn start_reading(&mut self) {
+        self.pose = Pose::Idle(0.9);
         self.emit(EmitterKind::Embers, 0.25, 0.2);
     }
 
@@ -765,13 +762,6 @@ impl Room {
             }
         }
         self.pose_from_runner();
-        if self.style.status == "limited" && !self.in_transition {
-            let (_, _, rattling) = self.limited_motion();
-            if rattling { self.set_pose(Pose::Work(0.08)); } else {
-                self.set_pose(Pose::Idle(0.5));
-                self.facing = if ((self.routine_clock / 1.7) as i32) % 2 == 0 { 1.0 } else { -1.0 };
-            }
-        }
         self.update_fx(dt);
     }
 
@@ -834,12 +824,18 @@ impl Room {
                     let p = rt % 0.36;
                     pos.y += if p < 0.16 { -12.0 * (p / 0.16) } else if p < 0.30 { -12.0 * (1.0 - (p - 0.16) / 0.14) } else { 0.0 };
                 }
-                "limited" => pos.x += self.limited_motion().1,
                 "done" => {
                     let p = rt % 2.21;
                     let hop = |q: f32| if q < 0.18 { -14.0 * (q / 0.18) } else if q < 0.34 { -14.0 * (1.0 - (q - 0.18) / 0.16) } else { 0.0 };
                     let small = |q: f32| if q < 0.1 { -6.0 * (q / 0.1) } else if q < 0.2 { -6.0 * (1.0 - (q - 0.1) / 0.1) } else { 0.0 };
                     pos.y += if p < 0.42 { hop(p) } else if p < 0.84 { hop(p - 0.42) } else if p < 1.14 { small(p - 0.84) } else if p < 1.44 { small(p - 1.14) } else if p < 1.86 { hop(p - 1.44) } else { 0.0 };
+                }
+                "idle" if self.runner.is_none() => {
+                    // A page turns every few seconds; the hero nods with it.
+                    let p = rt % 4.2;
+                    let turning = p > 3.9;
+                    if turning { pos.y -= 1.0; }
+                    book = Some((if turning { "book_open_flipped" } else { "book_open" }, vec2(18.0, 12.0), pos2(0.0, 5.0)));
                 }
                 _ => {}
             }
@@ -1033,7 +1029,7 @@ impl Room {
         painter.rect_filled(cell, CornerRadius::same(6), Color32::from_rgb(18, 15, 23));
         let clipped = painter.with_clip_rect(f);
         // Backdrop, fading in after a room change.
-        let fade = self.swap_at.map(|s| ((self.clock - s) / 0.35).clamp(0.0, 1.0)).unwrap_or(1.0);
+        let fade = self.swap_at.map(|s| ((self.clock - s) / (0.35 / 1.5)).clamp(0.0, 1.0)).unwrap_or(1.0);
         let tint = with_alpha(Color32::WHITE, fade);
         if let Some(room) = assets.room(style.background) {
             clipped.image(room.tex, f, room.uv, tint);
@@ -1053,10 +1049,6 @@ impl Room {
             let wash = if q < 0.35 { lerp(0.02, 0.16, q / 0.35) } else { lerp(0.16, 0.02, (q - 0.35) / 0.45) };
             clipped.rect_filled(f, CornerRadius::ZERO, with_alpha(RED, wash));
         }
-        if style.status == "limited" && !self.in_transition {
-            let q = (std::f32::consts::TAU * t / 2.4).sin() * 0.5 + 0.5;
-            clipped.rect_filled(f, CornerRadius::ZERO, with_alpha(LIMITED, 0.03 + 0.07 * q));
-        }
         // Subagents behind the desk.
         let (hero_pos, _, book) = self.hero_view();
         let mini_tint = Color32::from_rgb(178, 178, 178);
@@ -1072,8 +1064,21 @@ impl Room {
             let sleeper = assets.sleeper(self.harness);
             draw_sprite(&clipped, sleeper, hero_at, sleeper.px * 2.0, false, -(std::f32::consts::FRAC_PI_2 + wobble), Color32::WHITE);
         } else {
+            // In the chamber the hero reads in an armchair by the fire: the
+            // chair's back stands behind it, its arms and seat go over its
+            // legs once it has sat down.
+            let seat = at(Room::rp(style.spot));
+            let seated = style.status == "idle" && !self.in_transition && self.runner.is_none();
+            if style.status == "idle" {
+                let back = assets.prop("chair_back");
+                draw_sprite(&clipped, back, pos2(seat.x, seat.y - 10.0), back.px * 2.0, false, 0.0, Color32::WHITE);
+            }
             let sprite = assets.hero_frame(self.harness, kind, index);
             draw_sprite(&clipped, sprite, hero_at, vec2(HERO, HERO), self.facing < 0.0, 0.0, Color32::WHITE);
+            if seated {
+                let front = assets.prop("chair_front");
+                draw_sprite(&clipped, front, pos2(seat.x, seat.y + 8.0), front.px * 2.0, false, 0.0, Color32::WHITE);
+            }
             if let Some((name, size, offset)) = book {
                 let prop = assets.prop(name);
                 draw_sprite(&clipped, prop, pos2(hero_at.x + offset.x, hero_at.y + offset.y), size, false, 0.0, Color32::WHITE);
@@ -1087,7 +1092,6 @@ impl Room {
                         let angle = if r < 0.12 { lerp(0.0, 0.12, r / 0.12) } else if r < 0.36 { lerp(0.12, -0.12, (r - 0.12) / 0.24) } else { lerp(-0.12, 0.0, (r - 0.36) / 0.12) };
                         draw_sprite(&clipped, assets.prop("alert"), pos2(hero_at.x, hero_at.y - HERO / 2.0 - 16.0), vec2(13.5 * scale, 25.5 * scale), false, -angle, Color32::WHITE);
                     }
-                    "limited" => self.draw_cage(&clipped, painter, origin, f, assets),
                     "done" => {
                         let arm = assets.arm(self.harness);
                         let r = t % 0.36;
@@ -1113,6 +1117,7 @@ impl Room {
                 draw_sprite(&clipped, blanket, at(pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)), size, false, 0.0, Color32::WHITE);
             }
         }
+        if style.status == "limited" && !self.in_transition { self.draw_recovery(&clipped, painter, origin, assets); }
         // The room's front layer (the desk), over the hero.
         if let Some(front) = assets.room(&format!("{}_front", style.background)) {
             clipped.image(front.tex, f, front.uv, tint);
@@ -1120,15 +1125,15 @@ impl Room {
         if self.party_visible {
             for mini in self.party.iter().filter(|m| m.front) { self.draw_mini(&clipped, mini, origin, assets, mini_tint); }
         }
-        // Night in the inn: only the fireplace lights the room.
-        if style.lying && !self.in_transition {
+        // Night in the chamber: only the fireplace lights the room.
+        if style.status == "idle" && !self.in_transition {
             let hearth = at(Room::rp(pos2(70.0, 22.0)));
             let reach = f.width() * 2.0;
             let e = t % 4.0;
             let s = if e < 1.8 { lerp(0.97, 1.05, e / 1.8) } else { lerp(1.05, 0.97, (e - 1.8) / 2.2) };
             draw_sprite(&clipped, assets.prop("darkness"), hearth, vec2(reach * s, reach * s), false, 0.0, Color32::WHITE);
             let fire = 0.15 + 0.05 * (t * 2.3 + self.rng.0 as f32 % 7.0).sin() * (t * 0.7).cos();
-            draw_sprite(&clipped, glow, pos2(hearth.x, hearth.y + 6.0), vec2(90.0, 70.0), false, 0.0, with_alpha(Color32::from_rgb(255, 140, 51), fire));
+            draw_sprite(&clipped, glow, pos2(hearth.x + 6.0, hearth.y + 8.0), vec2(120.0, 84.0), false, 0.0, with_alpha(Color32::from_rgb(255, 140, 51), fire));
         }
         // Speech bubble, bobbing over the hero's head.
         let bubble_text = if let Some(runner) = &self.runner {
@@ -1172,31 +1177,15 @@ impl Room {
         }
     }
 
-    /// The cage around the trapped hero, its chain up to the ceiling, and
-    /// under it the countdown to the reset (once the cage has landed).
-    fn draw_cage(&self, clipped: &Painter, painter: &Painter, origin: Pos2, f: Rect, assets: &Assets) {
-        let (drop, shake, _) = self.limited_motion();
-        let rest = pos2(origin.x + self.hero.x + shake, origin.y + self.hero.y - 2.0);
-        let center = pos2(rest.x, rest.y + drop);
-        let size = vec2(42.0, 48.0);
-        let top = center.y - size.y / 2.0;
-        // The chain: links alternating long and short, from the ceiling to the cage's ring.
-        let mut y = top + 1.0;
-        let mut long = true;
-        while y > f.min.y - 6.0 {
-            let link = if long { Rect::from_min_max(pos2(center.x - 1.0, y - 6.0), pos2(center.x + 1.0, y)) } else { Rect::from_min_max(pos2(center.x - 2.0, y - 4.0), pos2(center.x + 2.0, y)) };
-            clipped.rect_filled(link.expand(1.0), CornerRadius::ZERO, Color32::from_rgb(24, 20, 37));
-            clipped.rect_filled(link, CornerRadius::ZERO, IRON);
-            y -= if long { 6.0 } else { 4.0 };
-            long = !long;
-        }
-        draw_sprite(clipped, assets.prop("cage"), center, size, false, 0.0, Color32::WHITE);
-        if drop < 0.0 { return; }
+    /// The tag at the cot's foot: how long until the hero has recovered
+    /// (the usage limit resets).
+    fn draw_recovery(&self, clipped: &Painter, painter: &Painter, origin: Pos2, assets: &Assets) {
         let text = self.limit_resets.map(|r| countdown(r - crate::herdr::unix_now())).unwrap_or_else(|| "--:--".into());
         let ink = blend(LIMITED, Color32::WHITE, 0.55);
         let galley = painter.layout_no_wrap(text, FontId::monospace(12.0), ink);
         let width = galley.size().x + 18.0;
-        let pill = Rect::from_center_size(pos2(rest.x - shake, rest.y + size.y / 2.0 + 12.0), vec2(width + 8.0, galley.size().y + 4.0));
+        let foot = Room::rp(pos2(72.0, 73.0));
+        let pill = Rect::from_center_size(pos2(origin.x + foot.x, origin.y + foot.y), vec2(width + 8.0, galley.size().y + 4.0));
         clipped.rect_filled(pill, CornerRadius::same(3), Color32::from_black_alpha(200));
         clipped.rect_stroke(pill, CornerRadius::same(3), Stroke::new(1.0_f32, with_alpha(LIMITED, 0.8)), egui::StrokeKind::Inside);
         draw_sprite(clipped, assets.prop("hourglass"), pos2(pill.min.x + 10.0, pill.center().y), vec2(10.0, 10.0), false, 0.0, Color32::WHITE);
@@ -1262,6 +1251,10 @@ fn sparkle(rng: &mut Rng, at: Pos2, color: Color32, size: f32, jitter: f32) -> P
 }
 
 /// A walk from where the routine left the hero to a room-art pixel.
+/// How fast the hero walks out and back in when its room changes, in art
+/// pixels per second.
+const TRANSITION_SPEED: f32 = 66.0;
+
 fn walk(walker: &mut Pos2, to: Pos2, speed: f32) -> Step {
     let from = *walker;
     *walker = to;
@@ -1310,8 +1303,13 @@ fn cover_corners(painter: &Painter, rect: Rect, radius: f32, color: Color32) {
 pub struct SceneResponse {
     pub clicked: Option<String>,
     pub finish: Option<String>,
+    /// A terminal in this agent's folder was asked for from its room's menu.
+    pub terminal: Option<String>,
     /// The spare "+" room was clicked.
     pub summon: bool,
+    /// While summoning in the spare room: its rect, for the form drawn in
+    /// it, and the part of the scene in view.
+    pub summon_rect: Option<(Rect, Rect)>,
 }
 
 enum ScrollRequest {
@@ -1330,8 +1328,9 @@ pub struct Scene {
     pub empty_text: String,
     /// A spare room after the last one, with a "+" to summon an agent.
     pub summon_tile: bool,
-    /// The summon panel is open: the spare room is drawn as selected.
+    /// The summon panel is open: the spare room holds its form.
     pub summoning: bool,
+    summon_shown: bool,
     seeds: u32,
     clock: f32,
     last_time: Option<f64>,
@@ -1349,6 +1348,7 @@ impl Scene {
             empty_text: tr("Sin agentes en la sesión"),
             summon_tile: false,
             summoning: false,
+            summon_shown: false,
             seeds: 7,
             clock: 0.0,
             last_time: None,
@@ -1399,7 +1399,7 @@ impl Scene {
         let dt = match self.last_time { Some(last) if !self.reduced_motion => ((now - last) as f32).clamp(0.0, 0.1), _ => 0.0 };
         self.last_time = Some(now);
         self.clock += dt;
-        let mut response = SceneResponse { clicked: None, finish: None, summon: false };
+        let mut response = SceneResponse { clicked: None, finish: None, terminal: None, summon: false, summon_rect: None };
         let width = ui.available_width();
         let columns = columns_fitting(width);
         let gap = GAP.max((width - columns as f32 * ROW_W) / (columns + 1) as f32);
@@ -1446,6 +1446,10 @@ impl Scene {
                     room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
                     if hit.clicked() { response.clicked = Some(id.clone()); }
                     hit.context_menu(|ui| {
+                        if ui.button(tr("Abrir una terminal en esta carpeta")).clicked() {
+                            response.terminal = Some(id.clone());
+                            ui.close_menu();
+                        }
                         if ui.button(tr("Finalizar agente (/exit)")).clicked() {
                             response.finish = Some(id.clone());
                             ui.close_menu();
@@ -1456,9 +1460,17 @@ impl Scene {
                     let index = order.len();
                     let at = pos2(gap + (index % columns) as f32 * (ROW_W + gap), TOP_PAD + (index / columns) as f32 * (ROW_H + GAP));
                     let rect = Rect::from_min_size(content.min + at.to_vec2(), vec2(ROW_W, ROW_H));
-                    let hit = ui.interact(rect, ui.id().with("summon-room"), egui::Sense::click());
-                    draw_summon_room(ui.painter(), rect, self.summoning, hit.hovered());
-                    if hit.clicked() { response.summon = true; }
+                    if self.summoning {
+                        // The room holds the summon form, drawn over it by the app.
+                        draw_summon_frame(ui.painter(), rect);
+                        response.summon_rect = Some((rect, ui.clip_rect()));
+                        if !self.summon_shown { ui.scroll_to_rect(rect.expand(4.0), None); }
+                    } else {
+                        let hit = ui.interact(rect, ui.id().with("summon-room"), egui::Sense::click());
+                        draw_summon_room(ui.painter(), rect, false, hit.hovered());
+                        if hit.clicked() { response.summon = true; }
+                    }
+                    self.summon_shown = self.summoning;
                 }
             });
         // Rooms hidden under the fold: a small badge, which scrolls to them.

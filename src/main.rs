@@ -17,6 +17,7 @@ mod selftest;
 mod standalone;
 mod tray;
 mod ui;
+mod usage;
 
 use alerts::{wants_sound, Notifier, Sounds};
 use assets::Assets;
@@ -201,6 +202,10 @@ struct App {
     leaving_fullscreen: bool,
     /// Entering full screen: the toggle itself waits for this moment.
     enter_fullscreen_at: Option<Instant>,
+    /// Full screen's HP viewer: each harness's plan left, re-read now and then.
+    usages: Vec<usage::HarnessUsage>,
+    usage_rx: Option<std::sync::mpsc::Receiver<Vec<usage::HarnessUsage>>>,
+    next_usage: f64,
 }
 
 /// The console's narrowest width in full screen; the rooms get whole
@@ -262,10 +267,15 @@ impl App {
             widget_rect: None,
             leaving_fullscreen: false,
             enter_fullscreen_at: None,
+            usages: vec![],
+            usage_rx: None,
+            next_usage: 0.0,
         };
         ui::set_text_scale(app.prefs.text_scale);
         ui::set_console_scale(app.prefs.console_scale);
         app.monitor.refresh();
+        // HPD_TEST_COMPOSE: the summon form already open (for captures).
+        if std::env::var_os("HPD_TEST_COMPOSE").is_some() { app.monitor.set_composing(true); }
         app
     }
 
@@ -614,6 +624,14 @@ impl App {
         self.installing = Some(rx);
     }
 
+    /// A terminal to type a command in: in that agent's folder, or in the
+    /// open chat's, else where agents were last summoned, else home.
+    fn open_terminal_for(&self, id: Option<&str>) {
+        let id = id.map(str::to_string).or_else(|| self.chat.as_ref().map(|c| c.agent_id.clone()));
+        let cwd = id.and_then(|id| self.monitor.agents.iter().find(|a| a.id == id).map(|a| a.cwd.clone())).unwrap_or_else(|| self.prefs.create_folder.clone());
+        crate::herdr::open_terminal(&cwd);
+    }
+
     /// Ask before typing /exit into an agent's chat.
     fn confirm_finish(&mut self, id: &str) {
         let Some(agent) = self.monitor.agents.iter().find(|a| a.id == id).cloned() else { return };
@@ -740,6 +758,15 @@ impl eframe::App for App {
         let shows_hud = self.monitor.shows_hud();
 
         let fullscreen = self.fullscreen;
+        // The HP viewer's data, every 30 s while in full screen.
+        if fullscreen && now >= self.next_usage && self.usage_rx.is_none() {
+            self.usage_rx = Some(usage::fetch(herdr::home_dir(), self.prefs.kiro_plan, self.prefs.claude_usage_live));
+            self.next_usage = now + 30.0;
+        }
+        if let Some(rx) = &self.usage_rx {
+            if let Ok(found) = rx.try_recv() { self.usages = found; self.usage_rx = None; }
+        }
+        let usage_h = if fullscreen { ui::usage_height(ctx, &self.usages) } else { 0.0 };
         egui::CentralPanel::default().frame(Frame::NONE).show(ctx, |ui| {
             let full = ui.max_rect();
             // The widget has rounded corners; full screen has the screen's.
@@ -751,8 +778,8 @@ impl eframe::App for App {
             // rooms take one column on the left and the console all the rest.
             let (scene_rect, hud_rect, panel_rect) = if fullscreen {
                 let split = full.min.x + scene::width_for(1);
-                let scene_rect = Rect::from_min_max(full.min, egui::pos2(split, full.max.y - hud_h));
-                let hud_rect = Rect::from_min_max(egui::pos2(full.min.x, scene_rect.max.y), egui::pos2(split, full.max.y));
+                let scene_rect = Rect::from_min_max(full.min, egui::pos2(split, full.max.y - hud_h - usage_h));
+                let hud_rect = Rect::from_min_max(egui::pos2(full.min.x, full.max.y - hud_h), egui::pos2(split, full.max.y));
                 (scene_rect, hud_rect, Rect::from_min_max(egui::pos2(split, full.min.y), full.max))
             } else {
                 let panel_h = if panel_open { PANEL_HEIGHT } else { 0.0 };
@@ -776,7 +803,27 @@ impl eframe::App for App {
                 self.monitor.select(next);
             }
             if let Some(id) = response.finish { self.confirm_finish(&id); }
+            if let Some(id) = response.terminal { self.open_terminal_for(Some(&id)); }
             if response.summon { let on = !self.monitor.composing; self.monitor.set_composing(on); }
+            // Full screen summons in the spare room itself.
+            if let (Some((rect, view)), true) = (response.summon_rect, fullscreen && self.monitor.composing) {
+                let inner = rect.shrink(12.0);
+                let action = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                    ui.set_clip_rect(view.intersect(scene_rect));
+                    ui::summon_form(ui, &self.monitor, &self.assets, &mut self.prefs, &mut self.compose, now)
+                }).inner;
+                if action.close { self.monitor.set_composing(false); }
+            }
+            // Full screen: the HP viewer between the rooms and the HUD.
+            if usage_h > 0.0 {
+                let rect = Rect::from_min_max(egui::pos2(scene_rect.min.x, scene_rect.max.y), egui::pos2(scene_rect.max.x, scene_rect.max.y + usage_h));
+                ui.painter().rect_filled(rect, CornerRadius::ZERO, ui::HUD_FILL);
+                ui.painter().hline(rect.x_range(), rect.min.y, egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 20)));
+                let inner = Rect::from_min_max(egui::pos2(rect.min.x + 10.0, rect.min.y), egui::pos2(rect.max.x - 10.0, rect.max.y));
+                let picked = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| { ui.set_clip_rect(rect); ui::usage_panel(ui, &self.assets, &self.usages, now, self.prefs.claude_usage_live) }).inner;
+                if let Some(plan) = picked.kiro_plan { self.prefs.kiro_plan = plan; self.prefs.save(); self.next_usage = 0.0; }
+                if let Some(live) = picked.claude_live { self.prefs.claude_usage_live = live; self.prefs.save(); self.next_usage = 0.0; }
+            }
             // The HUD.
             if shows_hud {
                 let bottom = if panel_open || fullscreen { 0 } else { 14 };
@@ -805,7 +852,7 @@ impl eframe::App for App {
                 };
                 ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
                     ui.set_clip_rect(panel_rect);
-                    if self.monitor.composing {
+                    if self.monitor.composing && !fullscreen {
                         let action = ui::compose_panel(ui, &self.monitor, &mut self.prefs, &mut self.compose);
                         if action.close { self.monitor.set_composing(false); }
                     } else if let Some(chat) = &mut self.chat {
