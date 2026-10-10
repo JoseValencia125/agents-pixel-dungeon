@@ -39,6 +39,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   off the prompt line, and the box under the console is no longer cut off.
 - ↑/↓ move through the "/" command menu again.
 - In full screen, the typed text sits on the same line as the prompt's ❯.
+- Kiro's `/model` picker, whose options have no numbers, is driven from the
+  chat: ↑/↓, ⏎ and esc go to it instead of the box covering its highlight.
 
 ### Privacy
 - Claude's HP comes from the last `/usage` Claude Code cached, and no

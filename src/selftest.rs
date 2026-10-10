@@ -118,6 +118,10 @@ pub fn run() {
     let rule = "──────────────────────────────────────────";
     let quoted = crate::ansi::parse(&format!("  assert!(x, \"Esc to cancel\");\n● done\n\n{rule}\n❯\u{a0}\n{rule}"));
     assert_eq!((crate::ui::prompt_line(&quoted), crate::ui::picker_open(&quoted)), (Some(4), false), "Text quoting a picker's footer was taken for a picker");
+    let kiro = crate::ansi::parse(&format!("› /model\nSelect model:   type to search\n\n❯ auto                 1.00x credits    Models chosen by task [active]\n  claude-opus-5.5      2.00x credits    Claude Opus 5.5\n(+13 more)\n{rule}\n Settings for selected model: auto      tab to switch panels\n{rule}\n esc to close · ↑↓ to navigate · ↵ to select · tab to switch panels"));
+    assert_eq!((crate::ui::prompt_line(&kiro), crate::ui::picker_open(&kiro)), (None, true), "Kiro's /model picker was taken for a prompt");
+    let typed = crate::ansi::parse(&format!("● done\n{rule}\n❯ fix the tests\n{rule}\n  ? for shortcuts"));
+    assert_eq!((crate::ui::prompt_line(&typed), crate::ui::picker_open(&typed)), (Some(2), false), "A prompt with typed text was taken for a picker");
     let narrow = crate::ansi::parse(&format!("  ❯ 3.  Fable 5.1 ✔          For your \n                             toughest \n\n  Enter to set as default · s to use\n  this session only · Esc to cancel\n\n{rule}\n❯\u{a0}\n{rule}"));
     assert_eq!((crate::ui::prompt_line(&narrow), crate::ui::picker_open(&narrow)), (None, true), "An empty prompt under a picker hid the picker");
     let texts = |s: &[Vec<crate::ansi::Span>]| s.iter().map(|l| l.iter().map(|x| x.text.as_str()).collect::<String>()).collect::<Vec<_>>();

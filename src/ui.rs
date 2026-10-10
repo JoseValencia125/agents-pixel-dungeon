@@ -683,7 +683,13 @@ fn marked(line: &[Span]) -> Option<(bool, bool)> {
 /// when one is open just above it (a highlighted option, or its footer).
 fn last_marked_line(screen: &[Vec<Span>]) -> Option<(usize, bool)> {
     let (index, option, bare) = screen.iter().enumerate().rev().find_map(|(i, l)| marked(l).map(|(o, b)| (i, o, b)))?;
-    if option || !bare { return Some((index, option)); }
+    if option { return Some((index, true)); }
+    // An option without a number ("❯ auto", Kiro's /model) has the
+    // picker's footer below it; typed text on a prompt does not.
+    if !bare {
+        let footer = screen[index + 1..].iter().any(|l| crate::herdr::is_menu_footer(l.iter().map(|s| s.text.as_str()).collect::<String>().trim()));
+        return Some((index, footer));
+    }
     // The nearest line with text above the prompt's box (past its top rule
     // and blank lines) is the picker's footer or one of its options.
     let nearest = screen[..index].iter().rev().map(|l| l.iter().map(|s| s.text.as_str()).collect::<String>()).find(|t| {

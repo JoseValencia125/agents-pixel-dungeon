@@ -1145,9 +1145,10 @@ pub struct MenuOption {
     pub line: usize,
 }
 
-/// The hint under a menu driven by arrow keys ("Enter to confirm · Esc to cancel").
+/// The hint under a menu driven by arrow keys ("Enter to confirm · Esc to
+/// cancel"; Kiro's "↑↓ to navigate · ↵ to select").
 pub fn is_menu_footer(trimmed: &str) -> bool {
-    ["Enter to confirm", "Enter to select", "Esc to cancel", "Enter to continue"].iter().any(|s| trimmed.contains(s))
+    ["Enter to confirm", "Enter to select", "Esc to cancel", "Enter to continue", "↑↓ to navigate", "↵ to select"].iter().any(|s| trimmed.contains(s))
 }
 
 impl MenuOptions {
