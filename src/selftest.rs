@@ -105,6 +105,14 @@ pub fn run() {
     assert_eq!(meaningful_lines(" Do you want to proceed?\n❯ 1. Yes\n  2. No\n❯ hola").len(), 3, "Permission options were dropped");
     let prompt = crate::ansi::parse("❯ /model\n● listo\n────────\n❯ hola\n────────");
     assert_eq!((crate::ui::prompt_line(&prompt), crate::ui::picker_open(&prompt)), (Some(3), false), "Prompt line not found");
+    // Kiro asking for a tool mid-conversation: its highlighted option has a ❯.
+    for footer in ["esc to close · Enter to see more options", "esc to close · ↑↓ to navigate · ↵ to select · Tab to edit"] {
+        let kiro = format!("• Read /Users/me/build_table.py\n  esc to cancel\n shell requires approval\n ❯ Yes, single permission\n   No (Tab to edit)\n {footer}");
+        let lines = meaningful_lines(&kiro);
+        let menu = crate::herdr::MenuOptions::new(&lines);
+        assert_eq!(menu.options.iter().map(|o| o.text.as_str()).collect::<Vec<_>>(), vec!["Yes, single permission", "No (Tab to edit)"], "Kiro's approval options not read: {lines:?}");
+        assert_eq!((menu.highlighted, menu.is_menu()), (Some(0), true));
+    }
     let picker = crate::ansi::parse("❯ /model\n  Select model\n    1. Default (recommended)\n  ❯ 2. Opus 5.5 ✔\n    3. Fable 5.1\n  Enter to set as default");
     assert_eq!((crate::ui::prompt_line(&picker), crate::ui::picker_open(&picker)), (None, true), "A picker's highlight was taken for the prompt");
     // Claude Code's trust dialog: unnumbered options under a menu footer.
@@ -122,6 +130,10 @@ pub fn run() {
     assert_eq!((crate::ui::prompt_line(&kiro), crate::ui::picker_open(&kiro)), (None, true), "Kiro's /model picker was taken for a prompt");
     let typed = crate::ansi::parse(&format!("● done\n{rule}\n❯ fix the tests\n{rule}\n  ? for shortcuts"));
     assert_eq!((crate::ui::prompt_line(&typed), crate::ui::picker_open(&typed)), (Some(2), false), "A prompt with typed text was taken for a picker");
+    let empty = crate::ansi::parse(&format!("● Interrupted\n{rule}\n❯ \x1b[2mTry \"fix the tests\"\x1b[0m\n{rule}"));
+    assert_eq!((crate::ui::composer_text(&empty), crate::ui::erase_count(&empty, "fix it")), (None, 0), "The input's placeholder was taken for typed text");
+    let back = crate::ansi::parse(&format!("● Interrupted\n{rule}\n❯ fix the failing tests in src\n{rule}"));
+    assert_eq!(crate::ui::erase_count(&back, "fix the failing tests in src and the docs"), 41, "The message put back in the input was not erased whole");
     let narrow = crate::ansi::parse(&format!("  ❯ 3.  Fable 5.1 ✔          For your \n                             toughest \n\n  Enter to set as default · s to use\n  this session only · Esc to cancel\n\n{rule}\n❯\u{a0}\n{rule}"));
     assert_eq!((crate::ui::prompt_line(&narrow), crate::ui::picker_open(&narrow)), (None, true), "An empty prompt under a picker hid the picker");
     let texts = |s: &[Vec<crate::ansi::Span>]| s.iter().map(|l| l.iter().map(|x| x.text.as_str()).collect::<String>()).collect::<Vec<_>>();

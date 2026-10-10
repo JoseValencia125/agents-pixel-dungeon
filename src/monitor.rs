@@ -512,12 +512,26 @@ impl Monitor {
     /// Type a message into the agent's chat and press Enter. Herdr refuses
     /// `agent prompt` while a permission prompt is open, so a blocked agent
     /// gets the raw keystrokes instead (e.g. an answer to its question).
-    pub fn send(&self, text: &str, agent: &Agent) -> Receiver<Option<String>> {
+    /// `erase` backspaces in the agent's input go first: a terminal that put
+    /// an interrupted message back there would otherwise get the edited one
+    /// after it.
+    pub fn send_erasing(&self, erase: usize, text: &str, agent: &Agent) -> Receiver<Option<String>> {
         let message = text.trim().to_string();
         let (tx, rx) = channel();
         if message.is_empty() { let _ = tx.send(None); return rx; }
         let inner = if agent.status == "blocked" {
             self.act(vec![Monitor::args(&["pane", "send-text", &agent.id, &message]), Monitor::args(&["pane", "send-keys", &agent.id, "enter"])])
+        } else if erase > 0 {
+            let mut keys = Monitor::args(&["agent", "send-keys", &agent.id]);
+            keys.extend(std::iter::repeat_n("backspace".to_string(), erase));
+            let erased = self.act(vec![keys]);
+            let (inner_tx, inner_rx) = channel();
+            let (session, demo, target, text) = (self.session.clone(), self.demo, agent.id.clone(), message.clone());
+            std::thread::spawn(move || {
+                let failure = erased.recv().unwrap_or(None);
+                let _ = inner_tx.send(if failure.is_some() || demo { failure } else { prompt_failure(&session, &target, &text) });
+            });
+            inner_rx
         } else {
             self.prompt(&agent.id, &message)
         };

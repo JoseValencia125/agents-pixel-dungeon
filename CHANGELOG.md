@@ -41,6 +41,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In full screen, the typed text sits on the same line as the prompt's ❯.
 - Kiro's `/model` picker, whose options have no numbers, is driven from the
   chat: ↑/↓, ⏎ and esc go to it instead of the box covering its highlight.
+- Kiro asking for a tool's permission mid-conversation shows all its options
+  in the chat, the highlighted one included.
+- Text selected in the console stays selected while ⌘ is held, so ⌘C copies
+  it; ⌘-click still opens links and paths.
+- esc (or Stop) on a working agent puts the message it was working on back in
+  the box, to edit and send again.
 
 ### Privacy
 - Claude's HP comes from the last `/usage` Claude Code cached, and no

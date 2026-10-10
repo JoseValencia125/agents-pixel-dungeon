@@ -89,7 +89,9 @@ fn console_line(ui: &mut Ui, spans: &[Span], size: f32, cwd: &str) {
         let index = galley.cursor_from_pos(pointer - pos).ccursor.index;
         crate::herdr::link_at(galley.text(), index).and_then(|link| crate::herdr::resolve_link(&link, cwd))
     });
-    ui.painter().galley(pos, galley, Color32::from_gray(222));
+    // Painted as a selectable label too: a label left out of the selection
+    // for a frame drops it, and ⌘ is held to copy what is selected.
+    egui::text_selection::LabelSelectionState::label_text_selection(ui, &response, pos, galley, Color32::from_gray(222), Stroke::NONE);
     if let Some(target) = target {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         if response.clicked() { crate::herdr::reveal_target(&target); }
@@ -283,11 +285,15 @@ pub struct ChatState {
     slash_choice: usize,
     /// The terminal's own width in columns (the widest line read), which sets the console's font.
     cols: usize,
+    /// The last message sent, put back in the box when esc interrupts the
+    /// agent so it can be edited and sent again; `restored` while it is.
+    last_sent: Option<String>,
+    restored: bool,
 }
 
 impl ChatState {
     pub fn new(agent_id: &str) -> ChatState {
-        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0 }
+        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false }
     }
 
     pub fn with_draft(mut self, draft: String) -> ChatState {
@@ -309,6 +315,18 @@ impl ChatState {
     fn run(&mut self, rx: Receiver<Option<String>>) {
         self.sending = Some(rx);
         self.note = None;
+    }
+
+    /// esc to a working agent interrupts it: the message it was working on
+    /// comes back to the box, unless something else is typed there.
+    fn interrupt(&mut self, monitor: &Monitor, agent: &Agent) {
+        self.run(monitor.press(&["esc".into()], agent));
+        if agent.status != "working" || !self.draft.trim().is_empty() { return; }
+        if let Some(text) = self.last_sent.clone() {
+            self.draft = text;
+            self.restored = true;
+            self.focus = true;
+        }
     }
 }
 
@@ -388,7 +406,7 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
     // closes with its x. A picker the agent opened itself takes ↑/↓ too.
     let picker = agent.status != "blocked" && !standalone && picker_open(&state.screen);
     if escape {
-        if standalone { action.close = true; } else if !sending { state.run(monitor.press(&["esc".into()], agent)); }
+        if standalone { action.close = true; } else if !sending { state.interrupt(monitor, agent); }
     }
     if picker && (up || down) && !sending {
         state.run(monitor.press(&[if up { "up".to_string() } else { "down".to_string() }], agent));
@@ -634,7 +652,7 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
             }
         } else if agent.status == "working" {
             if ui.add_enabled(!sending, egui::Button::new(mono(&tr("Detener"), 11.0))).on_hover_text(tr("Interrumpir al agente (esc en su terminal)")).clicked() {
-                state.run(monitor.press(&["esc".into()], agent));
+                state.interrupt(monitor, agent);
             }
         }
     });
@@ -720,8 +738,33 @@ fn submit(state: &mut ChatState, monitor: &Monitor, agent: &Agent, menu: &MenuOp
 fn submit_text(state: &mut ChatState, monitor: &Monitor, agent: &Agent) {
     let text = state.draft.clone();
     if state.sending.is_some() || text.trim().is_empty() { return; }
-    state.run(monitor.send(&text, agent));
+    // A message put back after esc: if the terminal put it back in its own
+    // input too, that goes first, so the edited one does not follow it.
+    let erase = if state.restored { erase_count(&state.screen, state.last_sent.as_deref().unwrap_or("")) } else { 0 };
+    state.run(monitor.send_erasing(erase, &text, agent));
+    if agent.status != "blocked" { state.last_sent = Some(text.trim().to_string()); }
+    state.restored = false;
     state.draft.clear();
+}
+
+/// What is typed in the terminal's input (its prompt line past the marker,
+/// without the dim placeholder), if anything.
+pub(crate) fn composer_text(screen: &[Vec<Span>]) -> Option<String> {
+    let line = &screen[prompt_line(screen)?];
+    let text: String = line.iter().filter(|s| !s.dim).map(|s| s.text.as_str()).collect();
+    let text = text.trim_start();
+    let typed = text.chars().skip(1).collect::<String>().trim().to_string();
+    (!typed.is_empty()).then_some(typed)
+}
+
+/// Backspaces that empty the terminal's input after esc: as many as it
+/// shows, or the whole interrupted message when that is what it shows the
+/// start of (a long one wraps past the line read).
+pub(crate) fn erase_count(screen: &[Vec<Span>], interrupted: &str) -> usize {
+    let Some(typed) = composer_text(screen) else { return 0 };
+    let shown = typed.chars().count();
+    let head: String = interrupted.trim().chars().take(shown.min(20)).collect();
+    if !head.is_empty() && typed.starts_with(&head) { shown.max(interrupted.trim().chars().count()) } else { shown }
 }
 
 /// Answer with an option: a terminal menu gets the arrows that reach it
