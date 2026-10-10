@@ -50,6 +50,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The guild's HP options (Claude's source, Kiro's plan) show when you click
   that hero or its name, and hide with another click; the rows no longer get
   cut off.
+- A room change plays half again as fast: the hero walks out and back in at
+  1.5× speed and the new room fades in sooner.
 
 ### Privacy
 - Claude's HP comes from the last `/usage` Claude Code cached, and no

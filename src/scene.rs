@@ -493,15 +493,15 @@ impl Room {
         let mut steps = vec![];
         let old = self.style;
         for p in old.route.iter().rev() {
-            if !old.lying || p.y > 71.0 { steps.push(walk(&mut walker, *p, 44.0)); }
+            if !old.lying || p.y > 71.0 { steps.push(walk(&mut walker, *p, TRANSITION_SPEED)); }
         }
-        steps.push(walk(&mut walker, DOOR, 44.0));
-        steps.push(walk(&mut walker, OUTSIDE, 44.0));
+        steps.push(walk(&mut walker, DOOR, TRANSITION_SPEED));
+        steps.push(walk(&mut walker, OUTSIDE, TRANSITION_SPEED));
         steps.push(Step { kind: StepKind::Swap, dur: 0.0 });
         walker = OUTSIDE;
-        steps.push(walk(&mut walker, DOOR, 44.0));
-        for p in next.route { steps.push(walk(&mut walker, *p, 44.0)); }
-        if !next.lying { steps.push(walk(&mut walker, next.spot, 44.0)); }
+        steps.push(walk(&mut walker, DOOR, TRANSITION_SPEED));
+        for p in next.route { steps.push(walk(&mut walker, *p, TRANSITION_SPEED)); }
+        if !next.lying { steps.push(walk(&mut walker, next.spot, TRANSITION_SPEED)); }
         steps.push(Step { kind: StepKind::Place, dur: 0.0 });
         steps.push(Step { kind: StepKind::Wait, dur: 1.0 });
         self.pending_style = Some(next);
@@ -1029,7 +1029,7 @@ impl Room {
         painter.rect_filled(cell, CornerRadius::same(6), Color32::from_rgb(18, 15, 23));
         let clipped = painter.with_clip_rect(f);
         // Backdrop, fading in after a room change.
-        let fade = self.swap_at.map(|s| ((self.clock - s) / 0.35).clamp(0.0, 1.0)).unwrap_or(1.0);
+        let fade = self.swap_at.map(|s| ((self.clock - s) / (0.35 / 1.5)).clamp(0.0, 1.0)).unwrap_or(1.0);
         let tint = with_alpha(Color32::WHITE, fade);
         if let Some(room) = assets.room(style.background) {
             clipped.image(room.tex, f, room.uv, tint);
@@ -1251,6 +1251,10 @@ fn sparkle(rng: &mut Rng, at: Pos2, color: Color32, size: f32, jitter: f32) -> P
 }
 
 /// A walk from where the routine left the hero to a room-art pixel.
+/// How fast the hero walks out and back in when its room changes, in art
+/// pixels per second.
+const TRANSITION_SPEED: f32 = 66.0;
+
 fn walk(walker: &mut Pos2, to: Pos2, speed: f32) -> Step {
     let from = *walker;
     *walker = to;
