@@ -7,8 +7,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [2.1.2] - 2026-10-10
 
 ### Changed
-- A room's card shows its repo · branch at the top, and its state at the
-  bottom right under what the agent is doing.
+- A room's card shows its repo at the top; under what the agent is doing,
+  its branch on the left and its state on the right.
 - The state on a room's card changes as soon as the agent's does, while the
   hero is still walking to its new room.
 

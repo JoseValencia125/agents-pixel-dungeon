@@ -345,7 +345,8 @@ pub struct Room {
     name: String,
     color: Color32,
     activity: String,
-    place: String,
+    repo: String,
+    branch: String,
     action: Option<String>,
     subagents: usize,
     subagent_actions: Vec<String>,
@@ -389,7 +390,8 @@ impl Room {
             name: agent.name.clone(),
             color: agent_color(&agent.status),
             activity: String::new(),
-            place: String::new(),
+            repo: String::new(),
+            branch: String::new(),
             action: None,
             subagents: usize::MAX,
             subagent_actions: vec![],
@@ -450,7 +452,8 @@ impl Room {
         self.name = agent.name.clone();
         self.color = agent_color(&agent.status);
         self.activity = agent.activity.clone();
-        self.place = agent.folder() + &agent.branch.as_ref().map(|b| format!(" · {b}")).unwrap_or_default();
+        self.repo = agent.folder();
+        self.branch = agent.branch.clone().unwrap_or_default();
         self.harness = harness_for(&agent.name);
         self.limit_resets = agent.limit_resets;
         if agent.action != self.action {
@@ -1163,10 +1166,10 @@ impl Room {
             Stroke::new(1.0_f32, with_alpha(style.color, 0.85))
         };
         painter.rect_stroke(cell, CornerRadius::same(6), stroke, egui::StrokeKind::Inside);
-        // Labels: repo · branch (top-left), then the footer: what the agent
-        // is doing, and the room's state (bottom-right).
-        let place_chars = (((f.width() - 32.0) / 7.8) as usize).max(4);
-        label(painter, pos2(f.min.x + 12.0, f.min.y + 14.0), Align2::LEFT_CENTER, &Room::clip(&self.place, place_chars), 13.0, self.color, true);
+        // Labels: the repo (top-left), then the footer: what the agent is
+        // doing, its branch (bottom-left) and the room's state (bottom-right).
+        let repo_chars = (((f.width() - 32.0) / 7.8) as usize).max(4);
+        label(painter, pos2(f.min.x + 12.0, f.min.y + 14.0), Align2::LEFT_CENTER, &Room::clip(&self.repo, repo_chars), 13.0, self.color, true);
         let usable_chars = ((f.width() - 28.0) / 6.65) as usize;
         painter.text(pos2(f.min.x + 10.0, f.max.y + 11.0), Align2::LEFT_CENTER, Room::clip(&self.activity, usable_chars), FontId::monospace(11.0), Color32::WHITE);
         // The new state shows at once, while the hero is still walking
@@ -1176,7 +1179,9 @@ impl Room {
         let title_color = blend(shown.color, Color32::WHITE, 0.45);
         let at = pos2(f.max.x - 10.0, f.max.y + FOOTER - 10.0);
         painter.text(at, Align2::RIGHT_CENTER, &title, FontId::monospace(11.0), title_color);
-        painter.text(pos2(at.x + 0.6, at.y), Align2::RIGHT_CENTER, &title, FontId::monospace(11.0), title_color);
+        let title_rect = painter.text(pos2(at.x + 0.6, at.y), Align2::RIGHT_CENTER, &title, FontId::monospace(11.0), title_color);
+        let branch_chars = (((title_rect.min.x - f.min.x - 22.0) / 6.65) as usize).max(4);
+        painter.text(pos2(f.min.x + 10.0, at.y), Align2::LEFT_CENTER, Room::clip(&self.branch, branch_chars), FontId::monospace(11.0), Color32::from_gray(209));
         if selected {
             painter.rect_stroke(cell.expand(2.0), CornerRadius::same(7), Stroke::new(2.0_f32, Color32::from_rgb(217, 242, 166)), egui::StrokeKind::Outside);
         }
