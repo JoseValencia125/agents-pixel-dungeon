@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-10-10
+
+### Added
+- The guild's HP in full screen: how much of each harness's plan is left and
+  when it refills. Claude's HP is the general weekly limit and its MP the
+  5-hour session; Codex's come from its session logs; Kiro's HP is the month's
+  credits against a plan you pick.
+- A `>_` button (chat header, the bar under the rooms, a room's right-click
+  menu) that opens a terminal in the agent's folder to type a command.
+- Starred folders in the summon panel, offered first.
+- The chat box grows to three lines as you type and scrolls past that;
+  ⇧⏎ breaks a line, ⏎ sends.
+
+### Changed
+- Codex's hero is now a hooded alchemist with a glowing flask, instead of a
+  knight with sword and shield, to fit the library and the alchemy table.
+- The usage-limit room is now an infirmary: the exhausted hero sleeps on a cot
+  with the time left until the reset.
+- The idle room: the hero reads in an armchair by the fire instead of sleeping.
+- ⌘-click on a path in the console shows it in Finder (the file manager on
+  Linux) instead of opening it; URLs still open in the browser.
+- In full screen, lines a narrow pane wrapped are joined again, so the console
+  uses its whole width.
+
+### Fixed
+- Pickers such as `/model` can be driven from the chat while the agent's empty
+  prompt is still visible under them: ↑/↓, ⏎ and esc go to the picker.
+- The chat box keeps the focus when new lines arrive in the terminal.
+
+### Privacy
+- To show Claude's plan usage, the app reads Claude Code's OAuth token from the
+  macOS keychain (or `~/.claude/.credentials.json`) and asks Anthropic's usage
+  endpoint at most every two minutes. The guide's Privacy section describes it.
+
 ## [2.0.1] - 2026-10-09
 
 ### Added

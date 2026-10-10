@@ -4,7 +4,7 @@
 //! handle and the resize grip.
 
 use crate::ansi::Span;
-use crate::herdr::{Agent, MenuOptions, StatusFilter, CREATABLE_KINDS};
+use crate::herdr::{Agent, MenuOptions, StatusFilter};
 use crate::l10n::{tr, trf};
 use crate::monitor::{GuildEvent, Monitor};
 use crate::prefs::Prefs;
@@ -78,6 +78,26 @@ fn drop_hint(ui: &Ui, rect: egui::Rect) {
     painter.text(rect.center(), Align2::CENTER_CENTER, tr("Suelta para añadir la ruta al mensaje"), FontId::monospace(fs(13.0)), Color32::WHITE);
 }
 
+/// A console line that opens what ⌘ (Ctrl elsewhere) + click lands on: a
+/// URL in the browser, a file or folder (relative to the agent's folder,
+/// `:line` dropped) with its app. Holding ⌘ over one shows the hand.
+fn console_line(ui: &mut Ui, spans: &[Span], size: f32, cwd: &str) {
+    // Without ⌘ it is a plain label, so its text can still be selected.
+    if !ui.input(|i| i.modifiers.command) { ui.add(screen_line(spans, size)); return; }
+    let (pos, galley, response) = screen_line(spans, size).sense(egui::Sense::click()).layout_in_ui(ui);
+    let target = response.hover_pos().and_then(|pointer| {
+        let index = galley.cursor_from_pos(pointer - pos).ccursor.index;
+        crate::herdr::link_at(galley.text(), index).and_then(|link| crate::herdr::resolve_link(&link, cwd))
+    });
+    ui.painter().galley(pos, galley, Color32::from_gray(222));
+    if let Some(target) = target {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if response.clicked() { crate::herdr::reveal_target(&target); }
+        let web = target.starts_with("http://") || target.starts_with("https://");
+        response.on_hover_text(if web { target.clone() } else { trf("Mostrar en Finder: {}", &[&crate::herdr::abbreviate_home(&target)]) });
+    }
+}
+
 /// One terminal line as a label: each run in its colour, bold as a
 /// brighter stroke, dim faded, inverse swapped (done in the parser).
 fn screen_line(spans: &[Span], size: f32) -> egui::Label {
@@ -146,6 +166,8 @@ pub struct HudState {
 pub struct HudAction {
     pub toggle_log: bool,
     pub compose: bool,
+    /// Open a terminal to type a command in.
+    pub terminal: bool,
 }
 
 /// The HUD grows a second row while the search box is open.
@@ -159,7 +181,7 @@ pub const SEARCH_ROW: f32 = 26.0;
 /// rooms, and a search box (on its own row) over project, harness, branch,
 /// folder and activity.
 pub fn hud(ui: &mut Ui, monitor: &mut Monitor, state: &mut HudState) -> HudAction {
-    let mut action = HudAction { toggle_log: false, compose: false };
+    let mut action = HudAction { toggle_log: false, compose: false, terminal: false };
     // One column of rooms leaves no room for words: the "All" chip shows only its count.
     let narrow = ui.available_width() < crate::scene::width_for(2) - 20.0;
     let open = state.searching || !monitor.query.is_empty();
@@ -180,6 +202,9 @@ pub fn hud(ui: &mut Ui, monitor: &mut Monitor, state: &mut HudState) -> HudActio
                 }
                 if flat_button(ui, mono("📜", 13.0).color(alpha(Color32::from_rgb(237, 214, 158), 0.85))).on_hover_text(tr("Registro de actividad")).clicked() {
                     action.toggle_log = true;
+                }
+                if flat_button(ui, mono(">_", 11.0).strong().color(alpha(Color32::WHITE, 0.75))).on_hover_text(tr("Abrir una terminal")).clicked() {
+                    action.terminal = true;
                 }
                 if flat_button(ui, mono("+", 16.0).strong().color(Color32::from_rgb(140, 217, 115))).on_hover_text(tr("Invocar un agente nuevo")).clicked() {
                     action.compose = true;
@@ -261,11 +286,13 @@ pub struct ChatState {
     /// in the "/" menu.
     slash: Option<Vec<crate::commands::SlashCommand>>,
     slash_choice: usize,
+    /// The terminal's own width in columns (the widest line read), which sets the console's font.
+    cols: usize,
 }
 
 impl ChatState {
     pub fn new(agent_id: &str) -> ChatState {
-        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0 }
+        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0 }
     }
 
     pub fn with_draft(mut self, draft: String) -> ChatState {
@@ -320,7 +347,13 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
     if let Some(rx) = &state.screen_rx {
         if let Ok(text) = rx.try_recv() {
             let parsed = crate::ansi::parse(&text);
-            if !parsed.iter().all(|l| l.is_empty()) || state.screen.is_empty() { state.screen = parsed; }
+            if !parsed.iter().all(|l| l.is_empty()) || state.screen.is_empty() {
+                // The lines a narrow pane wrapped are joined again, so the
+                // console wraps them to its own width instead of showing a
+                // thin column of text.
+                state.cols = parsed.iter().map(|l| l.iter().map(|s| s.text.as_str()).collect::<String>().trim_end().chars().count()).max().unwrap_or(0);
+                state.screen = crate::ansi::reflow(parsed);
+            }
             state.screen_rx = None;
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         }
@@ -353,7 +386,16 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
         let plain = i.modifiers.is_none();
         (plain && i.consume_key(egui::Modifiers::NONE, Key::ArrowUp), plain && i.consume_key(egui::Modifiers::NONE, Key::ArrowDown), i.key_pressed(Key::Escape))
     });
-    if escape { action.close = true; }
+    // esc goes to the agent's terminal, as if typed there: it closes the
+    // agent's own dialogs (/usage, /model…) and interrupts. The panel
+    // closes with its x. A picker the agent opened itself takes ↑/↓ too.
+    let picker = agent.status != "blocked" && !standalone && picker_open(&state.screen);
+    if escape {
+        if standalone { action.close = true; } else if !sending { state.run(monitor.press(&["esc".into()], agent)); }
+    }
+    if picker && (up || down) && !sending {
+        state.run(monitor.press(&[if up { "up".to_string() } else { "down".to_string() }], agent));
+    }
     if agent.status == "blocked" && (up || down) && !standalone {
         let delta: i64 = if up { -1 } else { 1 };
         if !menu.options.is_empty() {
@@ -380,9 +422,12 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
             }
             ui.label(mono(&format!("{} · {}", agent.project, status), 11.0).color(DIM));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if flat_button(ui, mono("x", 13.0).color(Color32::WHITE)).on_hover_text("Cerrar (esc)").clicked() { action.close = true; }
+                if flat_button(ui, mono("x", 13.0).color(Color32::WHITE)).on_hover_text(tr("Cerrar")).clicked() { action.close = true; }
                 if !standalone && flat_button(ui, mono("↗", 13.0).color(Color32::WHITE)).on_hover_text(tr("Enfocar este agente en Herdr")).clicked() && !sending {
                     state.run(monitor.focus(agent));
+                }
+                if flat_button(ui, mono(">_", 11.0).strong().color(Color32::from_gray(200))).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
+                    crate::herdr::open_terminal(&agent.cwd);
                 }
                 // The console's own text size.
                 if flat_button(ui, mono("A+", 11.0).color(Color32::from_gray(200))).on_hover_text(format!("{} (⌘⇧+)", tr("Consola más grande"))).clicked() { action.console_step = 1; }
@@ -395,19 +440,20 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
         // sight it stays under the console.
         let prompt_line = if wide && !asking && !standalone { prompt_line(&state.screen) } else { None };
         let inline = prompt_line.is_some();
-        let body_height = total - 7.0 * 2.0 - 22.0 - if standalone { 14.0 } else if inline { 0.0 } else { 36.0 } - if state.note.is_some() { 16.0 } else { 0.0 };
+        // The box under the console grows to three rows with what is typed.
+        let box_height = input_height(draft_rows(&state.draft, (ui.available_width() / (fs(13.0) * 0.62)) as usize), fs(13.0), true);
+        let body_height = total - 7.0 * 2.0 - 22.0 - if standalone { 14.0 } else if inline { 0.0 } else { box_height } - if state.note.is_some() { 16.0 } else { 0.0 };
         Frame::new().fill(alpha(Color32::BLACK, 0.45)).corner_radius(CornerRadius::same(5)).inner_margin(Margin::same(6)).show(ui, |ui| {
             ui.set_min_height(body_height.max(40.0));
             ui.set_max_height(body_height.max(40.0));
             ui.set_width(ui.available_width());
             // The screen as the terminal paints it, colours and all.
             if !asking && !state.screen.is_empty() {
-                // Full screen: the widest of the last lines (a screenful)
-                // sets the font, so terminal lines stay whole; the widget
-                // wraps them instead. Then the console's own size factor,
-                // apart from the panels' text size.
-                let recent = &state.screen[state.screen.len().saturating_sub(60)..];
-                let widest = recent.iter().map(|l| l.iter().map(|s| s.text.chars().count()).sum::<usize>()).max().unwrap_or(1).max(1) as f32;
+                // Full screen: the terminal's width sets the font, so its
+                // lines (rules, options) stay whole while the re-flowed
+                // paragraphs wrap to the console. Then the console's own
+                // size factor, apart from the panels' text size.
+                let widest = state.cols.max(1) as f32;
                 let base = if wide { (ui.available_width() / (widest * 0.62)).clamp(7.0, 12.0) } else { 11.0 };
                 let size = (base * console_scale()).round().max(6.0);
                 let screen = state.screen.clone();
@@ -433,7 +479,7 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
                             let color = line.iter().find_map(|s| s.fg).unwrap_or(Color32::from_gray(100));
                             ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0_f32, color));
                         } else {
-                            ui.add(screen_line(line, size));
+                            console_line(ui, line, size, &agent.cwd);
                         }
                     }
                 });
@@ -483,7 +529,8 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
 /// widget's own row (a line and a half tall).
 fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatState, menu: &MenuOptions, sending: bool, font: f32, roomy: bool) {
     ui.horizontal(|ui| {
-        let hint = if agent.status == "blocked" { trf("↑↓ y Enter eligen · o responde a {}…", &[&agent.name]) } else { trf("Escribir a {}…", &[&agent.name]) };
+        let picker = agent.status != "blocked" && !monitor.standalone() && picker_open(&state.screen);
+        let hint = if picker { tr("↑↓ y Enter eligen · esc cancela") } else if agent.status == "blocked" { trf("↑↓ y Enter eligen · o responde a {}…", &[&agent.name]) } else { trf("Escribir a {}…", &[&agent.name]) };
         let buttons_width = match agent.status.as_str() { "blocked" => 150.0, "working" => 80.0, _ => 26.0 };
         let mut draft = state.draft.clone();
         // The "/" menu: the harness's commands matching what is typed so
@@ -507,10 +554,29 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
         }
         // Roomy: the box is a line and a half tall, so typing does not feel cramped.
         let margin = if roomy { Margin::symmetric(8, 8) } else { Margin::symmetric(6, 3) };
-        let edit = egui::TextEdit::singleline(&mut draft).hint_text(hint).font(FontId::monospace(font)).margin(margin).desired_width(ui.available_width() - buttons_width).interactive(!sending);
-        let response = ui.add(edit);
+        // A message longer than a line grows the box to three rows, then
+        // scrolls; ⏎ sends and ⇧⏎ breaks the line.
+        let width = ui.available_width() - buttons_width;
+        let rows = draft_rows(&draft, (width / (font * 0.62)) as usize);
+        // A fixed id per agent: the box moves with the terminal's prompt line
+        // as new lines arrive, and an id taken from its position would change
+        // and drop the focus.
+        let edit = egui::TextEdit::multiline(&mut draft)
+            .id(egui::Id::new(("chat-input", agent.id.as_str())))
+            .hint_text(hint)
+            .font(FontId::monospace(font))
+            .margin(margin)
+            .desired_width(width)
+            .desired_rows(1)
+            .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, Key::Enter))
+            .interactive(!sending);
+        let response = ui.scope(|ui| {
+            ui.set_min_width(width);
+            ui.set_max_width(width);
+            egui::ScrollArea::vertical().id_salt(("draft", agent.id.as_str())).max_height(input_height(rows, font, roomy) - 4.0).auto_shrink([false, true]).show(ui, |ui| ui.add(edit)).inner
+        }).inner;
         if state.focus { response.request_focus(); state.focus = false; }
-        let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        let submitted = response.has_focus() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
         if menu_open {
             let chosen = &matches[state.slash_choice].0;
             if submitted && draft.trim() != format!("/{chosen}") { complete = Some(chosen.clone()); }
@@ -545,7 +611,7 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
         let empty = draft.trim().is_empty();
         state.draft = draft;
         if submitted && !sending && !completing {
-            if agent.status == "blocked" && empty {
+            if (agent.status == "blocked" || picker) && empty {
                 // Nothing typed: ⏎ picks the option its terminal already highlights.
                 state.run(monitor.press(&["enter".into()], agent));
             } else {
@@ -571,15 +637,54 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
     });
 }
 
-/// The terminal's prompt line, where the agent takes typing: the last line
-/// starting with ❯ (Claude Code), › (Kiro, Codex) or >.
-fn prompt_line(screen: &[Vec<Span>]) -> Option<usize> {
-    screen.iter().rposition(|line| {
-        let text: String = line.iter().map(|s| s.text.as_str()).collect();
-        let text = text.trim_start();
-        let mut chars = text.chars();
-        matches!(chars.next(), Some('❯' | '›' | '>')) && matches!(chars.next(), None | Some(' ' | '\u{a0}'))
-    })
+/// How many rows the box needs for what is typed, up to three: its lines,
+/// each wrapped to `cols` columns.
+pub(crate) fn draft_rows(draft: &str, cols: usize) -> usize {
+    let cols = cols.max(8);
+    draft.split('\n').map(|l| l.chars().count().max(1).div_ceil(cols)).sum::<usize>().clamp(1, 3)
+}
+
+/// The height of the box with `rows` rows, margins included.
+fn input_height(rows: usize, font: f32, roomy: bool) -> f32 {
+    let margin = if roomy { 16.0 } else { 6.0 };
+    font * 1.3 * rows as f32 + margin + 4.0
+}
+
+/// The last line starting with ❯ (Claude Code), › (Kiro, Codex) or >, and
+/// whether it is a numbered option ("❯ 2. Opus 5.5"): the highlight of a
+/// picker such as /model rather than a prompt.
+/// A line starting with the prompt's marker: whether it is a numbered
+/// option, and whether nothing follows the marker (an empty prompt).
+fn marked(line: &[Span]) -> Option<(bool, bool)> {
+    let text: String = line.iter().map(|s| s.text.as_str()).collect();
+    let text = text.trim();
+    let mut chars = text.chars();
+    let marked = matches!(chars.next(), Some('❯' | '›' | '>')) && matches!(chars.next(), None | Some(' ' | '\u{a0}'));
+    marked.then(|| (crate::herdr::is_option(text), chars.as_str().trim().is_empty()))
+}
+
+/// A narrow pane keeps the empty prompt in sight under a picker's options:
+/// the picker still takes the keys, so an empty prompt counts as the picker
+/// when one is open just above it (a highlighted option, or its footer).
+fn last_marked_line(screen: &[Vec<Span>]) -> Option<(usize, bool)> {
+    let (index, option, bare) = screen.iter().enumerate().rev().find_map(|(i, l)| marked(l).map(|(o, b)| (i, o, b)))?;
+    if option || !bare { return Some((index, option)); }
+    let above = screen[..index].iter().rev().take(30);
+    let picker = above.clone().filter_map(|l| marked(l)).next().map(|(o, _)| o).unwrap_or(false)
+        || above.map(|l| l.iter().map(|s| s.text.as_str()).collect::<String>()).any(|t| t.contains("Esc to cancel"));
+    Some((index, picker))
+}
+
+/// The terminal's prompt line, where the agent takes typing. None while a
+/// picker is open: its highlighted option is not a prompt.
+pub(crate) fn prompt_line(screen: &[Vec<Span>]) -> Option<usize> {
+    last_marked_line(screen).filter(|(_, option)| !option).map(|(index, _)| index)
+}
+
+/// Whether the terminal shows a picker driven by arrow keys (/model,
+/// /resume…) though the agent is not asking anything.
+pub(crate) fn picker_open(screen: &[Vec<Span>]) -> bool {
+    last_marked_line(screen).map(|(_, option)| option).unwrap_or(false)
 }
 
 fn submit(state: &mut ChatState, monitor: &Monitor, agent: &Agent, menu: &MenuOptions) {
@@ -620,6 +725,8 @@ pub struct ComposeState {
     pub prompt: String,
     busy: Option<Receiver<Option<String>>>,
     note: Option<String>,
+    /// The harnesses installed here, looked up once.
+    installed: Option<Vec<&'static str>>,
 }
 
 pub struct ComposeAction {
@@ -634,23 +741,7 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
     if !dropped.is_empty() { add_paths(&mut state.prompt, &dropped); }
     drop_hint(ui, ui.max_rect());
     let mut action = ComposeAction { close: false };
-    if let Some(rx) = &state.busy {
-        if let Ok(failure) = rx.try_recv() {
-            state.busy = None;
-            match failure {
-                Some(failure) => state.note = Some(failure),
-                None => { state.prompt.clear(); action.close = true; }
-            }
-        }
-    }
-    let busy = state.busy.is_some();
-    // Folders the current agents work in, most common first.
-    let mut known: Vec<String> = vec![];
-    for agent in &monitor.agents {
-        let path = crate::herdr::expand_home(&agent.cwd);
-        if !known.contains(&path) { known.push(path); }
-    }
-    if prefs.create_folder.is_empty() { if let Some(first) = known.first() { prefs.create_folder = first.clone(); prefs.save(); } }
+    let (busy, known) = compose_prelude(monitor, prefs, state, &mut action);
     if ui.input(|i| i.key_pressed(Key::Escape)) { action.close = true; }
     let green = Color32::from_rgb(140, 217, 115);
     let total = ui.available_height();
@@ -665,24 +756,12 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
         });
         ui.horizontal(|ui| {
             let mut kind = prefs.create_kind.clone();
+            let kinds = state.installed.clone().unwrap_or_default();
             egui::ComboBox::from_id_salt("kind").selected_text(mono(&kind, 11.0)).width(96.0).show_ui(ui, |ui| {
-                for option in CREATABLE_KINDS { ui.selectable_value(&mut kind, option.to_string(), option); }
+                for option in kinds { ui.selectable_value(&mut kind, option.to_string(), option); }
             });
             if kind != prefs.create_kind { prefs.create_kind = kind; prefs.save(); }
-            let shown = if prefs.create_folder.is_empty() { tr("Carpeta…") } else { crate::herdr::abbreviate_home(&prefs.create_folder) };
-            let mut folder = prefs.create_folder.clone();
-            let mut choose = false;
-            egui::ComboBox::from_id_salt("folder").selected_text(mono(&shown, 11.0)).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
-                for path in &known { ui.selectable_value(&mut folder, path.clone(), crate::herdr::abbreviate_home(path)); }
-                if !known.is_empty() { ui.separator(); }
-                if ui.button(tr("Elegir carpeta…")).clicked() { choose = true; }
-            });
-            if choose {
-                let mut dialog = rfd::FileDialog::new();
-                if !folder.is_empty() { dialog = dialog.set_directory(&folder); }
-                if let Some(picked) = dialog.pick_folder() { folder = picked.to_string_lossy().to_string(); }
-            }
-            if folder != prefs.create_folder { prefs.create_folder = folder; prefs.save(); }
+            folder_picker(ui, prefs, &known, 11.0);
         });
         Frame::new().fill(alpha(Color32::BLACK, 0.45)).corner_radius(CornerRadius::same(5)).inner_margin(Margin::same(3)).show(ui, |ui| {
             let height = total - 7.0 * 3.0 - 22.0 - 24.0 - 24.0;
@@ -705,6 +784,118 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
                     state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt));
                 }
             });
+        });
+    });
+    action
+}
+
+/// What both summon forms do first: take a finished summon's outcome, look
+/// up the installed harnesses (keeping the chosen one among them) and list
+/// the folders the agents work in, defaulting the folder to a favourite or
+/// the first of them.
+fn compose_prelude(monitor: &Monitor, prefs: &mut Prefs, state: &mut ComposeState, action: &mut ComposeAction) -> (bool, Vec<String>) {
+    if let Some(rx) = &state.busy {
+        if let Ok(failure) = rx.try_recv() {
+            state.busy = None;
+            match failure {
+                Some(failure) => state.note = Some(failure),
+                None => { state.prompt.clear(); action.close = true; }
+            }
+        }
+    }
+    let kinds = state.installed.get_or_insert_with(crate::herdr::installed_kinds);
+    if !kinds.contains(&prefs.create_kind.as_str()) { prefs.create_kind = kinds[0].to_string(); prefs.save(); }
+    // Folders the current agents work in, most common first.
+    let mut known: Vec<String> = vec![];
+    for agent in &monitor.agents {
+        let path = crate::herdr::expand_home(&agent.cwd);
+        if !known.contains(&path) { known.push(path); }
+    }
+    if prefs.create_folder.is_empty() {
+        if let Some(first) = prefs.favorite_folders.first().or(known.first()).cloned() { prefs.create_folder = first; prefs.save(); }
+    }
+    (state.busy.is_some(), known)
+}
+
+/// The folder to summon in: favourites first (★), then the agents' folders,
+/// then any other; the star beside it adds or removes the chosen one.
+fn folder_picker(ui: &mut Ui, prefs: &mut Prefs, known: &[String], size: f32) {
+    let starred = prefs.favorite_folders.contains(&prefs.create_folder);
+    let star = if starred { "★" } else { "☆" };
+    let star_width = 18.0;
+    let shown = if prefs.create_folder.is_empty() { tr("Carpeta…") } else { crate::herdr::abbreviate_home(&prefs.create_folder) };
+    let mut folder = prefs.create_folder.clone();
+    let mut choose = false;
+    egui::ComboBox::from_id_salt("folder").selected_text(mono(&shown, size)).truncate().width(ui.available_width() - star_width - 14.0).show_ui(ui, |ui| {
+        for path in &prefs.favorite_folders { ui.selectable_value(&mut folder, path.clone(), format!("★ {}", crate::herdr::abbreviate_home(path))); }
+        if !prefs.favorite_folders.is_empty() { ui.separator(); }
+        for path in known.iter().filter(|p| !prefs.favorite_folders.contains(p)) { ui.selectable_value(&mut folder, path.clone(), crate::herdr::abbreviate_home(path)); }
+        if !known.is_empty() { ui.separator(); }
+        if ui.button(tr("Elegir carpeta…")).clicked() { choose = true; }
+    });
+    let hint = if starred { tr("Quitar de favoritas") } else { tr("Añadir a favoritas") };
+    let gold = Color32::from_rgb(255, 204, 0);
+    if ui.add_enabled(!prefs.create_folder.is_empty(), egui::Button::new(mono(star, size + 2.0).color(if starred { gold } else { DIM })).frame(false)).on_hover_text(hint).clicked() {
+        if starred { prefs.favorite_folders.retain(|f| f != &prefs.create_folder); } else { prefs.favorite_folders.push(prefs.create_folder.clone()); }
+        prefs.save();
+    }
+    if choose {
+        let mut dialog = rfd::FileDialog::new();
+        if !folder.is_empty() { dialog = dialog.set_directory(&folder); }
+        if let Some(picked) = dialog.pick_folder() { folder = picked.to_string_lossy().to_string(); }
+    }
+    if folder != prefs.create_folder { prefs.create_folder = folder; prefs.save(); }
+}
+
+/// Full screen: the summon form inside the spare "+" room itself. The
+/// installed harnesses as heroes to pick, the folder (favourites first), an
+/// optional first prompt and the button.
+pub fn summon_form(ui: &mut Ui, monitor: &Monitor, assets: &crate::assets::Assets, prefs: &mut Prefs, state: &mut ComposeState, now: f64) -> ComposeAction {
+    let mut action = ComposeAction { close: false };
+    let (busy, known) = compose_prelude(monitor, prefs, state, &mut action);
+    if ui.input(|i| i.key_pressed(Key::Escape)) { action.close = true; }
+    let green = Color32::from_rgb(140, 217, 115);
+    ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
+    ui.horizontal(|ui| {
+        ui.label(mono("+", 12.0).color(green));
+        ui.label(mono(&tr("Invocar un agente"), 11.0).strong().color(Color32::WHITE));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if flat_button(ui, mono("x", 12.0).color(Color32::WHITE)).on_hover_text(tr("Cerrar")).clicked() { action.close = true; }
+        });
+    });
+    // The installed harnesses, as their heroes: the chosen one walks.
+    let kinds = state.installed.clone().unwrap_or_default();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+        for kind in kinds {
+            let chosen = prefs.create_kind == kind;
+            let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());
+            let fill = if chosen { alpha(green, 0.25) } else if response.hovered() { alpha(Color32::WHITE, 0.08) } else { Color32::TRANSPARENT };
+            ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
+            if chosen { ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0_f32, green), egui::StrokeKind::Inside); }
+            let frame = if chosen { (now * 3.0) as usize } else { 0 };
+            let hero = crate::herdr::HERO_ORDER.iter().find(|h| **h == kind).copied().unwrap_or("hero");
+            crate::scene::draw_sprite(ui.painter(), assets.hero_frame(hero, if chosen { "work" } else { "idle" }, frame), rect.center(), vec2(20.0, 20.0), false, 0.0, if chosen || response.hovered() { Color32::WHITE } else { Color32::from_gray(150) });
+            if response.on_hover_text(kind).clicked() { prefs.create_kind = kind.to_string(); prefs.save(); }
+        }
+    });
+    ui.label(mono(&prefs.create_kind, 10.0).strong().color(green));
+    ui.horizontal(|ui| folder_picker(ui, prefs, &known, 10.0));
+    let edit = egui::TextEdit::multiline(&mut state.prompt).hint_text(tr("Primer prompt (opcional)")).font(FontId::monospace(fs(10.0))).desired_rows(2).desired_width(f32::INFINITY).interactive(!busy);
+    ui.add(edit);
+    ui.horizontal(|ui| {
+        if busy {
+            ui.spinner();
+        } else if let Some(note) = &state.note {
+            ui.add(egui::Label::new(RichText::new(note).size(fs(9.0)).color(Color32::from_rgb(255, 159, 10))).truncate());
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let shortcut = ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+            let can = !busy && !prefs.create_folder.is_empty();
+            if (ui.add_enabled(can, egui::Button::new(mono(&tr("Invocar"), 11.0).color(Color32::WHITE)).fill(alpha(green, 0.35))).on_hover_text(tr("Crear el agente (⌘⏎)")).clicked() || (shortcut && can)) && state.busy.is_none() {
+                state.note = None;
+                state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt));
+            }
         });
     });
     action
@@ -898,4 +1089,113 @@ pub fn resize_grip(ctx: &Context, visible: bool) -> bool {
         }
     });
     started
+}
+
+// ---- HP viewer (full screen)
+
+/// The HP viewer's height for these harnesses: a title and one row each.
+pub fn usage_height(usages: &[crate::usage::HarnessUsage]) -> f32 {
+    if usages.is_empty() { 0.0 } else { 26.0 + usages.len() as f32 * 60.0 }
+}
+
+fn hp_color(hp: f32) -> Color32 {
+    if hp > 50.0 { Color32::from_rgb(48, 209, 88) } else if hp > 20.0 { Color32::from_rgb(255, 159, 10) } else { Color32::from_rgb(255, 69, 58) }
+}
+
+/// A segmented bar, as in a game's HUD: `hp` (0–100) of it lit.
+fn hp_bar(ui: &mut Ui, hp: f32, height: f32, segments: usize, fill: Color32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(1), Color32::from_rgb(40, 34, 46));
+    let lit = rect.width() * hp / 100.0;
+    if lit > 0.0 { painter.rect_filled(egui::Rect::from_min_size(rect.min, vec2(lit, height)), CornerRadius::same(1), fill); }
+    // The top highlight and the cuts between segments.
+    if lit > 0.0 && height >= 6.0 { painter.hline(rect.min.x..=rect.min.x + lit, rect.min.y + 1.0, Stroke::new(1.0_f32, alpha(Color32::WHITE, 0.35))); }
+    for i in 1..segments {
+        let x = rect.min.x + rect.width() * i as f32 / segments as f32;
+        painter.vline(x, rect.y_range(), Stroke::new(1.0_f32, Color32::from_rgb(19, 17, 23)));
+    }
+    painter.rect_stroke(rect, CornerRadius::same(1), Stroke::new(1.0_f32, Color32::from_rgb(70, 60, 80)), egui::StrokeKind::Outside);
+}
+
+/// Each harness's plan left, as its hero's stats: HP is the week (Kiro's
+/// month of credits), mana the session (the 5-hour window), refilling at
+/// its countdown. Returns a Kiro plan the user picked.
+pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate::usage::HarnessUsage], now: f64) -> Option<u32> {
+    let mut picked = None;
+    let unix = crate::herdr::unix_now();
+    let mana_color = Color32::from_rgb(90, 150, 255);
+    ui.spacing_mut().item_spacing = vec2(6.0, 3.0);
+    ui.add_space(5.0);
+    ui.label(mono(&tr("HP de la guild"), 10.0).strong().color(DIM));
+    for usage in usages {
+        let name = match usage.harness { "claude" => "Claude", "codex" => "Codex", "kiro" => "Kiro", other => other };
+        let health = usage.meters.iter().find(|m| m.window != "5h");
+        let mana = usage.meters.iter().find(|m| m.window == "5h");
+        let hp = health.map(|m| m.hp(unix));
+        ui.horizontal(|ui| {
+            let (icon, _) = ui.allocate_exact_size(vec2(28.0, 40.0), egui::Sense::hover());
+            // Out of HP or mana, the hero stops and greys out.
+            let spent = hp == Some(0.0) || mana.map(|m| m.hp(unix) <= 0.0).unwrap_or(false);
+            let frame = if spent { 0 } else { (now * 2.0) as usize };
+            let tint = if spent { Color32::from_gray(110) } else { Color32::WHITE };
+            crate::scene::draw_sprite(ui.painter(), assets.hero_frame(usage.harness, "idle", frame), icon.center(), vec2(24.0, 24.0), false, 0.0, tint);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 2.0);
+                let row = ui.horizontal(|ui| {
+                    ui.label(mono(name, 11.0).strong().color(Color32::WHITE));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let text = match (health, &usage.credits) {
+                            (Some(_), Some((spent, Some(plan)))) => format!("HP {:.0}/{plan}", (*plan as f64 - spent).max(0.0)),
+                            (Some(m), _) if m.hp(unix) <= 0.0 => "KO".to_string(),
+                            (Some(m), _) => format!("HP {:.0}%", m.hp(unix)),
+                            (None, Some((spent, None))) => trf("{} créditos", &[&format!("{spent:.0}")]),
+                            _ => "—".to_string(),
+                        };
+                        ui.label(mono(&text, 10.0).strong().color(hp.map(hp_color).unwrap_or(DIM)));
+                    });
+                }).response;
+                if let Some(hp) = hp { hp_bar(ui, hp, 7.0, 10, hp_color(hp)); }
+                if let Some(mana) = mana {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(5.0, 0.0);
+                        ui.label(mono("MP", 9.0).strong().color(mana_color));
+                        let left = mana.hp(unix);
+                        ui.label(mono(&format!("{left:.0}%"), 9.0).color(DIM));
+                        ui.add_space(2.0);
+                        hp_bar(ui, left, 4.0, 5, mana_color);
+                    });
+                } else if usage.harness == "kiro" {
+                    ui.horizontal(|ui| {
+                        let plan = usage.credits.and_then(|c| c.1);
+                        let shown = plan.and_then(|p| crate::usage::KIRO_PLANS.iter().find(|(_, c)| *c == p)).map(|(n, _)| n.to_string()).unwrap_or_else(|| tr("Elegir plan…"));
+                        egui::ComboBox::from_id_salt("kiro-plan").selected_text(mono(&shown, 9.0)).width(70.0).show_ui(ui, |ui| {
+                            for (label, credits) in crate::usage::KIRO_PLANS {
+                                if ui.selectable_label(plan == Some(credits), format!("{label} · {credits}")).clicked() { picked = Some(credits); }
+                            }
+                        });
+                        // The month's credits come back on the 1st.
+                        if let Some(at) = health.filter(|m| m.used > 0.0).and_then(|m| m.resets).and_then(|r| crate::usage::reset_label(r, chrono::Local::now(), false)) {
+                            ui.label(mono(&format!("↻ {at}"), 9.0).color(DIM));
+                        }
+                    });
+                }
+                // When each refills: HP on the week's (or month's) reset
+                // date, mana at its hour; the countdown on hover.
+                let local = chrono::Local::now();
+                let refill = |meter: Option<&crate::usage::Meter>, hour: bool| {
+                    meter.filter(|m| m.used > 0.0).and_then(|m| Some((crate::usage::left(m)?, crate::usage::reset_label(m.resets?, local, hour)?)))
+                };
+                let refills: Vec<(&str, (i64, String))> = [("HP", refill(health, usage.harness != "kiro")), ("MP", refill(mana, true))].into_iter().filter_map(|(k, r)| Some((k, r?))).collect();
+                if !refills.is_empty() && usage.harness != "kiro" {
+                    let text = refills.iter().map(|(k, (_, at))| format!("{k} ↻ {at}")).collect::<Vec<_>>().join(" · ");
+                    let tip = refills.iter().map(|(k, (wait, _))| format!("{k}: {}", trf("se reinicia en {}", &[&crate::scene::countdown(*wait)]))).collect::<Vec<_>>().join("\n");
+                    ui.add(egui::Label::new(mono(&text, 9.0).color(DIM)).truncate()).on_hover_text(tip);
+                }
+                let tip = usage.meters.iter().map(|m| trf("{}: {}% usado", &[&tr(m.window), &format!("{:.0}", m.used)])).collect::<Vec<_>>().join(" · ");
+                if !tip.is_empty() { row.on_hover_text(tip); }
+            });
+        });
+    }
+    picked
 }

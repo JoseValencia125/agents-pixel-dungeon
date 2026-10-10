@@ -160,3 +160,49 @@ pub fn parse(text: &str) -> Vec<Vec<Span>> {
 pub fn plain(lines: &[Vec<Span>]) -> Vec<String> {
     lines.iter().map(|spans| spans.iter().map(|s| s.text.as_str()).collect()).collect()
 }
+
+/// The lines a narrow terminal wrapped, joined again (as `herdr::paragraphs`
+/// does for plain text, with the colours kept) so the console can wrap them
+/// to its own width. A line that filled the terminal's width continues on
+/// the next one unless that one starts a block of its own; a URL cut at the
+/// last column goes on without a space.
+pub fn reflow(screen: Vec<Vec<Span>>) -> Vec<Vec<Span>> {
+    let text = |l: &[Span]| l.iter().map(|s| s.text.as_str()).collect::<String>();
+    let widest = screen.iter().map(|l| text(l).trim_end().chars().count()).max().unwrap_or(0);
+    if widest < 40 { return screen; }
+    let mut out: Vec<Vec<Span>> = Vec::with_capacity(screen.len());
+    let (mut open, mut hard) = (false, false);
+    for mut line in screen {
+        let t = text(&line);
+        let count = t.trim_end().chars().count();
+        if open && !crate::herdr::starts_block(&t) {
+            let last = out.last_mut().expect("an open paragraph");
+            // A URL goes on without a space: cut at the last column, or at
+            // one of its hyphens (the terminal breaks words there too).
+            let tail = text(last.as_slice()).rsplit(' ').next().unwrap_or_default().to_string();
+            let glue = tail.contains("://") && (hard || tail.ends_with('-') || t.trim_start().starts_with('-'));
+            // The spaces at the seam go: this line's leading ones (the line above lost its trailing ones).
+            let mut skip = 0;
+            for s in line.iter_mut() {
+                let trimmed = s.text.trim_start().to_string();
+                if trimmed.is_empty() { skip += 1; } else { s.text = trimmed; break; }
+            }
+            if !glue { last.push(Span { text: " ".into(), fg: None, bg: None, bold: false, dim: false, italic: false, underline: false }); }
+            last.extend(line.into_iter().skip(skip));
+        } else {
+            out.push(line);
+        }
+        // Trailing spaces go, so a joined line has no gap and lines compare clean.
+        if let Some(last) = out.last_mut() {
+            loop {
+                let Some(s) = last.last_mut() else { break };
+                let n = s.text.trim_end().len();
+                s.text.truncate(n);
+                if s.text.is_empty() { last.pop(); } else { break; }
+            }
+        }
+        open = count > 0 && count + 12 >= widest;
+        hard = count >= widest;
+    }
+    out
+}

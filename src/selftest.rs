@@ -103,6 +103,50 @@ pub fn run() {
     let screen = "✻ Worked for 17s · done 12:00 AM\n※ recap: Estamos mejorando el dungeon y ya sale un cuadro\n  nueva: subir tus commits de main en un PR\n────────\n❯ la 1, con PR borrador\n────────\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents";
     assert!(meaningful_lines(screen).is_empty(), "Chrome left in terminal tail: {:?}", meaningful_lines(screen));
     assert_eq!(meaningful_lines(" Do you want to proceed?\n❯ 1. Yes\n  2. No\n❯ hola").len(), 3, "Permission options were dropped");
+    let prompt = crate::ansi::parse("❯ /model\n● listo\n────────\n❯ hola\n────────");
+    assert_eq!((crate::ui::prompt_line(&prompt), crate::ui::picker_open(&prompt)), (Some(3), false), "Prompt line not found");
+    let picker = crate::ansi::parse("❯ /model\n  Select model\n    1. Default (recommended)\n  ❯ 2. Opus 5.5 ✔\n    3. Fable 5.1\n  Enter to set as default");
+    assert_eq!((crate::ui::prompt_line(&picker), crate::ui::picker_open(&picker)), (None, true), "A picker's highlight was taken for the prompt");
+    let rule = "──────────────────────────────────────────";
+    let narrow = crate::ansi::parse(&format!("  ❯ 3.  Fable 5.1 ✔          For your \n                             toughest \n\n  Enter to set as default · s to use\n  this session only · Esc to cancel\n\n{rule}\n❯\u{a0}\n{rule}"));
+    assert_eq!((crate::ui::prompt_line(&narrow), crate::ui::picker_open(&narrow)), (None, true), "An empty prompt under a picker hid the picker");
+    let texts = |s: &[Vec<crate::ansi::Span>]| s.iter().map(|l| l.iter().map(|x| x.text.as_str()).collect::<String>()).collect::<Vec<_>>();
+    let flowed = texts(&crate::ansi::reflow(narrow));
+    assert_eq!(flowed[0], "  ❯ 3.  Fable 5.1 ✔          For your toughest", "Wrapped picker line not joined: {flowed:?}");
+    assert_eq!(flowed[2], "  Enter to set as default · s to use this session only · Esc to cancel", "Footer not joined: {flowed:?}");
+    assert_eq!(flowed[4], rule, "A rule was joined to the footer: {flowed:?}");
+    assert_eq!(crate::ui::draft_rows("one line", 40), 1);
+    assert_eq!(crate::ui::draft_rows("a\nb\nc\nd", 40), 3, "The box grows past three rows");
+    assert_eq!(crate::ui::draft_rows(&"x".repeat(100), 40), 3, "A long line wraps into rows");
+    let wrapped = crate::ansi::parse(&format!("  Sources: Room 8, Who Needs An Art Bible?\n  (https://room8studio.com/news/who-needs\n  -an-art-bible-game-art-direction-from-in\n  die-to-aaa) · Juego Studio\n\n{rule}"));
+    let flowed = texts(&crate::ansi::reflow(wrapped));
+    assert_eq!(flowed[0], "  Sources: Room 8, Who Needs An Art Bible? (https://room8studio.com/news/who-needs-an-art-bible-game-art-direction-from-indie-to-aaa) · Juego Studio", "A URL cut at the column was not glued: {flowed:?}");
+    let same = crate::ansi::parse("● short\n  ⎿ ok\n");
+    assert_eq!(crate::ansi::reflow(same.clone()), same, "A narrow screen was re-flowed");
+    let config: serde_json::Value = serde_json::from_str(r#"{"cachedUsageUtilization":{"utilization":{"limits":[{"kind":"session","group":"session","percent":100,"resets_at":"2099-01-01T00:00:00+00:00"},{"kind":"weekly_all","group":"weekly","percent":78,"resets_at":null},{"kind":"weekly_scoped","group":"weekly","percent":85,"resets_at":null}]}}}"#).unwrap();
+    let claude = crate::usage::claude_from(&config).expect("Claude usage not read");
+    assert_eq!(claude.meters.iter().map(|m| (m.window, m.used)).collect::<Vec<_>>(), vec![("5h", 100.0), ("sem", 78.0)], "Claude HP is the general weekly limit, not the per-model one");
+    assert_eq!(claude.meters[0].hp(0), 0.0);
+    let codex = crate::usage::codex_from_tail(r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":93.0,"window_minutes":300,"resets_at":1},"secondary":{"used_percent":22.0,"window_minutes":10080,"resets_at":4102444800}}}}"#).expect("Codex usage not read");
+    assert_eq!(codex.meters.iter().map(|m| (m.window, m.hp(100))).collect::<Vec<_>>(), vec![("5h", 100.0), ("sem", 78.0)], "Codex meters (a reset window is full)");
+    let kiro: serde_json::Value = serde_json::from_str(r#"{"session_state":{"conversation_metadata":{"user_turn_metadatas":[{"end_timestamp":"2026-10-08T12:00:00Z","metering_usage":[{"value":1.5},{"value":0.5}]},{"end_timestamp":"2026-09-08T12:00:00Z","metering_usage":[{"value":9.0}]}]}}}"#).unwrap();
+    assert_eq!(crate::usage::kiro_month_credits(&kiro, "2026-10"), 2.0, "Kiro credits of the month");
+    {
+        use chrono::TimeZone;
+        let now = chrono::Local.with_ymd_and_hms(2026, 10, 9, 21, 0, 0).unwrap();
+        let at = |d, h| chrono::Local.with_ymd_and_hms(2026, 10, d, h, 0, 0).unwrap().timestamp();
+        assert_eq!(crate::usage::reset_label(at(9, 22), now, true).as_deref(), Some("22:00"), "A reset today shows its hour");
+        assert_eq!(crate::usage::reset_label(at(11, 12), now, true), Some(format!("{} 11 12:00", l10n::tr("dom"))), "A later reset shows its day");
+    }
+    let line = "  ⎿ Abre http://localhost:5173/, o mira (src/ui.rs:42). Total 3.5 y v1.2";
+    let at = |needle: &str| line.chars().count() - line[line.find(needle).unwrap()..].chars().count() + 2;
+    assert_eq!(link_at(line, at("http")).as_deref(), Some("http://localhost:5173/"), "URL not found");
+    assert_eq!(link_at(line, at("src/")).as_deref(), Some("src/ui.rs:42"), "Path not found");
+    assert_eq!(link_at(line, at("3.5")), None, "A number is not a file");
+    assert_eq!(link_at(line, at("Abre")), None, "A word is not a link");
+    let cwd = env!("CARGO_MANIFEST_DIR");
+    assert_eq!(resolve_link("src/ui.rs:42:7", cwd), Some(format!("{cwd}/src/ui.rs")), "Path with line not resolved");
+    assert_eq!(resolve_link("src/nope.rs", cwd), None, "A missing file must not open");
     let ask = "Lo que veo:\n- algo\n\nneeds input: ¿para qué es la rama nueva? Opciones:\n\n1. **Rama de PR** desde `main`\n2. Renombrar";
     assert_eq!(question_lines(ask, Some("¿para qué es la rama nueva? Opciones:")), vec!["¿para qué es la rama nueva? Opciones:", "1. Rama de PR desde main", "2. Renombrar"], "Question not cut at the ask");
     let split = concat!(r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Primera parte"}]}}"#, "\n",
@@ -242,7 +286,7 @@ pub fn run() {
     let _ = std::fs::remove_dir_all(&daemon);
     assert!(natural_cmp("w2:p1", "w10:p1") == std::cmp::Ordering::Less && natural_cmp("a", "A") == std::cmp::Ordering::Equal);
     assert_eq!(l10n::trf("Tú → {}: {}", &[&"a", &"b"]), l10n::text("Tú → {}: {}", &l10n::CURRENT).replacen("{}", "a", 1).replacen("{}", "b", 1));
-    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, natural order, {} bundled sprites", ROOM_FILES.len() + 1);
+    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, {} bundled sprites", ROOM_FILES.len() + 1);
 }
 
 #[cfg(test)]

@@ -17,8 +17,24 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("EN ESPERA", ["WAITING", "EN ATTENTE", "IN ATTESA", "EM ESPERA"]),
         ("LISTO", ["DONE", "TERMINÉ", "FATTO", "PRONTO"]),
         ("SIN ESTADO", ["NO STATUS", "SANS ÉTAT", "SENZA STATO", "SEM ESTADO"]),
-        ("ATRAPADO", ["TRAPPED", "PIÉGÉ", "INTRAPPOLATO", "PRESO"]),
+        ("AGOTADO", ["EXHAUSTED", "ÉPUISÉ", "ESAUSTO", "ESGOTADO"]),
         ("Límite de sesión", ["Session limit", "Limite de session", "Limite di sessione", "Limite de sessão"]),
+        ("Añadir a favoritas", ["Add to favourites", "Ajouter aux favoris", "Aggiungi ai preferiti", "Adicionar aos favoritos"]),
+        ("Quitar de favoritas", ["Remove from favourites", "Retirer des favoris", "Rimuovi dai preferiti", "Remover dos favoritos"]),
+        // HP viewer
+        ("lun", ["Mon", "lun", "lun", "seg"]),
+        ("mar", ["Tue", "mar", "mar", "ter"]),
+        ("mié", ["Wed", "mer", "mer", "qua"]),
+        ("jue", ["Thu", "jeu", "gio", "qui"]),
+        ("vie", ["Fri", "ven", "ven", "sex"]),
+        ("sáb", ["Sat", "sam", "sab", "sáb"]),
+        ("dom", ["Sun", "dim", "dom", "dom"]),
+        ("HP de la guild", ["Guild HP", "PV de la guilde", "PV della gilda", "HP da guilda"]),
+        ("{} créditos", ["{} credits", "{} crédits", "{} crediti", "{} créditos"]),
+        ("Elegir plan…", ["Pick plan…", "Choisir l'offre…", "Scegli piano…", "Escolher plano…"]),
+        ("sem", ["wk", "sem", "sett", "sem"]),
+        ("mes", ["mo", "mois", "mese", "mês"]),
+        ("{}: {}% usado", ["{}: {}% used", "{} : {} % utilisé", "{}: {}% usato", "{}: {}% usado"]),
         ("se reinicia en {}", ["resets in {}", "réinitialisation dans {}", "si azzera tra {}", "reinicia em {}"]),
         // Status labels
         ("Trabajando", ["Working", "Au travail", "Al lavoro", "Trabalhando"]),
@@ -42,6 +58,7 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
              "Creato da Nacho Valencia.\nCodice e pixel art originali · MIT.\n\nProgetto indipendente, non affiliato a Herdr, Inc.",
              "Criado por Nacho Valencia.\nCódigo e pixel art originais · MIT.\n\nProjeto independente, sem afiliação com a Herdr, Inc."]),
         // Sounds and chat
+        ("↑↓ y Enter eligen · esc cancela", ["↑↓ and Enter choose · esc cancels", "↑↓ et Enter choisissent · échap annule", "↑↓ e Enter scelgono · esc annulla", "↑↓ e Enter escolhem · esc cancela"]),
         ("↑↓ y Enter eligen · o responde a {}…", ["↑↓ and Enter choose · or reply to {}…", "↑↓ et Enter choisissent · ou réponds à {}…", "↑↓ e Enter scelgono · o rispondi a {}…", "↑↓ e Enter escolhem · ou responda a {}…"]),
         ("Finalizar agente (/exit)", ["End agent (/exit)", "Terminer l’agent (/exit)", "Termina l’agente (/exit)", "Encerrar agente (/exit)"]),
         ("¿Finalizar {}?", ["End {}?", "Terminer {} ?", "Terminare {}?", "Encerrar {}?"]),
@@ -98,6 +115,9 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("Notificaciones activadas", ["Notifications on", "Notifications activées", "Notifiche attive", "Notificações ativadas"]),
         // Activity log
         ("Registro de actividad", ["Activity log", "Journal d’activité", "Registro attività", "Registro de atividade"]),
+        ("Mostrar en Finder: {}", ["Show in Finder: {}", "Afficher dans le Finder : {}", "Mostra nel Finder: {}", "Mostrar no Finder: {}"]),
+        ("Abrir una terminal", ["Open a terminal", "Ouvrir un terminal", "Apri un terminale", "Abrir um terminal"]),
+        ("Abrir una terminal en esta carpeta", ["Open a terminal in this folder", "Ouvrir un terminal dans ce dossier", "Apri un terminale in questa cartella", "Abrir um terminal nesta pasta"]),
         ("Registro de la guild", ["Guild log", "Journal de la guilde", "Registro della gilda", "Registro da guilda"]),
         ("Aún no pasa nada.", ["Nothing has happened yet.", "Rien ne s’est encore passé.", "Non è ancora successo nulla.", "Nada aconteceu ainda."]),
         // Connection

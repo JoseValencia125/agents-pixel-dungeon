@@ -1,6 +1,6 @@
 [package]
 name = "herdr-pixel-dungeon"
-version = "2.0.1"
+version = "2.1.0"
 edition = "2021"
 description = "A native pixel-art guild for your live Herdr agents, for macOS and Linux."
 license = "MIT"

@@ -4,7 +4,7 @@
 
 **A native pixel-art guild for your live [Herdr](https://herdr.dev) agents, for macOS and Linux.**
 
-Each coding agent is a hero in a dungeon room that changes with its real Herdr status: working at the forge, asking for your attention, caged until its usage limit resets, resting, done. Click a room to answer the agent, accept or decline its permission prompts, or summon a new one. Rust, `egui`, a status item in the menu bar or tray, no browser or server.
+Each coding agent is a hero in a dungeon room that changes with its real Herdr status: working at the forge, asking for your attention, exhausted on an infirmary cot until its usage limit resets, reading while it waits, done. Click a room to answer the agent, accept or decline its permission prompts, or summon a new one. Rust, `egui`, a status item in the menu bar or tray, no browser or server.
 
 <p align="center">
   <img src="docs/media/demo.gif" width="460" alt="The widget in demo mode: six agents working, asking for attention, trapped by the session limit, waiting and done">
@@ -22,8 +22,8 @@ Binaries for macOS (`.app`) and Linux (x86_64) are on the [Releases](https://git
 | --- | --- | --- | --- |
 | `working` | <img src="docs/media/room_working.png" width="216" alt=""> | Workshop: desk, bookshelves, forge, alchemy table | Works at the station of its last tool: reads, forges, brews, summons, plans or types |
 | `blocked` | <img src="docs/media/room_blocked.png" width="216" alt=""> | Sealed door, braziers, a rug | Jumps on the rug under a pulsing red "!" |
-| session limit | <img src="docs/media/room_limited.png" width="216" alt=""> | The sealed room in violet | Locked in a cage that drops from the ceiling, rattling the bars over a countdown to the reset |
-| `idle` | <img src="docs/media/room_idle.png" width="216" alt=""> | Inn room at night | Sleeps under the blanket, z's drifting up |
+| session limit | <img src="docs/media/room_limited.png" width="216" alt=""> | Infirmary with a cot under the red cross | Exhausted, asleep on the cot under a breathing blanket, with the time left to recover until the reset |
+| `idle` | <img src="docs/media/room_idle.png" width="216" alt=""> | Chamber at night, by the fireplace | Reads in an armchair by the fire, turning a page now and then |
 | `done` | <img src="docs/media/room_done.png" width="216" alt=""> | Treasure chamber | Jumps for joy under a green tick, confetti flying |
 | unknown | <img src="docs/media/room_unknown.png" width="216" alt=""> | Ruins with a portal | Wanders, looking around |
 
@@ -36,7 +36,7 @@ The session limit is not a Herdr state: the dungeon reads it from Claude Code's 
 | Harness | Hero | |
 | --- | :---: | --- |
 | **claude** (Claude Code) | <img src="docs/media/hero_claude.png" width="64" alt="Coral wizard"> | Coral wizard with a staff |
-| **codex** (OpenAI Codex) | <img src="docs/media/hero_codex.png" width="64" alt="Monochrome knight"> | Monochrome knight with sword and shield |
+| **codex** (OpenAI Codex) | <img src="docs/media/hero_codex.png" width="64" alt="Monochrome alchemist"> | Monochrome hooded alchemist with a glowing flask |
 | **kiro** (Amazon Kiro) | <img src="docs/media/hero_kiro.png" width="64" alt="Purple-hooded rogue"> | Purple-hooded rogue with a ghost face |
 | **gemini** (Google Gemini CLI) | <img src="docs/media/hero_gemini.png" width="64" alt="Blue star cleric"> | Blue star cleric |
 | any other | <img src="docs/media/hero_hero.png" width="64" alt="Green adventurer"> | Green adventurer |
@@ -45,9 +45,10 @@ Original pixel art drawn in Aseprite (sources in `art/`), coloured after each to
 
 ## What it does
 
-- **Chat with an agent**: its terminal's last lines, a box to reply, ↑/↓ to pick among a question's options, Accept / Decline / Stop buttons, `/exit` from the right-click menu.
+- **Chat with an agent**: its terminal's last lines, a box to reply (it grows to three lines, ⇧⏎ breaks a line), ↑/↓ to pick among a question's options, Accept / Decline / Stop buttons, a `>_` button that opens a terminal in the agent's folder, `/exit` from the right-click menu.
 - **Summon agents** in any folder with a first prompt, through Herdr.
-- **Session limits**: a trapped agent waits in a cage with the time left until its limit resets, also shown in its chat.
+- **The guild's HP** in full screen: each harness's plan left (Claude's week and 5-hour session, Codex's limits, Kiro's monthly credits) and when it refills.
+- **Session limits**: an exhausted agent rests on a cot in the infirmary with the time left until its limit resets, also shown in its chat.
 - **Chimes and desktop notifications** when an agent needs help or finishes.
 - **Subagents** as small heroes at the station of their own tool (Claude Code).
 - **Filters, search and an activity log**; the window resizes to whole rooms, scrolls, and remembers where you left it.

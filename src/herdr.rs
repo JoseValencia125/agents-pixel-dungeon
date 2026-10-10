@@ -657,6 +657,93 @@ pub fn connection_note(error: Option<&str>, updated: Option<Instant>, now: Insta
 /// Harnesses offered when creating an agent (all are `herdr agent start --kind` values).
 pub const CREATABLE_KINDS: [&str; 8] = ["claude", "codex", "gemini", "kiro", "opencode", "cursor", "copilot", "amp"];
 
+/// The link in `text` around char `index`: a URL, or something path-like
+/// (has a `/`, starts with `~`, or is a `name.ext`), without the quotes,
+/// brackets and trailing punctuation around it.
+pub fn link_at(text: &str, index: usize) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if index > chars.len() { return None; }
+    let stop = |c: char| c.is_whitespace() || "\"'`<>()[]{}│".contains(c);
+    let mut start = index.min(chars.len());
+    while start > 0 && !stop(chars[start - 1]) { start -= 1; }
+    let mut end = index;
+    while end < chars.len() && !stop(chars[end]) { end += 1; }
+    if start >= end { return None; }
+    let token: String = chars[start..end].iter().collect();
+    let token = token.trim_end_matches(['.', ',', ';', '!', '?', ':']).trim_start_matches(['•', '⎿', '●', '-', '*']);
+    if token.is_empty() { return None; }
+    let url = ["http://", "https://", "file://"].iter().any(|p| token.starts_with(p));
+    let pathish = token.contains('/') || token.starts_with('~') || token.rsplit_once('.').map(|(name, ext)| !name.is_empty() && (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()) && !ext.chars().all(|c| c.is_ascii_digit())).unwrap_or(false);
+    (url || pathish).then(|| token.to_string())
+}
+
+/// What a link opens: a URL as it is; a path with `:line[:col]` dropped,
+/// `~` expanded and a relative one taken from `cwd`, if it exists.
+pub fn resolve_link(link: &str, cwd: &str) -> Option<String> {
+    if ["http://", "https://", "file://"].iter().any(|p| link.starts_with(p)) { return Some(link.to_string()); }
+    let mut path = link;
+    for _ in 0..2 {
+        if let Some((head, tail)) = path.rsplit_once(':') { if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) { path = head; } }
+    }
+    let expanded = expand_home(path);
+    let full = if expanded.starts_with('/') { PathBuf::from(&expanded) } else { PathBuf::from(expand_home(cwd)).join(&expanded) };
+    full.exists().then(|| full.to_string_lossy().to_string())
+}
+
+/// A terminal window in `cwd`, to type a command in: Terminal on macOS,
+/// the first terminal emulator found on Linux.
+pub fn open_terminal(cwd: &str) {
+    let cwd = if cwd.trim().is_empty() { home_dir().to_string_lossy().to_string() } else { expand_home(cwd) };
+    if cfg!(target_os = "macos") {
+        let _ = std::process::Command::new("open").args(["-a", "Terminal", &cwd]).spawn();
+        return;
+    }
+    for terminal in ["x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal", "alacritty", "kitty", "xterm"] {
+        if std::process::Command::new(terminal).current_dir(&cwd).spawn().is_ok() { return; }
+    }
+}
+
+/// What ⌘-click on a link does: a URL opens in the browser; a file or a
+/// folder is shown in Finder (selected in its folder), or in the file
+/// manager on Linux, instead of being opened.
+pub fn reveal_target(target: &str) {
+    if ["http://", "https://"].iter().any(|p| target.starts_with(p)) { return open_target(target); }
+    let path = target.strip_prefix("file://").unwrap_or(target);
+    if cfg!(target_os = "macos") {
+        let _ = std::process::Command::new("open").args(["-R", path]).spawn();
+        return;
+    }
+    let uri = format!("file://{path}");
+    let shown = std::process::Command::new("dbus-send")
+        .args(["--session", "--dest=org.freedesktop.FileManager1", "--type=method_call", "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems", &format!("array:string:{uri}"), "string:"])
+        .status().map(|s| s.success()).unwrap_or(false);
+    if !shown {
+        let folder = std::path::Path::new(path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
+        open_target(&folder);
+    }
+}
+
+/// Open a URL or a path with the system (open / xdg-open).
+pub fn open_target(target: &str) {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let _ = std::process::Command::new(opener).arg(target).spawn();
+}
+
+/// The harnesses installed on this machine, of CREATABLE_KINDS: their
+/// command is on PATH or in a usual install folder (an app opened from
+/// Finder gets a short PATH). All of them when none is found.
+pub fn installed_kinds() -> Vec<&'static str> {
+    let home = home_dir();
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    dirs.extend([".local/bin", ".cargo/bin", ".bun/bin", ".npm-global/bin", ".volta/bin", ".opencode/bin"].iter().map(|d| home.join(d)));
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].iter().map(PathBuf::from));
+    let found: Vec<&'static str> = CREATABLE_KINDS.iter().copied().filter(|kind| {
+        let command = match *kind { "kiro" => "kiro-cli", "cursor" => "cursor-agent", other => other };
+        dirs.iter().any(|d| d.join(command).is_file())
+    }).collect();
+    if found.is_empty() { CREATABLE_KINDS.to_vec() } else { found }
+}
+
 /// A unique, readable Herdr agent name: kind, folder and a short suffix.
 pub fn agent_name(kind: &str, folder: &str) -> String {
     let slug: String = folder.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
@@ -1020,6 +1107,11 @@ pub fn question_lines(message: &str, needs: Option<&str>) -> Vec<String> {
     lines.into_iter().filter(|l| !l.trim().is_empty()).collect()
 }
 
+/// Whether a trimmed line is a numbered option ("❯ 2. Opus", "3) No").
+pub fn is_option(trimmed: &str) -> bool {
+    option_prefix(trimmed).is_some()
+}
+
 /// `^(❯\s*)?\d+[.)]\s+`: the option number and where its text starts.
 fn option_prefix(trimmed: &str) -> Option<(bool, u32, usize)> {
     let mut rest = trimmed;
@@ -1113,12 +1205,6 @@ pub fn meaningful_lines(text: &str) -> Vec<String> {
 /// a tool line, an option, a heading…).
 pub fn paragraphs(lines: &[String]) -> Vec<String> {
     let widest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    let starts_block = |line: &str| {
-        let t = line.trim_start();
-        t.is_empty()
-            || ["●", "⎿", "❯", "│", "╭", "╰", "├", "└", "⏺", "✻", "✳", "✢", "✽", "✶", "※", "- ", "* ", "• ", "> ", "#", "⏵"].iter().any(|m| t.starts_with(m))
-            || option_prefix(t).is_some()
-    };
     let mut out: Vec<String> = vec![];
     let mut open = false; // the last paragraph may continue
     for line in lines {
@@ -1134,6 +1220,16 @@ pub fn paragraphs(lines: &[String]) -> Vec<String> {
         open = full;
     }
     out
+}
+
+/// Whether a terminal line starts a block of its own rather than continuing
+/// the one above: empty, a tool line, a bullet, a numbered option, a rule…
+pub fn starts_block(line: &str) -> bool {
+    let t = line.trim_start();
+    t.is_empty()
+        || ["●", "⎿", "❯", "›", "│", "╭", "╰", "├", "└", "⏺", "✻", "✳", "✢", "✽", "✶", "※", "✘", "✔", "- ", "* ", "• ", "> ", "#", "⏵"].iter().any(|m| t.starts_with(m))
+        || option_prefix(t).is_some()
+        || t.trim_end().chars().all(|c| matches!(c, '─' | '━' | '═' | '╌' | '┄' | '-'))
 }
 
 /// What a Claude Code session is doing right now, from the last 128 KB of
