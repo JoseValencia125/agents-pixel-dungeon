@@ -27,6 +27,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Linux) instead of opening it; URLs still open in the browser.
 - In full screen, lines a narrow pane wrapped are joined again, so the console
   uses its whole width.
+- The guild's HP options (Claude's source, Kiro's plan) show when you click
+  that hero or its name, and hide with another click.
+- A room change plays half again as fast: the hero walks out and back in at
+  1.5× speed and the new room fades in sooner.
 
 ### Fixed
 - Pickers such as `/model` can be driven from the chat while the agent's empty
@@ -39,6 +43,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   off the prompt line, and the box under the console is no longer cut off.
 - ↑/↓ move through the "/" command menu again.
 - In full screen, the typed text sits on the same line as the prompt's ❯.
+- The last hero in the guild's HP is no longer cut off.
 - Kiro's `/model` picker, whose options have no numbers, is driven from the
   chat: ↑/↓, ⏎ and esc go to it instead of the box covering its highlight.
 - Kiro asking for a tool's permission mid-conversation shows all its options
@@ -47,15 +52,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it; ⌘-click still opens links and paths.
 - esc (or Stop) on a working agent puts the message it was working on back in
   the box, to edit and send again.
-- The guild's HP options (Claude's source, Kiro's plan) show when you click
-  that hero or its name, and hide with another click; the rows no longer get
-  cut off.
-- A room change plays half again as fast: the hero walks out and back in at
-  1.5× speed and the new room fades in sooner.
 
 ### Privacy
 - Claude's HP comes from the last `/usage` Claude Code cached, and no
-  credential is read. Opt-in: **Live (token)**, under Claude's bars, reads
+  credential is read. Opt-in: **Live (token)**, in Claude's options (click Claude), reads
   Claude Code's OAuth token from the macOS keychain (or
   `~/.claude/.credentials.json`) and asks Anthropic's usage endpoint at most
   every two minutes. The guide's Privacy section describes it.
