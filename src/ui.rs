@@ -166,8 +166,6 @@ pub struct HudState {
 pub struct HudAction {
     pub toggle_log: bool,
     pub compose: bool,
-    /// Open a terminal to type a command in.
-    pub terminal: bool,
 }
 
 /// The HUD grows a second row while the search box is open.
@@ -181,7 +179,7 @@ pub const SEARCH_ROW: f32 = 26.0;
 /// rooms, and a search box (on its own row) over project, harness, branch,
 /// folder and activity.
 pub fn hud(ui: &mut Ui, monitor: &mut Monitor, state: &mut HudState) -> HudAction {
-    let mut action = HudAction { toggle_log: false, compose: false, terminal: false };
+    let mut action = HudAction { toggle_log: false, compose: false };
     // One column of rooms leaves no room for words: the "All" chip shows only its count.
     let narrow = ui.available_width() < crate::scene::width_for(2) - 20.0;
     let open = state.searching || !monitor.query.is_empty();
@@ -202,9 +200,6 @@ pub fn hud(ui: &mut Ui, monitor: &mut Monitor, state: &mut HudState) -> HudActio
                 }
                 if flat_button(ui, mono("📜", 13.0).color(alpha(Color32::from_rgb(237, 214, 158), 0.85))).on_hover_text(tr("Registro de actividad")).clicked() {
                     action.toggle_log = true;
-                }
-                if flat_button(ui, mono(">_", 11.0).strong().color(alpha(Color32::WHITE, 0.75))).on_hover_text(tr("Abrir una terminal")).clicked() {
-                    action.terminal = true;
                 }
                 if flat_button(ui, mono("+", 16.0).strong().color(Color32::from_rgb(140, 217, 115))).on_hover_text(tr("Invocar un agente nuevo")).clicked() {
                     action.compose = true;

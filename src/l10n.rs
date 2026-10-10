@@ -120,7 +120,6 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         // Activity log
         ("Registro de actividad", ["Activity log", "Journal d’activité", "Registro attività", "Registro de atividade"]),
         ("Mostrar en Finder: {}", ["Show in Finder: {}", "Afficher dans le Finder : {}", "Mostra nel Finder: {}", "Mostrar no Finder: {}"]),
-        ("Abrir una terminal", ["Open a terminal", "Ouvrir un terminal", "Apri un terminale", "Abrir um terminal"]),
         ("Abrir una terminal en esta carpeta", ["Open a terminal in this folder", "Ouvrir un terminal dans ce dossier", "Apri un terminale in questa cartella", "Abrir um terminal nesta pasta"]),
         ("Registro de la guild", ["Guild log", "Journal de la guilde", "Registro della gilda", "Registro da guilda"]),
         ("Aún no pasa nada.", ["Nothing has happened yet.", "Rien ne s’est encore passé.", "Non è ancora successo nulla.", "Nada aconteceu ainda."]),

@@ -34,7 +34,7 @@ Herdr does not report subagents, so for Claude Code agents the app reads the tra
 
 Click a room to open a chat panel for that agent: its terminal as it shows, colours and all (a question keeps its plain lines, with the options to click), a box to send a message or the answer to a question (drop files on the panel to add their paths; type `/` for the harness's commands, with Claude Code's custom commands, skills and plugin skills), and buttons to accept or decline a permission prompt, interrupt the agent (esc), or focus its pane in Herdr. The box grows to three lines as you type (⇧⏎ breaks a line, ⏎ sends) and scrolls past that. A pane narrower than the console has its wrapped lines joined again, so paragraphs fill the console's width. While the agent shows a picker of its own (`/model`, `/resume`…), ↑/↓, ⏎ and esc go to it, even when its empty prompt is still in sight under the list.
 
-The `>_` button, in the chat's header, in the bar under the rooms and in a room's right-click menu, opens a terminal window to type a command in: in that agent's folder, or, from the bar, in the open chat's folder or where agents were last summoned (Terminal on macOS, the first terminal emulator found on Linux).
+The `>_` button, in the chat's header and in a room's right-click menu, opens a terminal window to type a command in, in that agent's folder (Terminal on macOS, the first terminal emulator found on Linux).
 
 While the agent is asking something with numbered options, ↑ and ↓ (or a click) highlight an option in the panel and put its text in the box; Enter then picks it — moving the agent's own menu to that option — or sends the text when the question is plain text. With nothing typed, Enter picks the option its terminal already highlights.
 

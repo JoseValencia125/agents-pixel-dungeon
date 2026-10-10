@@ -833,7 +833,6 @@ impl eframe::App for App {
                 let action = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| ui::hud(ui, &mut self.monitor, &mut self.hud)).inner;
                 if action.toggle_log { self.show_log = !self.show_log; }
                 if action.compose { let on = !self.monitor.composing; self.monitor.set_composing(on); }
-                if action.terminal { self.open_terminal_for(None); }
             }
             // The chat or summon panel: under the rooms while one is open;
             // the console side in full screen, always.

@@ -11,8 +11,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when it refills. Claude's HP is the general weekly limit and its MP the
   5-hour session; Codex's come from its session logs; Kiro's HP is the month's
   credits against a plan you pick.
-- A `>_` button (chat header, the bar under the rooms, a room's right-click
-  menu) that opens a terminal in the agent's folder to type a command.
+- A `>_` button (chat header, a room's right-click menu) that opens a
+  terminal in the agent's folder to type a command.
 - Starred folders in the summon panel, offered first.
 - The chat box grows to three lines as you type and scrolls past that;
   ⇧⏎ breaks a line, ⏎ sends.
