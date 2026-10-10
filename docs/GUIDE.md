@@ -28,7 +28,7 @@ When Claude Code hits its usage limit it writes the refusal to the session's tra
 
 ## Subagents
 
-Herdr does not report subagents, so for Claude Code agents the app reads the transcripts Claude Code writes under `~/.claude/projects/<project>/<session>/subagents/`, matched by the session ID in Herdr's snapshot. A subagent counts as active while its transcript changed in the last 30 seconds. Active subagents appear as small heroes of the same harness, with a count in the room's title; each goes to the station of the last tool in its own transcript and walks to a new one when it changes tool. Other harnesses show no subagents.
+Herdr does not report subagents, so for Claude Code agents the app reads the transcripts Claude Code writes under `~/.claude/projects/<project>/<session>/subagents/`, matched by the session ID in Herdr's snapshot. A subagent counts as active while its transcript changed in the last 30 seconds. Active subagents appear as small heroes of the same harness, with a count next to the room's state; each goes to the station of the last tool in its own transcript and walks to a new one when it changes tool. Other harnesses show no subagents.
 
 ## Chat
 
