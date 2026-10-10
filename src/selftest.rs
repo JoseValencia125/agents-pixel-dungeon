@@ -107,6 +107,14 @@ pub fn run() {
     assert_eq!((crate::ui::prompt_line(&prompt), crate::ui::picker_open(&prompt)), (Some(3), false), "Prompt line not found");
     let picker = crate::ansi::parse("❯ /model\n  Select model\n    1. Default (recommended)\n  ❯ 2. Opus 5.5 ✔\n    3. Fable 5.1\n  Enter to set as default");
     assert_eq!((crate::ui::prompt_line(&picker), crate::ui::picker_open(&picker)), (None, true), "A picker's highlight was taken for the prompt");
+    // Claude Code's trust dialog: unnumbered options under a menu footer.
+    let trust = " Accessing workspace:\n\n /Users/me/rock-tower\n\n Quick safety check: Is this a project you created or one you trust?\n\n Security guide\n\n ❯ Yes, I trust this folder\n   No, exit\n\n Enter to confirm · Esc to cancel";
+    let lines = meaningful_lines(trust);
+    assert!(lines.iter().any(|l| l.contains("❯ Yes, I trust this folder")), "The trust dialog's highlighted option was dropped: {lines:?}");
+    let menu = crate::herdr::MenuOptions::new(&lines);
+    assert_eq!(menu.options.iter().map(|o| o.text.as_str()).collect::<Vec<_>>(), vec!["Yes, I trust this folder", "No, exit"], "Unnumbered options not read: {lines:?}");
+    assert_eq!((menu.highlighted, menu.is_menu(), menu.keys_choosing(1)), (Some(0), true, vec!["down".to_string(), "enter".to_string()]));
+    assert!(meaningful_lines("● listo\n────\n❯ hola\n────").iter().all(|l| !l.contains("hola")), "The input prompt was kept");
     let rule = "──────────────────────────────────────────";
     let narrow = crate::ansi::parse(&format!("  ❯ 3.  Fable 5.1 ✔          For your \n                             toughest \n\n  Enter to set as default · s to use\n  this session only · Esc to cancel\n\n{rule}\n❯\u{a0}\n{rule}"));
     assert_eq!((crate::ui::prompt_line(&narrow), crate::ui::picker_open(&narrow)), (None, true), "An empty prompt under a picker hid the picker");

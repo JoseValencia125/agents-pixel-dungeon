@@ -32,6 +32,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Pickers such as `/model` can be driven from the chat while the agent's empty
   prompt is still visible under them: ↑/↓, ⏎ and esc go to the picker.
 - The chat box keeps the focus when new lines arrive in the terminal.
+- Menus without numbers, such as Claude Code's "Do you trust this folder?",
+  show all their options in the chat; ↑/↓ highlight one and Accept or ⏎ picks it.
 
 ### Privacy
 - Claude's HP comes from the last `/usage` Claude Code cached, and no

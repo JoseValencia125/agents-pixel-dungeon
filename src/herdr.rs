@@ -1145,8 +1145,48 @@ pub struct MenuOption {
     pub line: usize,
 }
 
+/// The hint under a menu driven by arrow keys ("Enter to confirm · Esc to cancel").
+pub fn is_menu_footer(trimmed: &str) -> bool {
+    ["Enter to confirm", "Enter to select", "Esc to cancel", "Enter to continue"].iter().any(|s| trimmed.contains(s))
+}
+
 impl MenuOptions {
     pub fn new(lines: &[String]) -> MenuOptions {
+        let numbered = MenuOptions::numbered(lines);
+        if !numbered.options.is_empty() { return numbered; }
+        MenuOptions::unnumbered(lines)
+    }
+
+    /// A menu whose options have no numbers ("❯ Yes, I trust this folder",
+    /// "  No, exit"): the run of lines around the highlighted one whose text
+    /// starts in the same column, numbered here in order.
+    fn unnumbered(lines: &[String]) -> MenuOptions {
+        let mut menu = MenuOptions::default();
+        let footer = lines.iter().rposition(|l| is_menu_footer(l.trim())).unwrap_or(lines.len());
+        let Some(marked) = lines[..footer].iter().rposition(|l| { let t = l.trim_start(); t.starts_with('❯') && !t['❯'.len_utf8()..].trim().is_empty() }) else { return menu };
+        let marker = lines[marked].chars().take_while(|c| c.is_whitespace()).count();
+        let column = marker + 1 + lines[marked].chars().skip(marker + 1).take_while(|c| c.is_whitespace()).count();
+        let text_at = |line: &String| -> Option<String> {
+            let lead = line.chars().take_while(|c| c.is_whitespace()).count();
+            let rest: String = line.chars().skip(column).collect();
+            let head: String = line.chars().take(column).collect();
+            let plain = lead == column;
+            let pointed = head.trim() == "❯" && lead == marker;
+            ((plain || pointed) && !rest.trim().is_empty() && !is_menu_footer(line.trim())).then(|| rest.trim_end().to_string())
+        };
+        let mut first = marked;
+        while first > 0 && text_at(&lines[first - 1]).is_some() { first -= 1; }
+        let mut last = marked;
+        while last + 1 < footer && text_at(&lines[last + 1]).is_some() { last += 1; }
+        if first == last { return menu; }
+        for i in first..=last {
+            if i == marked { menu.highlighted = Some(menu.options.len()); }
+            menu.options.push(MenuOption { number: (menu.options.len() + 1) as u32, text: text_at(&lines[i]).unwrap_or_default(), line: i });
+        }
+        menu
+    }
+
+    fn numbered(lines: &[String]) -> MenuOptions {
         let mut menu = MenuOptions::default();
         for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
@@ -1182,7 +1222,11 @@ impl MenuOptions {
 pub fn meaningful_lines(text: &str) -> Vec<String> {
     let mut out = vec![];
     let mut skipping = false;
-    for raw in text.split('\n') {
+    // A menu's ❯ (an unnumbered option, as in "Do you trust this folder?")
+    // stays: it is above the menu's footer, unlike the input prompt.
+    let rows: Vec<&str> = text.split('\n').collect();
+    let menu_end = rows.iter().rposition(|l| is_menu_footer(l.trim()));
+    for (index, raw) in rows.iter().enumerate() {
         let line = raw.trim_end();
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.chars().all(|c| "─━═╌┄-".contains(c)) { skipping = false; continue; }
@@ -1193,7 +1237,8 @@ pub fn meaningful_lines(text: &str) -> Vec<String> {
         let footer = ["⏵", "▶▶", "►", "⏸"].iter().any(|s| trimmed.starts_with(s))
             || ["? for shortcuts", "shift+tab to cycle", "esc to interrupt"].iter().any(|s| trimmed.contains(s));
         if status { skipping = true; continue; }
-        if footer || (trimmed.starts_with('❯') && !option) { continue; }
+        let in_menu = menu_end.map(|end| index < end).unwrap_or(false);
+        if footer || (trimmed.starts_with('❯') && !option && !in_menu) { continue; }
         out.push(line.to_string());
     }
     out
