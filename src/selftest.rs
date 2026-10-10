@@ -116,6 +116,8 @@ pub fn run() {
     assert_eq!((menu.highlighted, menu.is_menu(), menu.keys_choosing(1)), (Some(0), true, vec!["down".to_string(), "enter".to_string()]));
     assert!(meaningful_lines("● listo\n────\n❯ hola\n────").iter().all(|l| !l.contains("hola")), "The input prompt was kept");
     let rule = "──────────────────────────────────────────";
+    let quoted = crate::ansi::parse(&format!("  assert!(x, \"Esc to cancel\");\n● done\n\n{rule}\n❯\u{a0}\n{rule}"));
+    assert_eq!((crate::ui::prompt_line(&quoted), crate::ui::picker_open(&quoted)), (Some(4), false), "Text quoting a picker's footer was taken for a picker");
     let narrow = crate::ansi::parse(&format!("  ❯ 3.  Fable 5.1 ✔          For your \n                             toughest \n\n  Enter to set as default · s to use\n  this session only · Esc to cancel\n\n{rule}\n❯\u{a0}\n{rule}"));
     assert_eq!((crate::ui::prompt_line(&narrow), crate::ui::picker_open(&narrow)), (None, true), "An empty prompt under a picker hid the picker");
     let texts = |s: &[Vec<crate::ansi::Span>]| s.iter().map(|l| l.iter().map(|x| x.text.as_str()).collect::<String>()).collect::<Vec<_>>();

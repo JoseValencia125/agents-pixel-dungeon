@@ -33,7 +33,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prompt is still visible under them: ↑/↓, ⏎ and esc go to the picker.
 - The chat box keeps the focus when new lines arrive in the terminal.
 - Menus without numbers, such as Claude Code's "Do you trust this folder?",
-  show all their options in the chat; ↑/↓ highlight one and Accept or ⏎ picks it.
+  show all their options in the chat; ↑/↓ move the terminal's own ❯ and Accept
+  or ⏎ picks it.
+- In full screen, text that quotes a picker's footer no longer takes the box
+  off the prompt line, and the box under the console is no longer cut off.
 
 ### Privacy
 - Claude's HP comes from the last `/usage` Claude Code cached, and no

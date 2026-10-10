@@ -370,7 +370,7 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
             state.sending = None;
             state.note = failure;
             state.focus = true;
-            state.next_tail = now + 0.6;
+            state.next_tail = now + 0.25;
             state.tail_rx = None;
             state.next_screen = now + 0.3;
         }
@@ -398,7 +398,14 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
     }
     if agent.status == "blocked" && (up || down) && !standalone {
         let delta: i64 = if up { -1 } else { 1 };
-        if !menu.options.is_empty() {
+        if menu.is_menu() {
+            // A menu driven by arrows: they go to the terminal, so its own ❯
+            // moves; the highlight here follows it on the next read.
+            if !sending {
+                state.choice = None;
+                state.run(monitor.press(&[if up { "up".to_string() } else { "down".to_string() }], agent));
+            }
+        } else if !menu.options.is_empty() {
             let start = state.choice.map(|c| c as i64).or(menu.highlighted.map(|h| h as i64)).unwrap_or(if delta > 0 { -1 } else { menu.options.len() as i64 });
             let index = (start + delta).clamp(0, menu.options.len() as i64 - 1) as usize;
             state.pick(&menu, index);
@@ -441,7 +448,7 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
         let prompt_line = if wide && !asking && !standalone { prompt_line(&state.screen) } else { None };
         let inline = prompt_line.is_some();
         // The box under the console grows to three rows with what is typed.
-        let box_height = input_height(draft_rows(&state.draft, (ui.available_width() / (fs(13.0) * 0.62)) as usize), fs(13.0), true);
+        let box_height = input_height(draft_rows(&state.draft, (ui.available_width() / (fs(13.0) * 0.62)) as usize), fs(13.0), true) + 10.0;
         let body_height = total - 7.0 * 2.0 - 22.0 - if standalone { 14.0 } else if inline { 0.0 } else { box_height } - if state.note.is_some() { 16.0 } else { 0.0 };
         Frame::new().fill(alpha(Color32::BLACK, 0.45)).corner_radius(CornerRadius::same(5)).inner_margin(Margin::same(6)).show(ui, |ui| {
             ui.set_min_height(body_height.max(40.0));
@@ -496,7 +503,7 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
                 let mut picked: Option<usize> = None;
                 for (i, line) in shown.iter().enumerate() {
                     let option = menu.options.iter().position(|o| o.line == i);
-                    let highlighted = option.is_some() && option == state.choice;
+                    let highlighted = option.is_some() && option == state.choice.or(menu.highlighted);
                     let lead = asking && i == 0 && agent.question.is_some();
                     let text = mono(line, 11.0).color(if highlighted || lead { Color32::WHITE } else { Color32::from_gray(222) });
                     let text = if highlighted || lead { text.strong() } else { text };
@@ -669,9 +676,13 @@ fn marked(line: &[Span]) -> Option<(bool, bool)> {
 fn last_marked_line(screen: &[Vec<Span>]) -> Option<(usize, bool)> {
     let (index, option, bare) = screen.iter().enumerate().rev().find_map(|(i, l)| marked(l).map(|(o, b)| (i, o, b)))?;
     if option || !bare { return Some((index, option)); }
-    let above = screen[..index].iter().rev().take(30);
-    let picker = above.clone().filter_map(|l| marked(l)).next().map(|(o, _)| o).unwrap_or(false)
-        || above.map(|l| l.iter().map(|s| s.text.as_str()).collect::<String>()).any(|t| t.contains("Esc to cancel"));
+    // The nearest line with text above the prompt's box (past its top rule
+    // and blank lines) is the picker's footer or one of its options.
+    let nearest = screen[..index].iter().rev().map(|l| l.iter().map(|s| s.text.as_str()).collect::<String>()).find(|t| {
+        let t = t.trim();
+        !t.is_empty() && !t.chars().all(|c| matches!(c, '─' | '━' | '═' | '╌' | '┄' | '-'))
+    });
+    let picker = nearest.map(|t| crate::herdr::is_menu_footer(t.trim()) || (t.trim_start().starts_with('❯') && crate::herdr::is_option(t.trim()))).unwrap_or(false);
     Some((index, picker))
 }
 
