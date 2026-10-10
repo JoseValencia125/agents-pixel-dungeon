@@ -403,7 +403,44 @@ pub fn run() {
     let _ = std::fs::remove_dir_all(&daemon);
     assert!(natural_cmp("w2:p1", "w10:p1") == std::cmp::Ordering::Less && natural_cmp("a", "A") == std::cmp::Ordering::Equal);
     assert_eq!(l10n::trf("Tú → {}: {}", &[&"a", &"b"]), l10n::text("Tú → {}: {}", &l10n::CURRENT).replacen("{}", "a", 1).replacen("{}", "b", 1));
-    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, background shells, {} bundled sprites", ROOM_FILES.len() + 1);
+    window_sizing();
+    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, window sizing, background shells, {} bundled sprites", ROOM_FILES.len() + 1);
+}
+
+/// The widget's size: fitted to the agents until the user resizes it, then
+/// kept whatever the agents or the chat panel need.
+fn window_sizing() {
+    use crate::{layout_height, layout_width, snap_columns, snap_rows};
+    use crate::scene::{columns_fitting, GAP, ROW_H};
+    use crate::ui::PANEL_HEIGHT;
+    let rows = |n: f32| n * ROW_H + (n - 1.0) * GAP;
+    let (chrome, screen) = (60.0, 2000.0);
+    // Automatic: never more columns than agents, nor rows than they fill.
+    assert_eq!(layout_width(4, 2, false, None), width_for(2));
+    assert_eq!(layout_width(2, 0, false, None), width_for(1));
+    assert!((1..=8).all(|n| columns_fitting(width_for(n)) == n));
+    assert_eq!(layout_height(2, 4, chrome, None, screen), chrome + rows(2.0));
+    assert_eq!(layout_height(9, 4, chrome, None, screen), chrome + rows(4.0));
+    assert_eq!(layout_height(9, 9, chrome, None, 900.0), 900.0);
+    // A one-room widget widens while a panel is open.
+    assert_eq!(layout_width(1, 5, true, None), width_for(2));
+    assert_eq!(layout_width(1, 5, true, Some(width_for(1))), width_for(2));
+    assert_eq!(layout_width(1, 5, true, Some(900.0)), 900.0);
+    // User-sized: the width stays exactly as dragged, however many agents
+    // there are, also past one screen; never under one room.
+    assert_eq!(layout_width(2, 2, false, Some(1000.0)), 1000.0, "Rounding must not shrink a resized widget");
+    assert_eq!(layout_width(8, 9, false, Some(3000.0)), 3000.0, "A widget across two screens keeps its width");
+    assert_eq!(layout_width(3, 9, false, Some(10.0)), width_for(1));
+    // User-sized: the height stays with the chat panel open or closed,
+    // whatever the agents need and past the screen, but never under one row.
+    let user = 777.0;
+    assert_eq!(layout_height(1, 4, chrome, Some(user), screen), user, "Few agents must not shrink a resized widget");
+    assert_eq!(layout_height(1, 4, chrome + PANEL_HEIGHT, Some(user), screen), user, "Opening the chat must not change a resized widget");
+    assert_eq!(layout_height(1, 4, chrome, Some(1500.0), 900.0), 1500.0, "The screen's height must not shrink a resized widget");
+    assert_eq!(layout_height(1, 1, chrome + PANEL_HEIGHT, Some(chrome + rows(1.0)), screen), chrome + PANEL_HEIGHT + ROW_H, "The chat needs a row of rooms above it");
+    // The columns and rows remembered for the next start: the nearest.
+    assert!(snap_columns(width_for(3)) == 3 && snap_columns(width_for(3) + 100.0) == 3 && snap_columns(width_for(3) + 130.0) == 4 && snap_columns(10.0) == 1 && snap_columns(9000.0) == 8);
+    assert!(snap_rows(chrome + rows(2.0), chrome) == 2 && snap_rows(chrome + rows(2.0) + 0.4 * (ROW_H + GAP), chrome) == 2 && snap_rows(chrome + rows(2.0) + 0.6 * (ROW_H + GAP), chrome) == 3 && snap_rows(chrome, chrome) == 1);
 }
 
 #[cfg(test)]
