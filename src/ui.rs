@@ -1121,13 +1121,20 @@ fn hp_bar(ui: &mut Ui, hp: f32, height: f32, segments: usize, fill: Color32) {
 /// Each harness's plan left, as its hero's stats: HP is the week (Kiro's
 /// month of credits), mana the session (the 5-hour window), refilling at
 /// its countdown. Returns a Kiro plan the user picked.
-pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate::usage::HarnessUsage], now: f64) -> Option<u32> {
-    let mut picked = None;
+/// What was changed in the HP viewer: Kiro's plan, Claude's source.
+#[derive(Default)]
+pub struct UsagePick {
+    pub kiro_plan: Option<u32>,
+    pub claude_live: Option<bool>,
+}
+
+pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate::usage::HarnessUsage], now: f64, claude_live: bool) -> UsagePick {
+    let mut picked = UsagePick::default();
     let unix = crate::herdr::unix_now();
     let mana_color = Color32::from_rgb(90, 150, 255);
     ui.spacing_mut().item_spacing = vec2(6.0, 3.0);
     ui.add_space(5.0);
-    ui.label(mono(&tr("HP de la guild"), 10.0).strong().color(DIM));
+    ui.label(mono(&tr("HP de la guild (uso restante)"), 10.0).strong().color(DIM));
     for usage in usages {
         let name = match usage.harness { "claude" => "Claude", "codex" => "Codex", "kiro" => "Kiro", other => other };
         let health = usage.meters.iter().find(|m| m.window != "5h");
@@ -1171,13 +1178,24 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
                         let shown = plan.and_then(|p| crate::usage::KIRO_PLANS.iter().find(|(_, c)| *c == p)).map(|(n, _)| n.to_string()).unwrap_or_else(|| tr("Elegir plan…"));
                         egui::ComboBox::from_id_salt("kiro-plan").selected_text(mono(&shown, 9.0)).width(70.0).show_ui(ui, |ui| {
                             for (label, credits) in crate::usage::KIRO_PLANS {
-                                if ui.selectable_label(plan == Some(credits), format!("{label} · {credits}")).clicked() { picked = Some(credits); }
+                                if ui.selectable_label(plan == Some(credits), format!("{label} · {credits}")).clicked() { picked.kiro_plan = Some(credits); }
                             }
                         });
                         // The month's credits come back on the 1st.
                         if let Some(at) = health.filter(|m| m.used > 0.0).and_then(|m| m.resets).and_then(|r| crate::usage::reset_label(r, chrono::Local::now(), false)) {
                             ui.label(mono(&format!("↻ {at}"), 9.0).color(DIM));
                         }
+                    });
+                }
+                // Where Claude's numbers come from: the last /usage Claude
+                // Code cached, or live with its token (opt-in).
+                if usage.harness == "claude" {
+                    let source = |live: bool| if live { tr("En vivo (token)") } else { tr("Último /usage") };
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("claude-source").selected_text(mono(&source(claude_live), 9.0)).width(110.0).show_ui(ui, |ui| {
+                            if ui.selectable_label(!claude_live, source(false)).on_hover_text(tr("Lo que Claude Code guardó la última vez que corriste /usage. No lee credenciales.")).clicked() { picked.claude_live = Some(false); }
+                            if ui.selectable_label(claude_live, source(true)).on_hover_text(tr("Pregunta a Anthropic cada 2 min con el token de Claude Code (llavero de macOS o ~/.claude/.credentials.json).")).clicked() { picked.claude_live = Some(true); }
+                        });
                     });
                 }
                 // When each refills: HP on the week's (or month's) reset

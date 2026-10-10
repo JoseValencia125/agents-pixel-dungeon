@@ -34,9 +34,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The chat box keeps the focus when new lines arrive in the terminal.
 
 ### Privacy
-- To show Claude's plan usage, the app reads Claude Code's OAuth token from the
-  macOS keychain (or `~/.claude/.credentials.json`) and asks Anthropic's usage
-  endpoint at most every two minutes. The guide's Privacy section describes it.
+- Claude's HP comes from the last `/usage` Claude Code cached, and no
+  credential is read. Opt-in: **Live (token)**, under Claude's bars, reads
+  Claude Code's OAuth token from the macOS keychain (or
+  `~/.claude/.credentials.json`) and asks Anthropic's usage endpoint at most
+  every two minutes. The guide's Privacy section describes it.
 
 ## [2.0.1] - 2026-10-09
 

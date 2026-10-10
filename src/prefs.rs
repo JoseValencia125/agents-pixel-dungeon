@@ -32,6 +32,9 @@ pub struct Prefs {
     pub console_scale: f32,
     /// Kiro's monthly credits (its plan), for the HP viewer; 0 until picked.
     pub kiro_plan: u32,
+    /// Claude's HP live from Anthropic with Claude Code's OAuth token; off,
+    /// only the last /usage Claude Code cached in ~/.claude.json.
+    pub claude_usage_live: bool,
     /// Folders starred in the summon panel, offered first.
     pub favorite_folders: Vec<String>,
     #[serde(skip)]
@@ -59,6 +62,7 @@ impl Default for Prefs {
             text_scale: 1.0,
             console_scale: 1.0,
             kiro_plan: 0,
+            claude_usage_live: false,
             favorite_folders: vec![],
             path: None,
         }

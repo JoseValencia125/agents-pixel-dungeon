@@ -760,7 +760,7 @@ impl eframe::App for App {
         let fullscreen = self.fullscreen;
         // The HP viewer's data, every 30 s while in full screen.
         if fullscreen && now >= self.next_usage && self.usage_rx.is_none() {
-            self.usage_rx = Some(usage::fetch(herdr::home_dir(), self.prefs.kiro_plan));
+            self.usage_rx = Some(usage::fetch(herdr::home_dir(), self.prefs.kiro_plan, self.prefs.claude_usage_live));
             self.next_usage = now + 30.0;
         }
         if let Some(rx) = &self.usage_rx {
@@ -820,8 +820,9 @@ impl eframe::App for App {
                 ui.painter().rect_filled(rect, CornerRadius::ZERO, ui::HUD_FILL);
                 ui.painter().hline(rect.x_range(), rect.min.y, egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 20)));
                 let inner = Rect::from_min_max(egui::pos2(rect.min.x + 10.0, rect.min.y), egui::pos2(rect.max.x - 10.0, rect.max.y));
-                let picked = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| { ui.set_clip_rect(rect); ui::usage_panel(ui, &self.assets, &self.usages, now) }).inner;
-                if let Some(plan) = picked { self.prefs.kiro_plan = plan; self.prefs.save(); self.next_usage = 0.0; }
+                let picked = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| { ui.set_clip_rect(rect); ui::usage_panel(ui, &self.assets, &self.usages, now, self.prefs.claude_usage_live) }).inner;
+                if let Some(plan) = picked.kiro_plan { self.prefs.kiro_plan = plan; self.prefs.save(); self.next_usage = 0.0; }
+                if let Some(live) = picked.claude_live { self.prefs.claude_usage_live = live; self.prefs.save(); self.next_usage = 0.0; }
             }
             // The HUD.
             if shows_hud {

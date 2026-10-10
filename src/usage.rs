@@ -39,10 +39,10 @@ pub struct HarnessUsage {
 pub const KIRO_PLANS: [(&str, u32); 4] = [("Free", 50), ("Pro", 1000), ("Pro+", 2000), ("Power", 10000)];
 
 /// Read every harness's usage on a thread; the receiver gets them once.
-pub fn fetch(home: PathBuf, kiro_plan: u32) -> Receiver<Vec<HarnessUsage>> {
+pub fn fetch(home: PathBuf, kiro_plan: u32, claude_live: bool) -> Receiver<Vec<HarnessUsage>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
-        let found = [claude(&home), codex(&home), kiro(&home, kiro_plan, chrono::Local::now())];
+        let found = [claude(&home, claude_live), codex(&home), kiro(&home, kiro_plan, chrono::Local::now())];
         let _ = tx.send(found.into_iter().flatten().collect());
     });
     rx
@@ -50,8 +50,13 @@ pub fn fetch(home: PathBuf, kiro_plan: u32) -> Receiver<Vec<HarnessUsage>> {
 
 // ---- Claude Code
 
-pub fn claude(home: &Path) -> Option<HarnessUsage> {
-    if let Some(usage) = claude_live(home).as_ref().and_then(claude_from_utilization) { return Some(usage); }
+/// Claude's usage: with `live`, asked to Anthropic with Claude Code's token
+/// (falling back to the cache); without it, only the last /usage Claude
+/// Code cached, and no credential is read.
+pub fn claude(home: &Path, live: bool) -> Option<HarnessUsage> {
+    if live {
+        if let Some(usage) = claude_live(home).as_ref().and_then(claude_from_utilization) { return Some(usage); }
+    }
     let text = std::fs::read_to_string(home.join(".claude.json")).ok()?;
     claude_from(&serde_json::from_str(&text).ok()?)
 }
