@@ -113,6 +113,9 @@ pub fn run() {
         assert_eq!(menu.options.iter().map(|o| o.text.as_str()).collect::<Vec<_>>(), vec!["Yes, single permission", "No (Tab to edit)"], "Kiro's approval options not read: {lines:?}");
         assert_eq!((menu.highlighted, menu.is_menu()), (Some(0), true));
     }
+    // Terminal titles that say nothing give way to the session's title.
+    assert!(["kiro-cli", "codex", "zsh", "~/Verbrawl", ""].iter().all(|t| crate::herdr::generic_title(t, if t.contains("codex") { "codex" } else { "kiro" })), "A bare harness or shell title was kept");
+    assert!(!crate::herdr::generic_title("Guion promocional herdr dungeon", "claude"), "A real title was replaced");
     let picker = crate::ansi::parse("❯ /model\n  Select model\n    1. Default (recommended)\n  ❯ 2. Opus 5.5 ✔\n    3. Fable 5.1\n  Enter to set as default");
     assert_eq!((crate::ui::prompt_line(&picker), crate::ui::picker_open(&picker)), (None, true), "A picker's highlight was taken for the prompt");
     // Claude Code's trust dialog: unnumbered options under a menu footer.

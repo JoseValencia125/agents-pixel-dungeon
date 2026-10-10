@@ -11,6 +11,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its branch on the left and its state on the right.
 - The state on a room's card changes as soon as the agent's does, while the
   hero is still walking to its new room.
+- When an agent's terminal title only names its harness or shell (Kiro's
+  `kiro-cli`), the room shows the session's own title instead: Kiro's, from
+  its session in `~/.kiro/sessions/cli`, or Codex's last prompt. Kiro's
+  session is found by folder, since Herdr does not report it, so its hero
+  also follows its tools.
 
 ## [2.1.0] - 2026-10-10
 

@@ -361,6 +361,21 @@ pub fn enrich(agents: Vec<Agent>) -> Vec<Agent> {
             if agent.name == "claude" {
                 agent = agent.with_jobs(jobs.get(&path).map(Vec::as_slice).unwrap_or(&[]));
             }
+            // Herdr does not report Kiro's session: the newest one Kiro
+            // keeps for this folder.
+            let kiro = (harness_for(&agent.name) == "kiro").then(|| kiro_session_for(&path)).flatten();
+            if agent.session.is_none() { agent.session = kiro.as_ref().map(|k| k.0.clone()); }
+            // A terminal title that only names the harness or the shell says
+            // nothing: the session's own title or the last prompt instead.
+            if generic_title(&agent.activity, harness_for(&agent.name)) {
+                let better = match harness_for(&agent.name) {
+                    "kiro" => kiro.map(|k| k.1).filter(|t| !t.is_empty()),
+                    "codex" => agent.session.as_deref().and_then(codex_transcript).and_then(|f| file_tail(&f, 131_072))
+                        .and_then(|t| crate::standalone::codex_view(&t, Duration::ZERO, false).prompt),
+                    _ => None,
+                };
+                if let Some(text) = better { agent.activity = text; }
+            }
             let Some(session) = agent.session.clone() else { return agent };
             match harness_for(&agent.name) {
                 "claude" => {
@@ -1046,6 +1061,42 @@ pub fn codex_transcript(session: &str) -> Option<String> {
 }
 
 /// Kiro's session file: an absolute path as given, else ~/.kiro/sessions/cli/<session>.jsonl.
+/// A terminal title that tells nothing about the work: empty, the
+/// harness's own name ("kiro-cli", "codex"), a shell or a path.
+pub fn generic_title(title: &str, harness: &str) -> bool {
+    let t = title.trim().to_lowercase();
+    t.is_empty() || t == tr("Sin título de actividad").to_lowercase()
+        || (t.contains(harness) && t.chars().count() <= harness.len() + 5)
+        || ["zsh", "-zsh", "bash", "-bash", "fish", "sh"].contains(&t.as_str())
+        || t.starts_with('~') || t.starts_with('/')
+}
+
+/// Kiro's sessions as read: file → (modified, folder, title).
+static KIRO_SESSIONS: Mutex<Option<HashMap<PathBuf, (SystemTime, String, String)>>> = Mutex::new(None);
+
+/// The newest Kiro session for a folder: its ID and the title Kiro gave it,
+/// from ~/.kiro/sessions/cli/<id>.json (each file read again only when it
+/// changes).
+pub fn kiro_session_for(folder: &str) -> Option<(String, String)> {
+    let files = std::fs::read_dir(home_dir().join(".kiro/sessions/cli")).ok()?;
+    let mut guard = KIRO_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let known = guard.get_or_insert_with(HashMap::new);
+    let mut best: Option<(SystemTime, String, String)> = None;
+    for file in files.flatten().map(|f| f.path()).filter(|p| p.extension().is_some_and(|e| e == "json")) {
+        let Some(modified) = file_modified(&file.to_string_lossy()) else { continue };
+        if known.get(&file).map(|k| k.0) != Some(modified) {
+            let Some(row) = std::fs::read(&file).ok().and_then(|d| serde_json::from_slice::<Value>(&d).ok()) else { continue };
+            let read = |key| str_of(&row, key).unwrap_or("").to_string();
+            known.insert(file.clone(), (modified, read("cwd"), read("title")));
+        }
+        let (when, cwd, title) = &known[&file];
+        if cwd.trim_end_matches('/') != folder.trim_end_matches('/') || best.as_ref().is_some_and(|b| b.0 >= *when) { continue; }
+        let id = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        best = Some((*when, id, title.clone()));
+    }
+    best.map(|(_, id, title)| (id, title))
+}
+
 pub fn kiro_transcript(session: &str) -> Option<String> {
     if session.starts_with('/') { return Some(session.to_string()); }
     let path = home_dir().join(format!(".kiro/sessions/cli/{session}.jsonl"));
