@@ -185,6 +185,10 @@ struct App {
     /// A panel opened while the widget was one room wide: it widens to two
     /// rooms meanwhile, so the chat has room, and narrows back on close.
     widened: bool,
+    /// The width / height the user resized the widget to: kept as it is
+    /// from then on, whatever the agents or the chat panel need.
+    user_width: Option<f32>,
+    user_height: Option<f32>,
     /// The standalone banner: hidden for this run, an install in progress, its outcome.
     banner_dismissed: bool,
     installing: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
@@ -258,6 +262,8 @@ impl App {
             login,
             login_enabled,
             widened: false,
+            user_width: None,
+            user_height: None,
             banner_dismissed: false,
             installing: None,
             herdr_note: None,
@@ -302,10 +308,10 @@ impl App {
 
     // ---- Window geometry
 
-    /// Columns shown: the user's, but never more than there are agents.
+    /// Columns shown: the user's, but never more than there are agents
+    /// until the user resizes the widget; then as many as fit its width.
     fn shown_columns(&self) -> usize {
-        if self.widened && self.panel_open() { return 2; }
-        self.prefs.columns.min(self.monitor.agents.len().max(1))
+        scene::columns_fitting(self.target_width())
     }
 
     fn panel_open(&self) -> bool {
@@ -318,23 +324,27 @@ impl App {
     }
 
     /// Height that shows the agents' rows, up to the user's row count (at
-    /// least one), capped to the screen.
+    /// least one), capped to the screen. Once the user resized the widget,
+    /// its height instead, the chat panel taking room from the rooms.
     fn target_height(&self, screen: Vec2) -> f32 {
         let columns = self.shown_columns();
         let needed = (self.monitor.visible_agents().len() + columns - 1) / columns;
-        let shown = needed.max(1).min(self.prefs.rows) as f32;
-        let wanted = self.chrome() + shown * ROW_H + (shown - 1.0) * GAP;
-        let limit = screen.y - SCREEN_TOP - 2.0 * MARGIN;
-        if limit > 100.0 { wanted.min(limit) } else { wanted }
+        layout_height(needed, self.prefs.rows, self.chrome(), self.user_height, screen.y - SCREEN_TOP - 2.0 * MARGIN)
     }
 
     fn target_width(&self) -> f32 {
-        scene::width_for(self.shown_columns())
+        layout_width(self.prefs.columns, self.monitor.agents.len(), self.widened && self.panel_open(), self.user_width)
     }
 
-    fn command_size(&mut self, ctx: &egui::Context, outer: Rect, size: Vec2, anchor_left: bool) {
+    /// The window's outer rect, and whether its place is known: Wayland
+    /// tells a window its size but not where it is.
+    fn window_rect(ctx: &egui::Context) -> (Rect, bool) {
+        ctx.input(|i| i.viewport().outer_rect.map(|r| (r, true)).unwrap_or_else(|| (Rect::from_min_size(egui::Pos2::ZERO, i.screen_rect().size()), false)))
+    }
+
+    fn command_size(&mut self, ctx: &egui::Context, (outer, placed): (Rect, bool), size: Vec2, anchor_left: bool) {
         let x = if anchor_left { outer.min.x } else { outer.max.x - size.x };
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x, outer.min.y)));
+        if placed { ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x, outer.min.y))); }
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
         self.expected = Some(size);
         self.commanded_at = Some(Instant::now());
@@ -346,14 +356,14 @@ impl App {
     fn fit_size(&mut self, ctx: &egui::Context, anchor_left: bool) {
         // Full screen is the screen's size, whatever the rooms need.
         if self.fullscreen || self.fullscreen_at.is_some() { return; }
-        let (outer, screen) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().monitor_size));
-        let Some(outer) = outer else { return };
-        let screen = screen.unwrap_or(vec2(1440.0, 900.0));
+        let window = Self::window_rect(ctx);
+        let outer = window.0;
+        let screen = ctx.input(|i| i.viewport().monitor_size).unwrap_or(vec2(1440.0, 900.0));
         ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(vec2(scene::width_for(1), self.chrome() + ROW_H)));
         if self.resize_start.is_some() { return; }
         let size = vec2(self.target_width(), self.target_height(screen));
         if (outer.width() - size.x).abs() > 0.5 || (outer.height() - size.y).abs() > 0.5 {
-            self.command_size(ctx, outer, size, anchor_left);
+            self.command_size(ctx, window, size, anchor_left);
         }
     }
 
@@ -385,7 +395,7 @@ impl App {
         // Going full screen (and back) changes the size and place without
         // the user resizing: nothing to remember.
         if self.fullscreen || self.fullscreen_at.is_some() { return; }
-        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else { return };
+        let (outer, placed) = Self::window_rect(ctx);
         let size = outer.size();
         let settled = self.commanded_at.map(|t| t.elapsed() > Duration::from_millis(600)).unwrap_or(true);
         if let (Some(expected), Some(last)) = (self.expected, self.last_size) {
@@ -397,15 +407,22 @@ impl App {
             }
         }
         if let (Some(start), Some(changed)) = (self.resize_start, self.size_changed_at) {
-            let dragging = ctx.input(|i| i.pointer.any_down());
+            // After the grip hands the drag to the system, the button's
+            // release may never reach the app: only the pause counts then.
+            let dragging = !self.grip && ctx.input(|i| i.pointer.any_down());
             if now - changed > 0.35 && !dragging {
-                // Snap: the new width picks the columns, the new height the rows to
-                // show before scrolling. A side left alone keeps its setting.
+                // The new size is kept as it is from then on: clicks, the chat
+                // panel and the agents coming and going no longer change it.
+                // The nearest columns and rows are remembered for the next
+                // start. A side left alone keeps its setting.
                 if (size.x - start.width()).abs() > 1.0 {
-                    self.prefs.columns = (((size.x - GAP) / (scene::ROW_W + GAP)).round() as usize).clamp(1, 8);
+                    self.prefs.columns = snap_columns(size.x);
+                    self.user_width = Some(size.x);
+                    self.widened = false;
                 }
                 if (size.y - start.height()).abs() > 1.0 {
-                    self.prefs.rows = (((size.y - self.chrome() + GAP) / (ROW_H + GAP)).round() as usize).max(1);
+                    self.prefs.rows = snap_rows(size.y, self.chrome());
+                    self.user_height = Some(size.y);
                 }
                 self.prefs.save();
                 let anchor_left = self.grip || (outer.min.x - start.min.x).abs() < 1.0;
@@ -414,7 +431,7 @@ impl App {
                 self.grip = false;
                 self.fit_size(ctx, anchor_left);
             }
-        } else if let Some(last) = self.last_outer {
+        } else if let (Some(last), true) = (self.last_outer, placed) {
             let moved = (outer.min.x - last.min.x).abs() > 0.5 || (outer.min.y - last.min.y).abs() > 0.5;
             if moved && settled {
                 self.prefs.top_right = Some((outer.max.x, outer.min.y));
@@ -897,6 +914,37 @@ impl eframe::App for App {
         if needs_fit { self.fit_size(ctx, false); }
         ctx.request_repaint_after(Duration::from_millis(if self.visible { 33 } else { 500 }));
     }
+}
+
+/// The widget's width: the width the user resized it to (at least a room),
+/// or the user's columns but never more than there are agents; at least two
+/// rooms while a panel widens a one-room widget.
+fn layout_width(pref_columns: usize, agents: usize, widened: bool, user_width: Option<f32>) -> f32 {
+    let width = match user_width {
+        Some(width) => width.max(scene::width_for(1)),
+        None => scene::width_for(pref_columns.min(agents.max(1))),
+    };
+    if widened { width.max(scene::width_for(2)) } else { width }
+}
+
+/// The widget's height: the agents' rows up to the user's row count, capped
+/// to `limit`; or the height the user resized it to, which may span screens,
+/// never under one row of rooms.
+fn layout_height(needed_rows: usize, pref_rows: usize, chrome: f32, user_height: Option<f32>, limit: f32) -> f32 {
+    if let Some(height) = user_height { return height.max(chrome + ROW_H); }
+    let shown = needed_rows.max(1).min(pref_rows) as f32;
+    let wanted = chrome + shown * ROW_H + (shown - 1.0) * GAP;
+    if limit > 100.0 { wanted.min(limit) } else { wanted }
+}
+
+/// The column count nearest to a width.
+fn snap_columns(width: f32) -> usize {
+    (((width - GAP) / (scene::ROW_W + GAP)).round() as usize).clamp(1, 8)
+}
+
+/// The row count nearest to a height, past the chrome.
+fn snap_rows(height: f32, chrome: f32) -> usize {
+    (((height - chrome + GAP) / (ROW_H + GAP)).round() as usize).max(1)
 }
 
 /// Launch at login through a LaunchAgent (macOS) or an autostart entry (Linux).

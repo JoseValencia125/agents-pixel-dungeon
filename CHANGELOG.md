@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A widget you resize keeps exactly the size you gave it, also across two
+  screens: clicking a room, opening or closing the chat, or agents coming and
+  going no longer shrink it back. The chat takes its room from the rooms,
+  which scroll. On Wayland the widget now also fits its agents at start.
+
 ## [2.1.0] - 2026-10-10
 
 ### Added
