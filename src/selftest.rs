@@ -74,6 +74,7 @@ pub fn run() {
     let _ = std::fs::remove_file(&path);
     let mut prefs = Prefs::load(path.clone());
     assert!(wants_sound(&prefs, AlertKind::NeedsHelp) && wants_sound(&prefs, AlertKind::Finished));
+    assert_eq!(prefs.panel_height, crate::ui::PANEL_HEIGHT, "New settings get the chat's usual height");
     prefs.sound_finished = false;
     prefs.save();
     let reread = Prefs::load(path.clone());
@@ -319,9 +320,9 @@ pub fn run() {
 /// The widget's size: fitted to the agents until the user resizes it, then
 /// kept whatever the agents or the chat panel need.
 fn window_sizing() {
-    use crate::{layout_height, layout_width, snap_columns, snap_rows};
+    use crate::{fit_panel, layout_height, layout_width, snap_columns, snap_rows};
     use crate::scene::{columns_fitting, GAP, ROW_H};
-    use crate::ui::PANEL_HEIGHT;
+    use crate::ui::{MIN_PANEL, PANEL_HEIGHT};
     let rows = |n: f32| n * ROW_H + (n - 1.0) * GAP;
     let (chrome, screen) = (60.0, 2000.0);
     // Automatic: never more columns than agents, nor rows than they fill.
@@ -347,6 +348,12 @@ fn window_sizing() {
     assert_eq!(layout_height(1, 4, chrome + PANEL_HEIGHT, Some(user), screen), user, "Opening the chat must not change a resized widget");
     assert_eq!(layout_height(1, 4, chrome, Some(1500.0), 900.0), 1500.0, "The screen's height must not shrink a resized widget");
     assert_eq!(layout_height(1, 1, chrome + PANEL_HEIGHT, Some(chrome + rows(1.0)), screen), chrome + PANEL_HEIGHT + ROW_H, "The chat needs a row of rooms above it");
+    // The chat panel's dragged height: a row of rooms stays above it, and
+    // it keeps its least height whatever the widget's.
+    assert_eq!(fit_panel(PANEL_HEIGHT, 1000.0, chrome), PANEL_HEIGHT);
+    assert_eq!(fit_panel(900.0, 1000.0, chrome), 1000.0 - chrome - ROW_H, "The chat must leave a row of rooms");
+    assert_eq!(fit_panel(900.0, 300.0, chrome), MIN_PANEL);
+    assert_eq!(fit_panel(10.0, 1000.0, chrome), MIN_PANEL);
     // The columns and rows remembered for the next start: the nearest.
     assert!(snap_columns(width_for(3)) == 3 && snap_columns(width_for(3) + 100.0) == 3 && snap_columns(width_for(3) + 130.0) == 4 && snap_columns(10.0) == 1 && snap_columns(9000.0) == 8);
     assert!(snap_rows(chrome + rows(2.0), chrome) == 2 && snap_rows(chrome + rows(2.0) + 90.0, chrome) == 2 && snap_rows(chrome + rows(2.0) + 110.0, chrome) == 3 && snap_rows(chrome, chrome) == 1);

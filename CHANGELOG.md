@@ -6,6 +6,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- The bar under the rooms is a handle: drag it up for a taller chat, down for
+  more rooms. The rooms give the chat their room down to a last row, the
+  widget keeps its height, and the chat's height is remembered.
+
 ### Fixed
 - A widget you resize keeps exactly the size you gave it, also across two
   screens: clicking a room, opening or closing the chat, or agents coming and

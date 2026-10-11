@@ -30,7 +30,7 @@ use scene::{Scene, BACKGROUND, GAP, ROW_H};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tray::{MenuState, Tray, TrayAction};
-use ui::{ChatState, ComposeState, HudState, PANEL_HEIGHT};
+use ui::{ChatState, ComposeState, HudState, MIN_PANEL};
 
 /// Room above the first row (drag handle) and below the last one.
 const TOP_INSET: f32 = 14.0;
@@ -189,6 +189,8 @@ struct App {
     /// from then on, whatever the agents or the chat panel need.
     user_width: Option<f32>,
     user_height: Option<f32>,
+    /// The chat panel's height when its edge was grabbed, while it is dragged.
+    split_from: Option<f32>,
     /// The standalone banner: hidden for this run, an install in progress, its outcome.
     banner_dismissed: bool,
     installing: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
@@ -264,6 +266,7 @@ impl App {
             widened: false,
             user_width: None,
             user_height: None,
+            split_from: None,
             banner_dismissed: false,
             installing: None,
             herdr_note: None,
@@ -320,7 +323,12 @@ impl App {
 
     /// Height of everything that is not rooms: insets, HUD and chat panel.
     fn chrome(&self) -> f32 {
-        TOP_INSET + BOTTOM_INSET + if self.panel_open() { PANEL_HEIGHT } else { 0.0 } + if self.monitor.shows_hud() { ui::hud_height(&self.hud, &self.monitor) } else { 0.0 }
+        self.chrome_with(self.prefs.panel_height)
+    }
+
+    /// The same with the chat panel `panel` tall while one is open.
+    fn chrome_with(&self, panel: f32) -> f32 {
+        TOP_INSET + BOTTOM_INSET + if self.panel_open() { panel } else { 0.0 } + if self.monitor.shows_hud() { ui::hud_height(&self.hud, &self.monitor) } else { 0.0 }
     }
 
     /// Height that shows the agents' rows, up to the user's row count (at
@@ -359,7 +367,8 @@ impl App {
         let window = Self::window_rect(ctx);
         let outer = window.0;
         let screen = ctx.input(|i| i.viewport().monitor_size).unwrap_or(vec2(1440.0, 900.0));
-        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(vec2(scene::width_for(1), self.chrome() + ROW_H)));
+        // The chat panel gives way down to its least before the last row of rooms.
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(vec2(scene::width_for(1), self.chrome_with(MIN_PANEL) + ROW_H)));
         if self.resize_start.is_some() { return; }
         let size = vec2(self.target_width(), self.target_height(screen));
         if (outer.width() - size.x).abs() > 0.5 || (outer.height() - size.y).abs() > 0.5 {
@@ -421,6 +430,8 @@ impl App {
                     self.widened = false;
                 }
                 if (size.y - start.height()).abs() > 1.0 {
+                    // Shorter than the chat and a row of rooms: the chat gives way.
+                    if self.panel_open() { self.prefs.panel_height = fit_panel(self.prefs.panel_height, size.y, self.chrome_with(0.0)); }
                     self.prefs.rows = snap_rows(size.y, self.chrome());
                     self.user_height = Some(size.y);
                 }
@@ -799,7 +810,7 @@ impl eframe::App for App {
                 let hud_rect = Rect::from_min_max(egui::pos2(full.min.x, full.max.y - hud_h), egui::pos2(split, full.max.y));
                 (scene_rect, hud_rect, Rect::from_min_max(egui::pos2(split, full.min.y), full.max))
             } else {
-                let panel_h = if panel_open { PANEL_HEIGHT } else { 0.0 };
+                let panel_h = if panel_open { self.prefs.panel_height.min((full.height() - hud_h).max(0.0)) } else { 0.0 };
                 let scene_rect = Rect::from_min_max(full.min, egui::pos2(full.max.x, full.max.y - panel_h - hud_h));
                 let hud_rect = Rect::from_min_max(egui::pos2(full.min.x, scene_rect.max.y), egui::pos2(full.max.x, scene_rect.max.y + hud_h));
                 (scene_rect, hud_rect, Rect::from_min_max(egui::pos2(full.min.x, hud_rect.max.y), full.max))
@@ -822,6 +833,31 @@ impl eframe::App for App {
             if let Some(id) = response.finish { self.confirm_finish(&id); }
             if let Some(id) = response.terminal { self.open_terminal_for(Some(&id)); }
             if response.summon { let on = !self.monitor.composing; self.monitor.set_composing(on); }
+            // The edge between the rooms and the open panel, the HUD with it:
+            // dragged up the chat grows and the rooms give it their room,
+            // down to a last row; the widget keeps its height. Added before
+            // the HUD, whose chips and buttons stay on top for clicks.
+            let mut split_hot = false;
+            if panel_open && !fullscreen {
+                let edge = Rect::from_x_y_ranges(full.x_range(), (scene_rect.max.y - 3.0)..=(panel_rect.min.y + 4.0));
+                let split = ui.interact(edge, ui.id().with("panel-split"), egui::Sense::click_and_drag());
+                if split.drag_started() {
+                    self.split_from = Some(self.prefs.panel_height);
+                    if self.user_height.is_none() { self.user_height = Some(full.height()); }
+                }
+                if let (true, Some(from), Some(origin), Some(pointer)) = (split.dragged(), self.split_from, ctx.input(|i| i.pointer.press_origin()), split.interact_pointer_pos()) {
+                    self.prefs.panel_height = fit_panel(from + origin.y - pointer.y, full.height(), TOP_INSET + BOTTOM_INSET + hud_h);
+                }
+                if split.drag_stopped() {
+                    self.split_from = None;
+                    self.prefs.save();
+                }
+                // Over the HUD's own chips and buttons the pointer is theirs.
+                split_hot = split.dragged() || (split.hovered() && ctx.viewport(|v| v.hits.click.map(|w| w.id)) == Some(split.id));
+                if split_hot { ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical); }
+            } else {
+                self.split_from = None;
+            }
             // Full screen summons in the spare room itself.
             if let (Some((rect, view)), true) = (response.summon_rect, fullscreen && self.monitor.composing) {
                 let inner = rect.shrink(12.0);
@@ -882,6 +918,11 @@ impl eframe::App for App {
                         ui::console_placeholder(ui);
                     }
                 });
+                // The grabbed edge shows a bar to pull, as the drag handle does.
+                if split_hot {
+                    let bar = Rect::from_center_size(egui::pos2(panel_rect.center().x, panel_rect.min.y), vec2(56.0, 4.0));
+                    ui.painter().rect_filled(bar, CornerRadius::same(2), Color32::from_rgba_unmultiplied(255, 255, 255, 190));
+                }
             }
         });
 
@@ -935,6 +976,13 @@ fn layout_height(needed_rows: usize, pref_rows: usize, chrome: f32, user_height:
     let shown = needed_rows.max(1).min(pref_rows) as f32;
     let wanted = chrome + shown * ROW_H + (shown - 1.0) * GAP;
     if limit > 100.0 { wanted.min(limit) } else { wanted }
+}
+
+/// The chat panel's height: the one wanted, but leaving a row of rooms
+/// above it in a widget `height` tall (`others`: its insets and the HUD),
+/// and never under `MIN_PANEL`.
+fn fit_panel(wanted: f32, height: f32, others: f32) -> f32 {
+    wanted.min(height - others - ROW_H).max(MIN_PANEL)
 }
 
 /// The column count nearest to a width.
