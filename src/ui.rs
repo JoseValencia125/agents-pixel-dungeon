@@ -84,6 +84,21 @@ fn drop_hint(ui: &Ui, rect: egui::Rect) {
 /// `cwd` is the agent's folder here; None for an agent on another machine,
 /// whose paths are not on this computer (only URLs open).
 fn console_line(ui: &mut Ui, spans: &[Span], size: f32, cwd: Option<&str>) {
+    // A line the terminal fills to its edge: its background across the
+    // console too, closing the gap to the next line, so a box stays a box.
+    if let Some(bg) = crate::ansi::line_fill(spans) {
+        let slot = ui.painter().add(egui::Shape::Noop);
+        let top = ui.cursor().top();
+        console_line_text(ui, spans, size, cwd);
+        let gap = ui.spacing().item_spacing.y;
+        let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), (top - gap / 2.0)..=(ui.min_rect().bottom() + gap / 2.0));
+        ui.painter().set(slot, egui::Shape::rect_filled(rect, 0.0, bg));
+        return;
+    }
+    console_line_text(ui, spans, size, cwd);
+}
+
+fn console_line_text(ui: &mut Ui, spans: &[Span], size: f32, cwd: Option<&str>) {
     // Without ⌘ it is a plain label, so its text can still be selected.
     if !ui.input(|i| i.modifiers.command) { ui.add(screen_line(spans, size)); return; }
     let (pos, galley, response) = screen_line(spans, size).sense(egui::Sense::click()).layout_in_ui(ui);
@@ -110,7 +125,7 @@ fn console_line(ui: &mut Ui, spans: &[Span], size: f32, cwd: Option<&str>) {
 fn screen_line(spans: &[Span], size: f32) -> egui::Label {
     use egui::text::{LayoutJob, TextFormat};
     let mut job = LayoutJob::default();
-    if spans.is_empty() {
+    if spans.iter().all(|s| s.text.is_empty()) {
         job.append(" ", 0.0, TextFormat { font_id: FontId::monospace(size), ..Default::default() });
     }
     for span in spans {
@@ -412,7 +427,9 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
     }
     if now >= state.next_screen && state.screen_rx.is_none() && !unreachable {
         state.screen_rx = Some(monitor.screen(agent, wide));
-        state.next_screen = now + 0.5;
+        // Four reads a second where each is a round trip (this computer, or
+        // a machine's open bridge); two where each starts a `herdr --machine`.
+        state.next_screen = now + if monitor.reads_fast(agent) { 0.25 } else { 0.5 };
     }
     if let Some(rx) = &state.screen_rx {
         if let Ok(text) = rx.try_recv() {

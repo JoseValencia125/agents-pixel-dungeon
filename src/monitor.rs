@@ -4,7 +4,7 @@
 //! Background work reports back through a channel the UI drains each frame.
 
 use crate::alerts::{alerts_for, AgentAlert};
-use crate::events::{HerdrStream, StreamMessage};
+use crate::events::{HerdrStream, Requester, StreamMessage};
 use crate::herdr::*;
 use crate::l10n::{tr, trf};
 use serde_json::Value;
@@ -52,10 +52,11 @@ pub enum Link {
 }
 
 /// A saved SSH machine shown in the dungeon: its agents from its last good
-/// snapshot, and how its link is doing. Herdr serves no event stream over
-/// `--machine`, so each machine is read with `herdr --machine <id> api
-/// snapshot` every few seconds, backing off while it is unreachable.
-#[derive(Clone, Debug)]
+/// snapshot, and how its link is doing. Each machine is read with `herdr
+/// --machine <id> api snapshot`, backing off while it is unreachable. Herdr
+/// serves no event stream over `--machine`, so one is held open over SSH
+/// (see `events`): each event reads the machine again at once, and while
+/// it is open the snapshots are only a reconciliation.
 pub struct MachineView {
     pub machine: Machine,
     pub link: Link,
@@ -67,18 +68,47 @@ pub struct MachineView {
     /// before a reset or a hide is dropped and never frees a newer one.
     request: u64,
     failures: u32,
+    /// Something changed while a snapshot was in flight: read again after it.
+    dirty: bool,
+    stream: Option<HerdrStream>,
+    stream_panes: Vec<String>,
+    /// The event stream is open (its subscription confirmed).
+    live: bool,
+    next_stream_try: Instant,
+    stream_failures: u32,
 }
 
 impl MachineView {
     fn new(machine: Machine) -> MachineView {
-        MachineView { machine, link: Link::Connecting, agents: vec![], last_ok: None, next_poll: Instant::now(), busy: false, request: 0, failures: 0 }
+        let now = Instant::now();
+        MachineView {
+            machine, link: Link::Connecting, agents: vec![], last_ok: None, next_poll: now, busy: false, request: 0, failures: 0,
+            dirty: false, stream: None, stream_panes: vec![], live: false, next_stream_try: now, stream_failures: 0,
+        }
+    }
+
+    /// Its event stream is open: changes are read the moment they happen.
+    pub fn is_live(&self) -> bool {
+        self.live
+    }
+
+    /// Read the machine as soon as it is free.
+    fn poke(&mut self) {
+        if self.busy { self.dirty = true; } else { self.next_poll = Instant::now(); }
     }
 }
 
-/// How often a reachable machine is read, and the longest wait between
-/// attempts while it is not (5, 10, 20, 40, then 60 s).
+/// The base of the back-off while a machine is unreachable, and its
+/// longest wait between attempts (5, 10, 20, 40, then 60 s).
 const REMOTE_EVERY: Duration = Duration::from_secs(5);
 const REMOTE_BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// How often a reachable machine is read: often without its event stream,
+/// only to reconcile with it.
+const REMOTE_POLL: Duration = Duration::from_secs(2);
+const REMOTE_RECONCILE: Duration = Duration::from_secs(20);
+/// The longest wait before an event stream that dropped is tried again (a
+/// machine without python3 never opens one and is polled instead).
+const REMOTE_STREAM_BACKOFF_MAX: Duration = Duration::from_secs(120);
 /// Herdr's saved machines are listed from its local file this often.
 const MACHINES_EVERY: Duration = Duration::from_secs(30);
 
@@ -93,6 +123,7 @@ enum Inbox {
     Sessions(Vec<HerdrSession>),
     Machines(Option<Vec<SavedMachine>>),
     Remote { request: u64, machine: String, result: Result<Vec<Agent>, MonitorError> },
+    RemoteStream { machine: String, generation: u64, message: StreamMessage },
     /// An action reached this machine: read it again now.
     Poke(String),
     Log(GuildEvent),
@@ -431,7 +462,8 @@ impl Monitor {
                 view.link = Link::Up;
                 view.failures = 0;
                 view.last_ok = Some(now);
-                view.next_poll = now + REMOTE_EVERY;
+                view.next_poll = if view.dirty { now } else { now + if view.live { REMOTE_RECONCILE } else { REMOTE_POLL } };
+                view.dirty = false;
                 let count = agents.len();
                 view.agents = agents;
                 self.changed = true;
@@ -595,7 +627,24 @@ impl Monitor {
                     self.apply_remote(&machine, result);
                 }
                 Inbox::Poke(machine) => {
-                    if let Some(view) = self.machines.iter_mut().find(|v| v.machine.id == machine) { view.next_poll = Instant::now(); }
+                    if let Some(view) = self.machines.iter_mut().find(|v| v.machine.id == machine) { view.poke(); }
+                }
+                Inbox::RemoteStream { machine, generation, message } => {
+                    let Some(view) = self.machines.iter_mut().find(|v| v.machine.id == machine) else { continue };
+                    if view.stream.as_ref().map(|s| s.generation) != Some(generation) { continue; }
+                    match message {
+                        // Read it now: anything may have changed while subscribing.
+                        StreamMessage::Open => { view.live = true; view.stream_failures = 0; view.poke(); }
+                        StreamMessage::Event(_) => view.poke(),
+                        StreamMessage::Close => {
+                            view.stream = None;
+                            view.stream_panes.clear();
+                            view.live = false;
+                            view.stream_failures += 1;
+                            view.next_stream_try = Instant::now() + (REMOTE_EVERY * 2u32.saturating_pow(view.stream_failures.saturating_sub(1).min(6))).min(REMOTE_STREAM_BACKOFF_MAX);
+                            view.poke();
+                        }
+                    }
                 }
                 Inbox::Log(event) => { self.events.insert(0, event); self.events.truncate(40); }
                 Inbox::Created { failure, waiting, log } => {
@@ -679,6 +728,7 @@ impl Monitor {
     /// demo mode, and only once the local agents are in.
     fn poll_machines(&mut self) {
         if self.demo || !self.local_done { return; }
+        self.keep_remote_streams();
         let now = Instant::now();
         let due = (!self.listing_machines && now >= self.next_machine_list) || self.machines.iter().any(|v| !v.busy && now >= v.next_poll);
         if !due || herdr_binary().is_err() { return; }
@@ -705,6 +755,38 @@ impl Monitor {
                 let _ = sender.send(Inbox::Remote { request, machine: machine.id, result });
                 wake();
             });
+        }
+    }
+
+    /// Keep an event stream open on each reachable machine's agent panes,
+    /// reopening it when they change; none while a machine is out of reach.
+    fn keep_remote_streams(&mut self) {
+        let now = Instant::now();
+        for view in &mut self.machines {
+            if view.link != Link::Up || view.machine.target.is_empty() {
+                if view.stream.take().is_some() { view.stream_panes.clear(); view.live = false; }
+                continue;
+            }
+            let mut panes: Vec<String> = view.agents.iter().map(|a| a.pane.clone()).collect();
+            panes.sort();
+            if (view.stream.is_some() && panes == view.stream_panes) || now < view.next_stream_try { continue; }
+            self.streams_made += 1;
+            let stream = HerdrStream::remote(&view.machine.target, &view.machine.session, &panes, self.streams_made);
+            let (tx, rx) = channel::<(u64, StreamMessage)>();
+            let sender = self.outbox.clone();
+            let wake = self.wake.clone();
+            let machine = view.machine.id.clone();
+            std::thread::spawn(move || {
+                while let Ok((generation, message)) = rx.recv() {
+                    if sender.send(Inbox::RemoteStream { machine: machine.clone(), generation, message }).is_err() { break; }
+                    wake();
+                }
+            });
+            stream.start(tx);
+            // The one it replaces stops as it drops.
+            view.stream = Some(stream);
+            view.stream_panes = panes;
+            view.live = false;
         }
     }
 
@@ -836,6 +918,7 @@ impl Monitor {
     pub fn screen(&self, agent: &Agent, history: bool) -> Receiver<String> {
         let (tx, rx) = channel();
         let target = agent.target(&self.session);
+        let bridge = self.bridge(agent);
         let demo = self.demo;
         let agent = agent.clone();
         let wake = self.wake.clone();
@@ -844,14 +927,25 @@ impl Monitor {
                 format!("\x1b[38;2;215;119;87m●\x1b[0m \x1b[1m{}\x1b[0m\n  \x1b[2m⎿ Leyendo archivos del proyecto…\x1b[0m\n\n\x1b[38;2;136;136;136m────────────────────────────\x1b[0m\n❯ \x1b[2mTry \"fix the failing test\"\x1b[0m", agent.activity)
             } else {
                 let (source, lines) = if history { ("recent", "300") } else { ("visible", "80") };
-                run_herdr_on(&["agent", "read", &agent.pane, "--source", source, "--lines", lines, "--format", "ansi"], &target, Duration::from_secs(if agent.is_remote() { 8 } else { 4 }))
-                    .map(|d| String::from_utf8_lossy(&d).to_string())
-                    .unwrap_or_default()
+                read_terminal(&agent, &target, bridge.as_ref(), source, lines, "ansi")
             };
             let _ = tx.send(text);
             wake();
         });
         rx
+    }
+
+    /// The open bridge to a remote agent's machine, for its terminal reads.
+    fn bridge(&self, agent: &Agent) -> Option<Requester> {
+        let machine = agent.machine.as_ref()?;
+        let view = self.machines.iter().find(|v| v.machine.id == machine.id && v.live)?;
+        view.stream.as_ref().map(|s| s.requester())
+    }
+
+    /// Whether a remote agent's terminal is read through its machine's open
+    /// bridge (a round trip) rather than a `herdr --machine` each time.
+    pub fn reads_fast(&self, agent: &Agent) -> bool {
+        !agent.is_remote() || self.bridge(agent).is_some()
     }
 
     /// Bring the agent's pane to the front inside Herdr.
@@ -1010,6 +1104,7 @@ impl Monitor {
     pub fn tail(&self, agent: &Agent, lines: usize) -> Receiver<Vec<String>> {
         let (tx, rx) = channel();
         let target = agent.target(&self.session);
+        let bridge = self.bridge(agent);
         let demo = self.demo;
         let agent = agent.clone();
         let wake = self.wake.clone();
@@ -1041,9 +1136,7 @@ impl Monitor {
                     format!("● {}\n  ⎿ {}", agent.activity, tr("Leyendo archivos del proyecto…"))
                 }
             } else {
-                run_herdr_on(&["agent", "read", &agent.pane, "--source", "recent", "--lines", "60", "--format", "text"], &target, Duration::from_secs(if agent.is_remote() { 8 } else { 4 }))
-                    .map(|d| String::from_utf8_lossy(&d).to_string())
-                    .unwrap_or_default()
+                read_terminal(&agent, &target, bridge.as_ref(), "recent", "60", "text")
             };
             let rows = meaningful_lines(&text);
             let keep = if agent.status == "blocked" { 12 } else { lines };
@@ -1095,4 +1188,18 @@ fn prompt_failure(server: &HerdrTarget, target: &str, text: &str) -> Option<Stri
         Err(e) if e.code() == Some("agent_blocked") => Some(tr("El agente está esperando una respuesta; contéstale primero.")),
         Err(_) => Some(tr("Herdr rechazó la acción. Revisa el panel del agente.")),
     }
+}
+
+/// An agent's terminal text (`agent read`): through its machine's open
+/// bridge when there is one, else with `herdr [--machine]`; empty when it
+/// could not be read.
+fn read_terminal(agent: &Agent, target: &HerdrTarget, bridge: Option<&Requester>, source: &str, lines: &str, format: &str) -> String {
+    let params = serde_json::json!({ "target": agent.pane, "source": source, "lines": lines.parse::<u32>().ok(), "format": format, "strip_ansi": format != "ansi" });
+    // Herdr's refusal (a pane that went away) is as good as the CLI's.
+    if let Some(reply) = bridge.and_then(|b| b.request("agent.read", params)).and_then(|rx| rx.recv_timeout(Duration::from_secs(8)).ok()) {
+        return reply.get("result").and_then(|r| r.get("read")).and_then(|r| r.get("text")).and_then(Value::as_str).unwrap_or_default().to_string();
+    }
+    run_herdr_on(&["agent", "read", &agent.pane, "--source", source, "--lines", lines, "--format", format], target, Duration::from_secs(if agent.is_remote() { 8 } else { 4 }))
+        .map(|d| String::from_utf8_lossy(&d).to_string())
+        .unwrap_or_default()
 }

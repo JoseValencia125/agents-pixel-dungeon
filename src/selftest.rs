@@ -244,6 +244,16 @@ pub fn run() {
     assert!(screen.len() == 2 && crate::ansi::plain(&screen) == ["ok plain", "● x"], "ANSI lines: {:?}", crate::ansi::plain(&screen));
     assert!(screen[0][0].bold && screen[0][0].fg == Some(egui::Color32::from_rgb(56, 196, 56)) && screen[0][1].fg.is_none() && !screen[0][1].bold);
     assert!(screen[1][0].fg == Some(egui::Color32::from_rgb(215, 119, 87)) && screen[1][1].bg == Some(egui::Color32::from_rgb(1, 2, 3)));
+    // Pi's boxes: lines painted to the edge keep their background as a fill,
+    // padding rows included; a box's lines are never joined.
+    let pad = " ".repeat(60);
+    let boxed = |bg: u8, text: &str| format!("\x1b[48;2;{bg};0;0m {text}{}\x1b[0m", " ".repeat(59 - text.chars().count()));
+    let wide = format!("{}\n{}\n{}\n\x1b[48;2;9;0;0m{pad}\x1b[0m\n\n{}\nplain after the box", boxed(9, &"a".repeat(55)), boxed(9, "wrapped on"), boxed(7, "other box"), boxed(9, "x"));
+    let flowed = crate::ansi::reflow(crate::ansi::parse(&wide));
+    let fills: Vec<Option<egui::Color32>> = flowed.iter().map(|l| crate::ansi::line_fill(l)).collect();
+    let red = |r: u8| Some(egui::Color32::from_rgb(r, 0, 0));
+    assert_eq!(crate::ansi::plain(&flowed), vec![format!(" {}", "a".repeat(55)), " wrapped on".into(), " other box".into(), String::new(), String::new(), " x".into(), "plain after the box".into()], "Boxes re-flowed wrong");
+    assert_eq!(fills, vec![red(9), red(9), red(7), red(9), None, red(9), None], "Box fills: {fills:?}");
     let commands = crate::commands::slash_commands("claude", "/nonexistent", std::path::Path::new("/nonexistent"));
     assert!(commands.iter().any(|c| c.name == "help") && commands.iter().any(|c| c.name == "compact"));
     let names = |draft: &str| crate::commands::matching(&commands, draft).iter().map(|c| c.name.clone()).collect::<Vec<_>>();
@@ -373,6 +383,13 @@ fn multi_machine() {
     std::fs::write(repo.join("machines.json"), MACHINES_JSON).unwrap();
     std::fs::write(repo.join("local.json"), snapshot_json(&[("w1:p1", "claude", "working", &path)], "Website")).unwrap();
     std::fs::write(repo.join("remote.json"), snapshot_json(&[("w1:p1", "codex", "blocked", "/srv/api"), ("w2:p1", "claude", "idle", "/srv/web")], "API")).unwrap();
+    // A fake ssh for the machine's bridge: confirms the subscription, sends
+    // one event once the test drops a file, then answers terminal reads.
+    let ssh = repo.join("ssh");
+    std::fs::write(&ssh, format!("#!/bin/sh\nD='{dir}'\necho \"$*\" >> \"$D/ssh.log\"\nread line\necho '{{\"id\":\"hpd-events\",\"result\":{{\"type\":\"subscription_started\"}}}}'\nwhile [ ! -f \"$D/event\" ]; do sleep 0.05; done\necho '{{\"event\":\"pane.agent_status_changed\",\"data\":{{\"pane_id\":\"w1:p1\"}}}}'\nwhile read -r line; do echo \"$line\" >> \"$D/bridge.log\"; id=$(echo \"$line\" | sed 's/.*\"id\":\"\\([^\"]*\\)\".*/\\1/'); echo \"{{\\\"id\\\":\\\"$id\\\",\\\"result\\\":{{\\\"read\\\":{{\\\"text\\\":\\\"bridge screen\\\"}}}}}}\"; done\n", dir = repo.to_string_lossy())).unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let saved_ssh = std::env::var("HPD_SSH").ok();
+    std::env::set_var("HPD_SSH", &ssh);
     let saved_bin = std::env::var("HERDR_BIN").ok();
     let saved_off = std::env::var("HPD_NO_HERDR").ok();
     std::env::set_var("HERDR_BIN", &fake);
@@ -397,6 +414,23 @@ fn multi_machine() {
     assert!(log().lines().all(|l| !(l.contains("--machine") && l.contains("--session"))));
     assert!(monitor.events.iter().any(|e| e.text.contains("Build box")), "Machine connection not logged");
 
+    // Its event stream opens over SSH to the saved target, and an event reads
+    // the machine at once instead of with the next reconciliation.
+    wait(&mut monitor, "the machine's event stream", &|m| m.machines[0].is_live());
+    let ssh_log = std::fs::read_to_string(repo.join("ssh.log")).unwrap_or_default();
+    assert!(ssh_log.contains("BatchMode=yes") && ssh_log.contains("buildbox python3 -c 'exec(bytes.fromhex("), "{ssh_log}");
+    std::fs::write(repo.join("remote.json"), snapshot_json(&[("w1:p1", "codex", "working", "/srv/api"), ("w2:p1", "claude", "idle", "/srv/web")], "API")).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    monitor.poll();
+    std::fs::write(repo.join("event"), "").unwrap();
+    let evented = Instant::now();
+    wait(&mut monitor, "the event's snapshot", &|m| m.agents.iter().any(|a| a.id == format!("{UP}/w1:p1") && a.status == "working"));
+    assert!(evented.elapsed() < Duration::from_secs(2), "An event did not read the machine at once");
+    std::fs::write(repo.join("remote.json"), snapshot_json(&[("w1:p1", "codex", "blocked", "/srv/api"), ("w2:p1", "claude", "idle", "/srv/web")], "API")).unwrap();
+    monitor.retry_machines();
+    wait(&mut monitor, "the machine read again", &|m| m.agents.iter().any(|a| a.id == format!("{UP}/w1:p1") && a.status == "blocked"));
+    assert!(crate::events::bridge_command("a'b").starts_with("python3 -c 'exec(bytes.fromhex(\"") && !crate::events::bridge_command("a'b")[12..].contains("a'b"), "A session name must not reach the remote shell");
+
     // Actions go to the agent's own server and pane, never to the local one with the same id.
     let remote_agent = monitor.agents.iter().find(|a| a.id == remote_id).cloned().unwrap();
     let local_agent = monitor.agents.iter().find(|a| a.id == "w1:p1").cloned().unwrap();
@@ -412,8 +446,12 @@ fn multi_machine() {
     let _ = std::fs::remove_file(&calls);
     assert_eq!(monitor.press(&["esc".into()], &local_agent).recv().unwrap(), None);
     assert_eq!(log().trim(), "agent send-keys w1:p1 esc", "A local action left this computer");
-    let _ = monitor.screen(&remote_agent, false).recv();
-    assert!(log().contains(&format!("--machine {UP} agent read w1:p1")), "Terminal read from the wrong server");
+    // The terminal is read through the machine's open bridge, not a new herdr --machine.
+    assert!(monitor.reads_fast(&remote_agent));
+    assert_eq!(monitor.screen(&remote_agent, false).recv().unwrap(), "bridge screen");
+    let bridged = std::fs::read_to_string(repo.join("bridge.log")).unwrap_or_default();
+    assert!(bridged.contains("\"method\":\"agent.read\"") && bridged.contains("\"target\":\"w1:p1\"") && bridged.contains("\"format\":\"ansi\""), "{bridged}");
+    assert!(!log().contains("agent read"), "Terminal read with herdr --machine while the bridge was open");
     let idle = monitor.agents.iter().find(|a| a.id == format!("{UP}/w2:p1")).cloned().unwrap();
     assert_eq!(monitor.send_erasing(0, "hi", &idle).recv().unwrap(), None);
     assert!(log().contains(&format!("--machine {UP} agent prompt w2:p1 hi")), "Prompt sent to the wrong server");
@@ -462,6 +500,7 @@ fn multi_machine() {
     assert!(plain.machines.is_empty() && !plain.shows_hud() && !log().contains("--machine"), "No saved machines must mean no SSH");
 
     match saved_bin { Some(v) => std::env::set_var("HERDR_BIN", v), None => std::env::remove_var("HERDR_BIN") }
+    match saved_ssh { Some(v) => std::env::set_var("HPD_SSH", v), None => std::env::remove_var("HPD_SSH") }
     if let Some(v) = saved_off { std::env::set_var("HPD_NO_HERDR", v); }
     let _ = std::fs::remove_dir_all(&repo);
     assert!(crate::monitor::remote_folder_ok("/srv/api") && !crate::monitor::remote_folder_ok("~/code") && !crate::monitor::remote_folder_ok("code"), "Herdr does not expand ~ on a machine");

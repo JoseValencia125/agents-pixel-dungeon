@@ -12,7 +12,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   answered, interrupted, ended and summoned through `herdr --machine`. An
   unreachable machine keeps its rooms faded with a banner and is retried with
   a back-off; the `@` button filters by machine and project, and the menu's
-  Machines hides one.
+  Machines hides one. A machine's status changes show up at once: one `ssh`
+  per machine holds its Herdr event stream open (through `python3` there),
+  and the chat reads the agent's terminal through it four times a second;
+  without it the machine is read every 2 seconds.
+
+### Fixed
+- The console paints a TUI's boxes as boxes (Pi's tool calls and messages):
+  a background that runs to the terminal's edge fills the console's width,
+  padding rows included, instead of stripes behind the text, and a box's
+  lines (diffs, JSON) are no longer joined into paragraphs.
 
 ## [2.1.0] - 2026-10-10
 

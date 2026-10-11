@@ -873,11 +873,14 @@ pub fn list_sessions() -> Vec<HerdrSession> {
 }
 
 /// A saved SSH machine an agent runs on: Herdr's profile id (what
-/// `--machine` is given) and its label.
+/// `--machine` is given), its label, and what its live event stream
+/// connects to: the SSH target and the Herdr session there.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Machine {
     pub id: String,
     pub label: String,
+    pub target: String,
+    pub session: String,
 }
 
 /// A saved SSH machine, from `herdr machine list --json`.
@@ -895,8 +898,10 @@ pub fn decode_machines(data: &[u8]) -> Option<Vec<SavedMachine>> {
             .filter_map(|row| {
                 let id = str_of(row, "id")?.to_string();
                 let label = str_of(row, "label").filter(|l| !l.trim().is_empty()).unwrap_or(&id).to_string();
+                let target = str_of(row, "target").unwrap_or("").to_string();
+                let session = str_of(row, "session").filter(|s| !s.is_empty()).unwrap_or("default").to_string();
                 Some(SavedMachine {
-                    machine: Machine { id, label },
+                    machine: Machine { id, label, target, session },
                     enabled: row.get("enabled").and_then(Value::as_bool).unwrap_or(false),
                 })
             })
