@@ -67,6 +67,32 @@ pub fn run() {
     watcher.apply(demo_agents(0));
     watcher.apply(demo_agents(10));
     assert_eq!(watcher.alerts.iter().map(|a| a.kind).collect::<Vec<_>>(), vec![AlertKind::NeedsHelp]);
+    // Background shells: read from ps and the transcript; one that ends rings.
+    let line = "69963 84548 Sun Oct 11 10:19:17 2026 /bin/zsh -c source /Users/me/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && eval 'cd /p && python3 emol.py fetch > data/fetch.log 2>&1' < /dev/null && pwd -P >| /tmp/claude-4330-cwd";
+    let process = crate::shells::parse_ps_line(line).expect("ps line not read");
+    assert_eq!((process.pid, process.ppid), (69963, 84548));
+    assert_eq!(crate::shells::shell_command(&process.command).as_deref(), Some("cd /p && python3 emol.py fetch > data/fetch.log 2>&1"));
+    assert_eq!(crate::shells::shell_command("node /x/cli.js serve"), None, "An MCP server was taken for a shell");
+    assert_eq!(crate::shells::short_command("cd /p && python3 emol.py fetch"), "python3 emol.py fetch");
+    let transcript = [
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sleep 100","description":"Wait a while","run_in_background":true}}]}}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b123. Output is being written to: /tmp/tasks/b123.output. You will be notified."}]},"toolUseResult":{"backgroundTaskId":"b123"}}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"<task-notification><task-id>bquoted</task-id><status>failed</status></task-notification>"}]}}"#,
+        r#"{"type":"user","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>\n<task-id>b123</task-id>\n<status>failed</status>\n<summary>Background command \"Wait a while\" failed (exit code 1)</summary>\n</task-notification>"}}"#,
+    ].join("
+");
+    let launches = crate::shells::parse_launches(&transcript);
+    assert_eq!(launches.by_command.get("sleep 100"), Some(&(Some("b123".into()), Some("Wait a while".into()), Some("/tmp/tasks/b123.output".into()))), "A background launch was not read");
+    assert_eq!(launches.results.iter().map(|r| (r.task.as_str(), r.ok)).collect::<Vec<_>>(), vec![("b123", false)], "A quoted notification counted, or the real one was missed");
+    let shell = crate::shells::Shell { pid: 7, command: "sleep 100".into(), label: "Wait a while".into(), started: 0, task: Some("b123".into()), last_line: None, output: None };
+    let mut brewing = agent("s", "claude", "idle", "p", "a", "~");
+    brewing.shells = vec![shell];
+    let mut ended = agent("s", "claude", "idle", "p", "a", "~");
+    ended.shell_results = launches.results.clone();
+    let mut shells_watch = Monitor::new("default".into(), StatusFilter::All);
+    shells_watch.apply(vec![brewing]);
+    shells_watch.apply(vec![ended]);
+    assert_eq!(shells_watch.alerts.iter().map(|a| (a.kind, a.shell.clone())).collect::<Vec<_>>(), vec![(AlertKind::NeedsHelp, Some(("Wait a while".to_string(), "Background command \"Wait a while\" failed (exit code 1)".to_string())))], "A failed shell did not ring");
     watcher.select(Some("demo:1".into()));
     watcher.apply(vec![]);
     assert!(watcher.selected.is_none());
@@ -315,7 +341,7 @@ pub fn run() {
     let _ = std::fs::remove_dir_all(&daemon);
     assert!(natural_cmp("w2:p1", "w10:p1") == std::cmp::Ordering::Less && natural_cmp("a", "A") == std::cmp::Ordering::Equal);
     assert_eq!(l10n::trf("Tú → {}: {}", &[&"a", &"b"]), l10n::text("Tú → {}: {}", &l10n::CURRENT).replacen("{}", "a", 1).replacen("{}", "b", 1));
-    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, {} bundled sprites", ROOM_FILES.len() + 1);
+    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, background shells, {} bundled sprites", ROOM_FILES.len() + 1);
 }
 
 #[cfg(test)]

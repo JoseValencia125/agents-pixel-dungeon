@@ -133,6 +133,9 @@ impl Assets {
         let chair_colors = [('k', INK), ('w', rgb(0.635, 0.376, 0.235)), ('d', rgb(0.408, 0.22, 0.141)), ('r', rgb(0.769, 0.204, 0.235)), ('p', rgb(0.886, 0.33, 0.337)), ('s', rgb(0.545, 0.118, 0.157))];
         prop("chair_back", pixel_image(&["..kkkkkkkkkkkkkk..", ".krrrrrrrrrrrrrrk.", ".krppprrrrrrrrrrk.", ".krprrrrrrrrrrrrk.", ".krrrrrrrrrrrrrrk.", ".krrrrrrrrrrrrrrk.", ".krrrrrrrrrrrrrrk.", ".ksrrrrrrrrrrrrsk.", "kkkkkkkkkkkkkkkkkk", "kwwksssssssssskwwk"], &chair_colors), nearest);
         prop("chair_front", pixel_image(&["kwwk..........kwwk", "kwdk..........kdwk", "kwdk..........kdwk", "kwdk..........kdwk", "kwdk..........kdwk", "kkkkkkkkkkkkkkkkkk", "kdrrrrrrrrrrrrrrdk", "kkkkkkkkkkkkkkkkkk"], &chair_colors), nearest);
+        // A background shell: an iron cauldron of green brew on little legs.
+        prop("cauldron", pixel_image(&["..kkkkkkkk..", ".kGGgGGGgGk.", "kkkkkkkkkkkk", "kIiIIIIIIIdk", "kIiIIIIIIIdk", "kIIIIIIIIIdk", ".kIIIIIIIdk.", "..kkkkkkkk..", "..k......k.."],
+            &[('k', INK), ('G', rgb(0.55, 0.92, 0.36)), ('g', rgb(0.3, 0.7, 0.25)), ('I', rgb(0.33, 0.33, 0.4)), ('i', rgb(0.55, 0.56, 0.64)), ('d', rgb(0.2, 0.2, 0.26))]), nearest);
         prop("glow", radial(64, Color32::WHITE, &[(0.0, 1.0), (0.45, 0.35), (1.0, 0.0)], 0.0), TextureOptions::LINEAR);
         prop("darkness", radial(128, rgb(0.02, 0.01, 0.04), &[(0.0, 0.0), (0.1, 0.12), (0.28, 0.6), (0.5, 0.82), (1.0, 0.86)], 0.86), TextureOptions::LINEAR);
         Assets { rooms, heroes, sleepers, arms, props }

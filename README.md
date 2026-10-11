@@ -46,6 +46,7 @@ Original pixel art drawn in Aseprite (sources in `art/`), coloured after each to
 ## What it does
 
 - **Chat with an agent**: its terminal's last lines, a box to reply (it grows to three lines, ⇧⏎ breaks a line), ↑/↓ to pick among a question's options, Accept / Decline / Stop buttons, a `>_` button that opens a terminal in the agent's folder, `/exit` from the right-click menu.
+- **Background shells**: a cauldron bubbles in the room for each shell a Claude Code agent left running; the chat shows its output and can stop it, and you hear when it ends.
 - **Summon agents** in any folder with a first prompt, through Herdr.
 - **The guild's HP** in full screen: each harness's plan left (Claude's week and 5-hour session, Codex's limits, Kiro's monthly credits) and when it refills.
 - **Session limits**: an exhausted agent rests on a cot in the infirmary with the time left until its limit resets, also shown in its chat.

@@ -14,6 +14,7 @@ mod monitor;
 mod prefs;
 mod scene;
 mod selftest;
+mod shells;
 mod standalone;
 mod tray;
 mod ui;
@@ -119,11 +120,14 @@ fn main() {
             return;
         }
         match herdr::fetch_snapshot(&session) {
-            Ok(agents) => {
+            Ok(mut agents) => {
+                shells::add_shells(&mut agents, &session);
                 println!("OK: {} agentes", agents.len());
                 for a in agents {
                     let left = a.limit_left(herdr::unix_now()).map(|s| format!(" | resets in {}", scene::countdown(s))).unwrap_or_default();
                     println!("{} | {} | {} | {} | {}{left}", a.id, a.name, a.status, a.project, a.activity);
+                    for s in &a.shells { println!("    ⚗ {} | {} | {}s | {} | {}", s.pid, s.label, herdr::unix_now() - s.started, s.task.clone().unwrap_or_default(), s.last_line.clone().unwrap_or_default()); }
+                    for r in &a.shell_results { println!("    ✓ {} | {} | {}", r.task, r.ok, r.summary); }
                 }
             }
             Err(error) => { eprintln!("{error}"); std::process::exit(1); }

@@ -289,11 +289,15 @@ pub struct ChatState {
     /// agent so it can be edited and sent again; `restored` while it is.
     last_sent: Option<String>,
     restored: bool,
+    /// The background shell whose output is open, its lines (re-read each
+    /// second), and the one asked to stop (waiting for a yes).
+    shell_open: Option<(u32, f64, Vec<String>)>,
+    shell_stop: Option<u32>,
 }
 
 impl ChatState {
     pub fn new(agent_id: &str) -> ChatState {
-        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false }
+        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false, shell_open: None, shell_stop: None }
     }
 
     pub fn with_draft(mut self, draft: String) -> ChatState {
@@ -464,7 +468,8 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
         let inline = prompt_line.is_some();
         // The box under the console grows to three rows with what is typed.
         let box_height = input_height(draft_rows(&state.draft, (ui.available_width() / (fs(13.0) * 0.62)) as usize), fs(13.0), true) + 10.0;
-        let body_height = total - 7.0 * 2.0 - 22.0 - if standalone { 14.0 } else if inline { 0.0 } else { box_height } - if state.note.is_some() { 16.0 } else { 0.0 };
+        let strip = shells_strip(ui, agent, state, now);
+        let body_height = total - 7.0 * 2.0 - 22.0 - strip - if standalone { 14.0 } else if inline { 0.0 } else { box_height } - if state.note.is_some() { 16.0 } else { 0.0 };
         Frame::new().fill(alpha(Color32::BLACK, 0.45)).corner_radius(CornerRadius::same(5)).inner_margin(Margin::same(6)).show(ui, |ui| {
             ui.set_min_height(body_height.max(40.0));
             ui.set_max_height(body_height.max(40.0));
@@ -546,6 +551,73 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
         }
     });
     action
+}
+
+/// The shells the agent left running, one row each over the console: what
+/// it does, for how long, its last line; ▸ opens its output, ✕ stops it
+/// (after a yes). Returns the height it took, with its spacing.
+fn shells_strip(ui: &mut Ui, agent: &Agent, state: &mut ChatState, now: f64) -> f32 {
+    if agent.shells.is_empty() { state.shell_open = None; return 0.0; }
+    let unix = crate::herdr::unix_now();
+    let top = ui.cursor().min.y;
+    let brew = Color32::from_rgb(150, 240, 110);
+    Frame::new().fill(alpha(brew, 0.07)).stroke(Stroke::new(1.0_f32, alpha(brew, 0.25))).corner_radius(CornerRadius::same(5)).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing = vec2(6.0, 2.0);
+        for shell in &agent.shells {
+            let open = state.shell_open.as_ref().is_some_and(|o| o.0 == shell.pid);
+            ui.horizontal(|ui| {
+                let toggle = flat_button(ui, mono(if open { "▾" } else { "▸" }, 11.0).color(brew)).on_hover_text(tr("Ver su salida"));
+                if toggle.clicked() { state.shell_open = if open { None } else { Some((shell.pid, 0.0, vec![])) }; }
+                cauldron_icon(ui, brew);
+                ui.label(mono(&shell.label, 11.0).strong().color(brew)).on_hover_text(&shell.command);
+                ui.label(mono(&crate::scene::countdown(unix - shell.started), 10.0).color(DIM));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if state.shell_stop == Some(shell.pid) {
+                        if flat_button(ui, mono(&tr("no"), 10.0).color(DIM)).clicked() { state.shell_stop = None; }
+                        if flat_button(ui, mono(&tr("sí, detener"), 10.0).strong().color(Color32::from_rgb(255, 105, 97))).clicked() {
+                            crate::shells::stop(shell.pid);
+                            state.shell_stop = None;
+                        }
+                    } else if flat_button(ui, mono("x", 12.0).color(DIM)).on_hover_text(tr("Detener este shell")).clicked() {
+                        state.shell_stop = Some(shell.pid);
+                    }
+                    if let Some(last) = &shell.last_line {
+                        ui.add(egui::Label::new(mono(last, 10.0).color(Color32::from_gray(170))).truncate());
+                    }
+                });
+            });
+            if open {
+                // Its output, re-read once a second while open.
+                if let (Some(view), Some(path)) = (state.shell_open.as_mut(), shell.output.as_deref()) {
+                    if now >= view.1 { view.2 = crate::shells::output_tail(path, 8); view.1 = now + 1.0; }
+                }
+                let lines = state.shell_open.as_ref().map(|o| o.2.clone()).unwrap_or_default();
+                Frame::new().fill(alpha(Color32::BLACK, 0.4)).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(4)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if lines.is_empty() { ui.label(mono(&tr("Sin salida todavía."), 10.0).color(DIM)); }
+                    for line in &lines { ui.add(egui::Label::new(mono(line, 10.0).color(Color32::from_gray(200))).truncate()); }
+                    if let Some(path) = &shell.output { ui.label(mono(&crate::herdr::abbreviate_home(path), 9.0).color(DIM)); }
+                });
+            }
+        }
+    });
+    if state.shell_open.as_ref().is_some_and(|o| !agent.shells.iter().any(|s| s.pid == o.0)) { state.shell_open = None; }
+    ui.cursor().min.y - top
+}
+
+/// A little cauldron of brew, in pixels (the font has no such glyph).
+fn cauldron_icon(ui: &mut Ui, brew: Color32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(14.0, 12.0), egui::Sense::hover());
+    let p = ui.painter();
+    let px = |x: f32, y: f32, w: f32, h: f32, c: Color32| p.rect_filled(egui::Rect::from_min_size(rect.min + vec2(x, y), vec2(w, h)), CornerRadius::ZERO, c);
+    px(2.0, 1.0, 10.0, 2.0, brew);
+    px(0.0, 3.0, 14.0, 1.0, Color32::from_gray(20));
+    px(1.0, 4.0, 12.0, 5.0, Color32::from_rgb(84, 84, 102));
+    px(2.0, 4.0, 1.0, 4.0, Color32::from_rgb(140, 142, 163));
+    px(3.0, 9.0, 8.0, 1.0, Color32::from_rgb(84, 84, 102));
+    px(3.0, 10.0, 1.0, 2.0, Color32::from_gray(20));
+    px(10.0, 10.0, 1.0, 2.0, Color32::from_gray(20));
 }
 
 /// The box to type to the agent, with its send button and the buttons a

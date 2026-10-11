@@ -117,6 +117,18 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("Probar sonidos", ["Play the sounds", "Écouter les sons", "Prova i suoni", "Testar sons"]),
         ("Notificaciones", ["Notifications", "Notifications", "Notifiche", "Notificações"]),
         ("Notificaciones activadas", ["Notifications on", "Notifications activées", "Notifiche attive", "Notificações ativadas"]),
+        // Background shells
+        ("Descargar y contar 3000 artículos", ["Download and count 3000 articles", "Télécharger et compter 3000 articles", "Scarica e conta 3000 articoli", "Baixar e contar 3000 artigos"]),
+        ("Ver su salida", ["Show its output", "Voir sa sortie", "Mostra il suo output", "Ver a sua saída"]),
+        ("no", ["no", "non", "no", "não"]),
+        ("sí, detener", ["yes, stop", "oui, arrêter", "sì, ferma", "sim, parar"]),
+        ("Detener este shell", ["Stop this shell", "Arrêter ce shell", "Ferma questa shell", "Parar este shell"]),
+        ("Sin salida todavía.", ["No output yet.", "Pas encore de sortie.", "Ancora nessun output.", "Ainda sem saída."]),
+        ("Terminó.", ["Finished.", "Terminé.", "Finito.", "Terminou."]),
+        ("{} · shell {}: {}", ["{} · shell {}: {}", "{} · shell {} : {}", "{} · shell {}: {}", "{} · shell {}: {}"]),
+        ("{} · shell {}: detenido", ["{} · shell {}: stopped", "{} · shell {} : arrêté", "{} · shell {}: fermata", "{} · shell {}: parado"]),
+        ("{}: un shell en segundo plano falló", ["{}: a background shell failed", "{} : un shell en arrière-plan a échoué", "{}: una shell in background è fallita", "{}: um shell em segundo plano falhou"]),
+        ("{}: un shell en segundo plano terminó", ["{}: a background shell finished", "{} : un shell en arrière-plan a terminé", "{}: una shell in background è terminata", "{}: um shell em segundo plano terminou"]),
         // Activity log
         ("Registro de actividad", ["Activity log", "Journal d’activité", "Registro attività", "Registro de atividade"]),
         ("Mostrar en Finder: {}", ["Show in Finder: {}", "Afficher dans le Finder : {}", "Mostra nel Finder: {}", "Mostrar no Finder: {}"]),

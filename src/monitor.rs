@@ -80,6 +80,9 @@ pub struct Monitor {
     pub sessions: Vec<HerdrSession>,
     /// Alerts since the last drain: sounds and notifications are the app's.
     pub alerts: Vec<AgentAlert>,
+    /// Background shells gone from the processes, waiting for the agent's
+    /// transcript to say how they ended (or a few seconds).
+    finishing: Vec<(String, crate::shells::Shell, Instant)>,
     /// Something the window chrome reacts to changed (agents, panels, filter).
     pub changed: bool,
     /// Herdr's availability; while not Up the rooms come from the standalone scan.
@@ -129,6 +132,7 @@ impl Monitor {
             session,
             sessions: vec![],
             alerts: vec![],
+            finishing: vec![],
             changed: false,
             herdr: HerdrState::Unknown,
             next_herdr_try: Instant::now(),
@@ -257,6 +261,7 @@ impl Monitor {
         if self.updated.is_some() {
             let alerts = alerts_for(&previous, &next);
             self.alerts.extend(alerts);
+            self.shells_ended(&previous, &next);
         }
         if self.updated.is_none() {
             self.log(trf("Guild conectada · {} agentes", &[&next.len()]), "info");
@@ -284,6 +289,35 @@ impl Monitor {
         if let Some(selected) = &self.selected {
             if !ids.contains(selected) { self.selected = None; self.changed = true; }
         }
+    }
+
+    /// Shells that left the processes since the last refresh wait here for
+    /// the transcript's word on how they ended, up to 20 s, then ring and
+    /// go to the log.
+    fn shells_ended(&mut self, previous: &HashMap<String, Agent>, next: &[Agent]) {
+        for old in previous.values() {
+            let now: Vec<u32> = next.iter().find(|a| a.id == old.id).map(|a| a.shells.iter().map(|s| s.pid).collect()).unwrap_or_default();
+            for shell in old.shells.iter().filter(|s| !now.contains(&s.pid)) {
+                self.finishing.push((old.id.clone(), shell.clone(), Instant::now()));
+            }
+        }
+        let mut waiting = vec![];
+        for (id, shell, gone) in std::mem::take(&mut self.finishing) {
+            let agent = next.iter().find(|a| a.id == id).or_else(|| previous.get(&id));
+            let Some(agent) = agent.cloned() else { continue };
+            let result = shell.task.as_ref().and_then(|t| agent.shell_results.iter().find(|r| &r.task == t)).cloned();
+            if result.is_none() && shell.task.is_some() && gone.elapsed() < Duration::from_secs(20) { waiting.push((id, shell, gone)); continue; }
+            if crate::shells::was_stopped(shell.pid) {
+                self.log(trf("{} · shell {}: detenido", &[&agent.project, &shell.label]), "left");
+                continue;
+            }
+            let ok = result.as_ref().map(|r| r.ok).unwrap_or(true);
+            let how = result.map(|r| r.summary).unwrap_or_else(|| tr("Terminó."));
+            self.log(trf("{} · shell {}: {}", &[&agent.project, &shell.label, &how]), if ok { "done" } else { "blocked" });
+            let kind = if ok { crate::alerts::AlertKind::Finished } else { crate::alerts::AlertKind::NeedsHelp };
+            self.alerts.push(AgentAlert { kind, agent, shell: Some((shell.label.clone(), how)) });
+        }
+        self.finishing = waiting;
     }
 
     /// Drain what the background threads sent and run the timers. Returns
@@ -443,6 +477,8 @@ impl Monitor {
                 // Standalone: the agents running in any terminal, from their processes and files.
                 Ok((None, enrich(crate::standalone::agents())))
             })();
+            // The shells agents left running, from the processes.
+            let result = result.map(|(base, mut shown)| { if !demo { crate::shells::add_shells(&mut shown, &session); } (base, shown) });
             let _ = sender.send(Inbox::Refresh { generation, result, herdr });
             wake();
         });

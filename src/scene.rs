@@ -347,6 +347,8 @@ pub struct Room {
     activity: String,
     repo: String,
     branch: String,
+    /// Shells the agent left running in the background: a cauldron each.
+    shells: Vec<crate::shells::Shell>,
     action: Option<String>,
     subagents: usize,
     subagent_actions: Vec<String>,
@@ -392,6 +394,7 @@ impl Room {
             activity: String::new(),
             repo: String::new(),
             branch: String::new(),
+            shells: vec![],
             action: None,
             subagents: usize::MAX,
             subagent_actions: vec![],
@@ -454,6 +457,7 @@ impl Room {
         self.activity = agent.activity.clone();
         self.repo = agent.folder();
         self.branch = agent.branch.clone().unwrap_or_default();
+        self.shells = agent.shells.clone();
         self.harness = harness_for(&agent.name);
         self.limit_resets = agent.limit_resets;
         if agent.action != self.action {
@@ -1151,6 +1155,7 @@ impl Room {
         }
         // Particles.
         for p in &self.particles { self.draw_particle(&clipped, p, origin, assets); }
+        self.draw_shells(painter, f, assets);
         // Rounded corners: cover what the square clip let through.
         cover_corners(painter, f, 6.0, BACKGROUND);
         cover_corners(painter, cell, 6.0, BACKGROUND);
@@ -1185,6 +1190,52 @@ impl Room {
         if selected {
             painter.rect_stroke(cell.expand(2.0), CornerRadius::same(7), Stroke::new(2.0_f32, Color32::from_rgb(217, 242, 166)), egui::StrokeKind::Outside);
         }
+    }
+
+    /// Where the cauldrons of the shells it left running stand: the room's
+    /// bottom-left corner, one each (three at most, then a count).
+    fn shells_rect(&self, f: Rect) -> Option<Rect> {
+        if self.shells.is_empty() { return None; }
+        let shown = self.shells.len().min(3) as f32;
+        Some(Rect::from_min_size(pos2(f.min.x + 10.0, f.max.y - 52.0), vec2(shown * 34.0 + if self.shells.len() > 3 { 24.0 } else { 0.0 }, 38.0)))
+    }
+
+    /// The cauldrons, bubbling over a flickering fire.
+    fn draw_shells(&self, painter: &Painter, f: Rect, assets: &Assets) {
+        let Some(area) = self.shells_rect(f) else { return };
+        for i in 0..self.shells.len().min(3) {
+            let at = pos2(area.min.x + 17.0 + i as f32 * 34.0, area.max.y - 16.0);
+            let phase = self.clock * 6.0 + i as f32 * 1.7;
+            // The fire under it.
+            for (dx, h) in [(-6.0, 4.0), (0.0, 6.0), (6.0, 4.0)] {
+                let flick = h + ((phase + dx).sin() * 1.5).round();
+                painter.rect_filled(Rect::from_min_size(pos2(at.x + dx - 2.0, at.y + 15.0 - flick), vec2(4.0, flick)), CornerRadius::ZERO, Color32::from_rgb(255, 140, 40));
+                painter.rect_filled(Rect::from_min_size(pos2(at.x + dx - 1.0, at.y + 15.0 - flick * 0.5), vec2(2.0, flick * 0.5)), CornerRadius::ZERO, Color32::from_rgb(255, 220, 90));
+            }
+            painter.circle_filled(pos2(at.x, at.y + 2.0), 18.0, with_alpha(Color32::from_rgb(120, 230, 90), 0.12));
+            draw_sprite(painter, assets.prop("cauldron"), at, vec2(32.0, 24.0), false, 0.0, Color32::WHITE);
+            // Bubbles rising off the brew.
+            for b in 0..3 {
+                let t = (self.clock * 0.9 + b as f32 / 3.0 + i as f32 * 0.37) % 1.0;
+                let x = at.x - 7.0 + b as f32 * 7.0 + (t * 9.0 + b as f32).sin() * 2.0;
+                let y = at.y - 12.0 - t * 16.0;
+                painter.rect_filled(Rect::from_center_size(pos2(x, y), vec2(3.0, 3.0)), CornerRadius::ZERO, with_alpha(Color32::from_rgb(150, 240, 110), 1.0 - t));
+            }
+        }
+        if self.shells.len() > 3 {
+            label(painter, pos2(area.max.x - 2.0, area.center().y), Align2::RIGHT_CENTER, &format!("×{}", self.shells.len()), 11.0, Color32::from_rgb(150, 240, 110), true);
+        }
+    }
+
+    /// What the cauldrons stand for, when the pointer is on them.
+    pub fn shells_tip(&self, origin: Pos2, pointer: Pos2) -> Option<String> {
+        let f = Room::frame().translate(origin.to_vec2());
+        if !self.shells_rect(f)?.contains(pointer) { return None; }
+        let now = crate::herdr::unix_now();
+        Some(self.shells.iter().map(|s| {
+            let line = format!("{} · {}", s.label, countdown(now - s.started));
+            match &s.last_line { Some(last) => format!("{line}\n   {last}"), None => line }
+        }).collect::<Vec<_>>().join("\n"))
     }
 
     /// The tag at the cot's foot: how long until the hero has recovered
@@ -1455,6 +1506,7 @@ impl Scene {
                     let hit = ui.interact(rect, ui.id().with(id), egui::Sense::click());
                     room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
                     if hit.clicked() { response.clicked = Some(id.clone()); }
+                    if let Some(tip) = hit.hover_pos().and_then(|p| room.shells_tip(rect.min, p)) { hit.clone().on_hover_text(tip); }
                     hit.context_menu(|ui| {
                         if ui.button(tr("Abrir una terminal en esta carpeta")).clicked() {
                             response.terminal = Some(id.clone());

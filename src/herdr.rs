@@ -35,6 +35,9 @@ pub struct Agent {
     pub question_transcript: Option<String>,
     /// When a "limited" agent's usage limit resets (unix seconds), if known.
     pub limit_resets: Option<i64>,
+    /// Shells it left running in the background, and how its last ones ended.
+    pub shells: Vec<crate::shells::Shell>,
+    pub shell_results: Vec<crate::shells::ShellResult>,
 }
 
 impl Agent {
@@ -54,6 +57,8 @@ impl Agent {
             question: None,
             question_transcript: None,
             limit_resets: None,
+            shells: vec![],
+            shell_results: vec![],
         }
     }
 
@@ -903,6 +908,20 @@ pub fn demo_agents(tick: usize) -> Vec<Agent> {
                 // Fixed for the whole run, so the countdown ticks down.
                 static DEMO_RESET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
                 agent.limit_resets = Some(*DEMO_RESET.get_or_init(|| unix_now() + 73 * 60 + 5));
+            }
+            if i == 4 {
+                // Done, but a shell it left in the background still brews.
+                static DEMO_SHELL: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+                let started = *DEMO_SHELL.get_or_init(|| unix_now() - 6 * 60 - 23);
+                agent.shells = vec![crate::shells::Shell {
+                    pid: 0,
+                    command: "cd pipeline && python3 fetch.py --limit 3000 > data/fetch.log 2>&1".into(),
+                    label: tr("Descargar y contar 3000 artículos"),
+                    started,
+                    task: None,
+                    last_line: Some(format!("{}/3000", 1200 + (tick * 7) % 1800)),
+                    output: None,
+                }];
             }
             agent.subagent_actions = helpers[i].iter().map(|s| s.to_string()).collect();
             agent.with_subagents(subagents[i])
