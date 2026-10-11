@@ -128,6 +128,17 @@ fn main() {
             }
             Err(error) => { eprintln!("{error}"); std::process::exit(1); }
         }
+        // Saved SSH machines enabled in Herdr, each read through `--machine`.
+        for saved in herdr::list_machines().unwrap_or_default().into_iter().filter(|m| m.enabled) {
+            let target = herdr::HerdrTarget::Machine(saved.machine.id.clone());
+            match herdr::run_herdr_on(&["api", "snapshot"], &target, Duration::from_secs(10)).and_then(|d| herdr::decode_remote_snapshot(&d, &saved.machine)) {
+                Ok(agents) => {
+                    println!("@{}: {} agentes", saved.machine.label, agents.len());
+                    for a in agents { println!("{} | {} | {} | {} | {}", a.id, a.name, a.status, a.project, a.cwd); }
+                }
+                Err(error) => println!("@{}: {error}", saved.machine.label),
+            }
+        }
         return;
     }
     let demo = args.iter().any(|a| a == "--demo");
@@ -219,6 +230,8 @@ impl App {
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || ctx.request_repaint());
         let mut monitor = Monitor::new(session, StatusFilter::from_raw(&prefs.filter));
         monitor.set_wake(wake.clone());
+        monitor.set_hidden_machines(prefs.hidden_machines.clone());
+        if !demo { monitor.scope.machine = prefs.machine_scope.clone(); }
         if demo { monitor.demo = true; }
         let mut scene = Scene::new();
         scene.reduced_motion = reduce_motion();
@@ -239,7 +252,7 @@ impl App {
             notifier: Notifier::new(),
             scene,
             assets: Assets::new(&cc.egui_ctx),
-            tray: Tray::new(&MenuState { sounds: true, sound_help: true, sound_done: true, notify: true, notify_help: true, notify_done: false, on_top: true, fullscreen: false, login: false, sessions: vec![], session: String::new(), demo: false, attention: 0, open_at_start: false, text_scale: 1.0, console_scale: 1.0 }, wake),
+            tray: Tray::new(&MenuState { sounds: true, sound_help: true, sound_done: true, notify: true, notify_help: true, notify_done: false, on_top: true, fullscreen: false, login: false, sessions: vec![], session: String::new(), machines: vec![], demo: false, attention: 0, open_at_start: false, text_scale: 1.0, console_scale: 1.0 }, wake),
             chat: None,
             compose: ComposeState::default(),
             hud: HudState::default(),
@@ -292,6 +305,13 @@ impl App {
             login: self.login_enabled,
             sessions: self.monitor.sessions.clone(),
             session: self.monitor.session.clone(),
+            machines: self.monitor.saved_machines.iter().map(|m| tray::MachineEntry {
+                id: m.machine.id.clone(),
+                label: m.machine.label.clone(),
+                enabled: m.enabled,
+                shown: !self.prefs.hidden_machines.contains(&m.machine.id),
+                unreachable: matches!(self.monitor.link_of(&m.machine.id), Some(monitor::Link::Down(_))),
+            }).collect(),
             demo: self.monitor.demo,
             attention: self.monitor.agents.iter().filter(|a| a.status == "blocked").count(),
             open_at_start: self.prefs.open_herdr_at_start,
@@ -534,6 +554,8 @@ impl App {
         if !self.monitor.agents.iter().any(|a| a.id == id) { return self.show(ctx); }
         if !self.monitor.visible_agents().iter().any(|a| a.id == id) {
             self.monitor.set_filter(StatusFilter::All);
+            self.monitor.set_scope(herdr::Scope::default());
+            self.prefs.machine_scope = None;
             self.monitor.set_query(String::new());
             self.prefs.filter = "all".into();
             self.prefs.save();
@@ -576,6 +598,11 @@ impl App {
                 self.prefs.session = Some(name);
                 self.prefs.save();
                 self.chat = None;
+            }
+            TrayAction::Machine(id) => {
+                if !self.prefs.hidden_machines.contains(&id) { self.prefs.hidden_machines.push(id); } else { self.prefs.hidden_machines.retain(|m| *m != id); }
+                self.prefs.save();
+                self.monitor.set_hidden_machines(self.prefs.hidden_machines.clone());
             }
             TrayAction::Demo => { let demo = !self.monitor.demo; self.monitor.set_demo(demo); self.chat = None; }
             TrayAction::OpenHerdr => self.open_herdr(),
@@ -628,13 +655,17 @@ impl App {
     /// open chat's, else where agents were last summoned, else home.
     fn open_terminal_for(&self, id: Option<&str>) {
         let id = id.map(str::to_string).or_else(|| self.chat.as_ref().map(|c| c.agent_id.clone()));
-        let cwd = id.and_then(|id| self.monitor.agents.iter().find(|a| a.id == id).map(|a| a.cwd.clone())).unwrap_or_else(|| self.prefs.create_folder.clone());
+        let agent = id.and_then(|id| self.monitor.agents.iter().find(|a| a.id == id));
+        // A remote agent's folder is on its machine, not here.
+        if agent.map(|a| a.is_remote()).unwrap_or(false) { return; }
+        let cwd = agent.map(|a| a.cwd.clone()).unwrap_or_else(|| self.prefs.create_folder.clone());
         crate::herdr::open_terminal(&cwd);
     }
 
     /// Ask before typing /exit into an agent's chat.
     fn confirm_finish(&mut self, id: &str) {
         let Some(agent) = self.monitor.agents.iter().find(|a| a.id == id).cloned() else { return };
+        if agent.is_remote() && self.monitor.read_only(&agent) { return; }
         let answer = rfd::MessageDialog::new()
             .set_title(trf("¿Finalizar {}?", &[&agent.project]))
             .set_description(tr("Se escribirá /exit en su chat de Herdr."))
@@ -750,6 +781,7 @@ impl eframe::App for App {
         self.scene.set_selected(self.monitor.selected.clone());
         self.scene.empty_text = if !self.monitor.agents.is_empty() { tr("Ningún agente coincide") } else if self.monitor.error.is_some() { tr("Esperando a Herdr…") } else { tr("Sin agentes en la sesión") };
         let visible_agents = self.monitor.visible_agents();
+        self.scene.stale = self.monitor.stale_ids();
         self.scene.sync(&visible_agents);
 
         let hovering = ctx.input(|i| i.pointer.hover_pos()).is_some();
@@ -833,6 +865,7 @@ impl eframe::App for App {
                 let action = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| ui::hud(ui, &mut self.monitor, &mut self.hud)).inner;
                 if action.toggle_log { self.show_log = !self.show_log; }
                 if action.compose { let on = !self.monitor.composing; self.monitor.set_composing(on); }
+                if action.scope { self.prefs.machine_scope = self.monitor.scope.machine.clone(); self.prefs.save(); }
             }
             // The chat or summon panel: under the rooms while one is open;
             // the console side in full screen, always.
@@ -875,7 +908,12 @@ impl eframe::App for App {
             if action.install { self.install_herdr(); }
             if action.open { self.open_herdr(); }
             if action.dismiss { self.banner_dismissed = true; }
-        } else if let Some((text, lost)) = &note { ui::connection_banner(ctx, text, *lost); }
+        } else if let Some((text, lost)) = &note {
+            ui::connection_banner(ctx, text, *lost);
+        } else if let Some(text) = self.monitor.machines_note(Instant::now()) {
+            // A remote machine out of reach: its rooms stay faded, the others are live.
+            ui::connection_banner(ctx, &text, false);
+        }
         if hovering || self.show_log {
             let action = ui::controls(ctx, self.prefs.sound_enabled, self.show_log, self.fullscreen);
             if action.compose { let on = !self.monitor.composing; self.monitor.set_composing(on); }

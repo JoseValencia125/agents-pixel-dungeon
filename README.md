@@ -47,20 +47,21 @@ Original pixel art drawn in Aseprite (sources in `art/`), coloured after each to
 
 - **Chat with an agent**: its terminal's last lines, a box to reply (it grows to three lines, ⇧⏎ breaks a line), ↑/↓ to pick among a question's options, Accept / Decline / Stop buttons, a `>_` button that opens a terminal in the agent's folder, `/exit` from the right-click menu.
 - **Summon agents** in any folder with a first prompt, through Herdr.
+- **Several machines**: agents on the SSH machines saved in Herdr (`herdr machine add`) join the same dungeon, each room marked `@machine · project`, and are answered, interrupted, ended and summoned through that machine's own Herdr server.
 - **The guild's HP** in full screen: each harness's plan left (Claude's week and 5-hour session, Codex's limits, Kiro's monthly credits) and when it refills.
 - **Session limits**: an exhausted agent rests on a cot in the infirmary with the time left until its limit resets, also shown in its chat.
 - **Chimes and desktop notifications** when an agent needs help or finishes.
 - **Subagents** as small heroes at the station of their own tool (Claude Code).
-- **Filters, search and an activity log**; the window resizes to whole rooms, scrolls, and remembers where you left it.
+- **Filters, search and an activity log**, with a filter by machine and project; the window resizes to whole rooms, scrolls, and remembers where you left it.
 - **Full screen** (⌃⌘F, F11 on Linux): its own space, one column of rooms on the left, the live console (colours and all) in the rest.
 - **Event-driven**: Herdr's socket events the moment they happen, snapshots only to reconcile.
 - Spanish, English, French, Italian and Portuguese.
 
-The [guide](docs/GUIDE.md) has the details: how states are read, background jobs, the menu, configuration, privacy and the optional viewer mode without Herdr.
+The [guide](docs/GUIDE.md) has the details: how states are read, background jobs, several machines, the menu, configuration, privacy and the optional viewer mode without Herdr.
 
 ## Build and open
 
-Requires [Rust](https://rustup.rs) (stable) and [Herdr](https://herdr.dev). Tested with Herdr 0.9.x.
+Requires [Rust](https://rustup.rs) (stable) and [Herdr](https://herdr.dev). Tested with Herdr 0.9.x; remote machines need a Herdr with saved SSH machines and `--machine` (tested with 0.9.3, on both ends).
 
 ```sh
 git clone https://github.com/JoseValencia125/herdr-pixel-dungeon.git

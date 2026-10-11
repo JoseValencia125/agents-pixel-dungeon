@@ -3,6 +3,7 @@
 //! filters, the window's place and the rest survive relaunches.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,6 +38,15 @@ pub struct Prefs {
     pub claude_usage_live: bool,
     /// Folders starred in the summon panel, offered first.
     pub favorite_folders: Vec<String>,
+    /// Saved Herdr machines (profile ids) kept out of the dungeon; every
+    /// other machine enabled in Herdr is shown.
+    pub hidden_machines: Vec<String>,
+    /// The HUD's machine scope: a profile id, "local", or None for all.
+    pub machine_scope: Option<String>,
+    /// Where the summon panel starts agents: a machine's profile id, or
+    /// empty for this computer; and the last folder used on each machine.
+    pub create_machine: String,
+    pub machine_folders: HashMap<String, String>,
     #[serde(skip)]
     pub path: Option<PathBuf>,
 }
@@ -64,6 +74,10 @@ impl Default for Prefs {
             kiro_plan: 0,
             claude_usage_live: false,
             favorite_folders: vec![],
+            hidden_machines: vec![],
+            machine_scope: None,
+            create_machine: String::new(),
+            machine_folders: HashMap::new(),
             path: None,
         }
     }

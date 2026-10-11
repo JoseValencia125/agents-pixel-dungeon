@@ -4,9 +4,9 @@
 //! handle and the resize grip.
 
 use crate::ansi::Span;
-use crate::herdr::{Agent, MenuOptions, StatusFilter};
+use crate::herdr::{Agent, Machine, MenuOptions, Scope, StatusFilter, LOCAL};
 use crate::l10n::{tr, trf};
-use crate::monitor::{GuildEvent, Monitor};
+use crate::monitor::{GuildEvent, Link, Monitor};
 use crate::prefs::Prefs;
 use crate::scene::agent_color;
 use egui::{pos2, vec2, Align2, Color32, Context, CornerRadius, FontId, Frame, Key, Margin, RichText, Stroke, Ui, Vec2};
@@ -81,13 +81,33 @@ fn drop_hint(ui: &Ui, rect: egui::Rect) {
 /// A console line that opens what ⌘ (Ctrl elsewhere) + click lands on: a
 /// URL in the browser, a file or folder (relative to the agent's folder,
 /// `:line` dropped) with its app. Holding ⌘ over one shows the hand.
-fn console_line(ui: &mut Ui, spans: &[Span], size: f32, cwd: &str) {
+/// `cwd` is the agent's folder here; None for an agent on another machine,
+/// whose paths are not on this computer (only URLs open).
+fn console_line(ui: &mut Ui, spans: &[Span], size: f32, cwd: Option<&str>) {
+    // A line the terminal fills to its edge: its background across the
+    // console too, closing the gap to the next line, so a box stays a box.
+    if let Some(bg) = crate::ansi::line_fill(spans) {
+        let slot = ui.painter().add(egui::Shape::Noop);
+        let top = ui.cursor().top();
+        console_line_text(ui, spans, size, cwd);
+        let gap = ui.spacing().item_spacing.y;
+        let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), (top - gap / 2.0)..=(ui.min_rect().bottom() + gap / 2.0));
+        ui.painter().set(slot, egui::Shape::rect_filled(rect, 0.0, bg));
+        return;
+    }
+    console_line_text(ui, spans, size, cwd);
+}
+
+fn console_line_text(ui: &mut Ui, spans: &[Span], size: f32, cwd: Option<&str>) {
     // Without ⌘ it is a plain label, so its text can still be selected.
     if !ui.input(|i| i.modifiers.command) { ui.add(screen_line(spans, size)); return; }
     let (pos, galley, response) = screen_line(spans, size).sense(egui::Sense::click()).layout_in_ui(ui);
     let target = response.hover_pos().and_then(|pointer| {
         let index = galley.cursor_from_pos(pointer - pos).ccursor.index;
-        crate::herdr::link_at(galley.text(), index).and_then(|link| crate::herdr::resolve_link(&link, cwd))
+        crate::herdr::link_at(galley.text(), index).and_then(|link| match cwd {
+            Some(cwd) => crate::herdr::resolve_link(&link, cwd),
+            None => (link.starts_with("http://") || link.starts_with("https://")).then_some(link),
+        })
     });
     // Painted as a selectable label too: a label left out of the selection
     // for a frame drops it, and ⌘ is held to copy what is selected.
@@ -105,7 +125,7 @@ fn console_line(ui: &mut Ui, spans: &[Span], size: f32, cwd: &str) {
 fn screen_line(spans: &[Span], size: f32) -> egui::Label {
     use egui::text::{LayoutJob, TextFormat};
     let mut job = LayoutJob::default();
-    if spans.is_empty() {
+    if spans.iter().all(|s| s.text.is_empty()) {
         job.append(" ", 0.0, TextFormat { font_id: FontId::monospace(size), ..Default::default() });
     }
     for span in spans {
@@ -168,6 +188,8 @@ pub struct HudState {
 pub struct HudAction {
     pub toggle_log: bool,
     pub compose: bool,
+    /// The machine scope changed (it is remembered).
+    pub scope: bool,
 }
 
 /// The HUD grows a second row while the search box is open.
@@ -181,7 +203,7 @@ pub const SEARCH_ROW: f32 = 26.0;
 /// rooms, and a search box (on its own row) over project, harness, branch,
 /// folder and activity.
 pub fn hud(ui: &mut Ui, monitor: &mut Monitor, state: &mut HudState) -> HudAction {
-    let mut action = HudAction { toggle_log: false, compose: false };
+    let mut action = HudAction { toggle_log: false, compose: false, scope: false };
     // One column of rooms leaves no room for words: the "All" chip shows only its count.
     let narrow = ui.available_width() < crate::scene::width_for(2) - 20.0;
     let open = state.searching || !monitor.query.is_empty();
@@ -206,6 +228,9 @@ pub fn hud(ui: &mut Ui, monitor: &mut Monitor, state: &mut HudState) -> HudActio
                 if flat_button(ui, mono("+", 16.0).strong().color(Color32::from_rgb(140, 217, 115))).on_hover_text(tr("Invocar un agente nuevo")).clicked() {
                     action.compose = true;
                 }
+                if !monitor.machines.is_empty() || !monitor.scope.is_all() {
+                    action.scope = scope_menu(ui, monitor, narrow);
+                }
             });
         });
         if open {
@@ -224,6 +249,47 @@ pub fn hud(ui: &mut Ui, monitor: &mut Monitor, state: &mut HudState) -> HudActio
         }
     });
     action
+}
+
+/// The scope button: which machine (all, this computer, a saved one) and
+/// which project the rooms come from. Lit while it hides some. Returns true
+/// when the machine changed.
+fn scope_menu(ui: &mut Ui, monitor: &mut Monitor, narrow: bool) -> bool {
+    let mut scope = monitor.scope.clone();
+    let machine_name = |id: &str| if id == LOCAL { tr("Este equipo") } else { monitor.saved_machines.iter().find(|m| m.machine.id == id).map(|m| m.machine.label.clone()).unwrap_or_default() };
+    let mut text = String::from("@");
+    if !narrow {
+        if let Some(machine) = &scope.machine { text += &machine_name(machine); }
+        if let Some(project) = &scope.project { text += &format!(" · {project}"); }
+    }
+    let lit = !scope.is_all();
+    let label = mono(&text, 11.0).color(if lit { Color32::WHITE } else { alpha(Color32::WHITE, 0.75) });
+    ui.menu_button(label, |ui| {
+        ui.label(mono(&tr("Máquina"), 10.0).color(DIM));
+        ui.radio_value(&mut scope.machine, None, tr("Todas"));
+        ui.radio_value(&mut scope.machine, Some(LOCAL.to_string()), tr("Este equipo"));
+        for view in &monitor.machines {
+            let note = match &view.link {
+                Link::Up => String::new(),
+                Link::Connecting => format!(" · {}", tr("conectando")),
+                Link::Down(why) => format!(" · {}", tr("sin conexión")) + &if why.is_empty() { String::new() } else { format!(" ({why})") },
+            };
+            ui.radio_value(&mut scope.machine, Some(view.machine.id.clone()), format!("{}{note}", view.machine.label));
+        }
+        ui.separator();
+        ui.label(mono(&tr("Proyecto"), 10.0).color(DIM));
+        ui.radio_value(&mut scope.project, None, tr("Todos"));
+        let only_machine = Scope { machine: scope.machine.clone(), project: None };
+        let mut projects: Vec<String> = monitor.agents.iter().filter(|a| only_machine.admits(a)).map(|a| a.project.clone()).collect();
+        projects.sort_by_key(|p| crate::herdr::fold(p));
+        projects.dedup();
+        for project in projects { ui.radio_value(&mut scope.project, Some(project.clone()), project); }
+    })
+    .response
+    .on_hover_text(tr("Filtrar por máquina y proyecto"));
+    let machine_changed = scope.machine != monitor.scope.machine;
+    monitor.set_scope(scope);
+    machine_changed
 }
 
 fn chip(ui: &mut Ui, monitor: &mut Monitor, filter: StatusFilter, narrow: bool) {
@@ -343,19 +409,27 @@ pub struct ChatAction {
 /// whole. A question keeps the plain lines, whose options are clicked.
 pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatState, now: f64, wide: bool) -> ChatAction {
     let mut action = ChatAction { close: false, console_step: 0 };
-    // Files dropped on the window go to the message as paths.
-    let dropped = dropped_paths(ui);
-    if !dropped.is_empty() { add_paths(&mut state.draft, &dropped); state.focus = true; }
-    drop_hint(ui, ui.max_rect());
+    // Files dropped on the window go to the message as paths; this
+    // computer's paths mean nothing to an agent on another machine.
+    if !agent.is_remote() {
+        let dropped = dropped_paths(ui);
+        if !dropped.is_empty() { add_paths(&mut state.draft, &dropped); state.focus = true; }
+        drop_hint(ui, ui.max_rect());
+    }
     // Keep the terminal tail fresh while the panel is open.
     if state.status_seen != agent.status { state.status_seen = agent.status.clone(); state.next_tail = 0.0; state.next_screen = 0.0; }
-    if now >= state.next_tail && state.tail_rx.is_none() {
+    // A machine out of reach keeps its last screen: reading it again would
+    // try SSH twice a second, past the machine's back-off.
+    let unreachable = agent.is_remote() && monitor.read_only(agent);
+    if now >= state.next_tail && state.tail_rx.is_none() && !unreachable {
         state.tail_rx = Some(monitor.tail(agent, 30));
         state.next_tail = now + 2.0;
     }
-    if now >= state.next_screen && state.screen_rx.is_none() {
+    if now >= state.next_screen && state.screen_rx.is_none() && !unreachable {
         state.screen_rx = Some(monitor.screen(agent, wide));
-        state.next_screen = now + 0.5;
+        // Four reads a second where each is a round trip (this computer, or
+        // a machine's open bridge); two where each starts a `herdr --machine`.
+        state.next_screen = now + if monitor.reads_fast(agent) { 0.25 } else { 0.5 };
     }
     if let Some(rx) = &state.screen_rx {
         if let Ok(text) = rx.try_recv() {
@@ -391,7 +465,7 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
     let sending = state.sending.is_some();
     let menu = state.menu(agent);
     let color = agent_color(&agent.status);
-    let standalone = monitor.standalone();
+    let standalone = monitor.read_only(agent);
 
     // While the agent is asking something, ↑/↓ move its highlighted option
     // and ⏎ (with nothing typed) picks it, as in its own terminal.
@@ -442,13 +516,14 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
             if let Some(left) = agent.limit_left(crate::herdr::unix_now()).filter(|_| agent.status == "limited") {
                 status += &format!(" · {}", trf("se reinicia en {}", &[&crate::scene::countdown(left)]));
             }
-            ui.label(mono(&format!("{} · {}", agent.project, status), 11.0).color(DIM));
+            let place = match &agent.machine { Some(machine) => format!("{} · @{}", agent.project, machine.label), None => agent.project.clone() };
+            ui.label(mono(&format!("{place} · {status}"), 11.0).color(DIM));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if flat_button(ui, mono("x", 13.0).color(Color32::WHITE)).on_hover_text(tr("Cerrar")).clicked() { action.close = true; }
                 if !standalone && flat_button(ui, mono("↗", 13.0).color(Color32::WHITE)).on_hover_text(tr("Enfocar este agente en Herdr")).clicked() && !sending {
                     state.run(monitor.focus(agent));
                 }
-                if flat_button(ui, mono(">_", 11.0).strong().color(Color32::from_gray(200))).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
+                if !agent.is_remote() && flat_button(ui, mono(">_", 11.0).strong().color(Color32::from_gray(200))).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
                     crate::herdr::open_terminal(&agent.cwd);
                 }
                 // The console's own text size.
@@ -503,7 +578,7 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
                             let color = line.iter().find_map(|s| s.fg).unwrap_or(Color32::from_gray(100));
                             ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0_f32, color));
                         } else {
-                            console_line(ui, line, size, &agent.cwd);
+                            console_line(ui, line, size, (!agent.is_remote()).then_some(agent.cwd.as_str()));
                         }
                     }
                 });
@@ -537,7 +612,11 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
             });
         });
         if standalone {
-            ui.label(mono(&tr("Instala Herdr para responder desde aquí."), 10.0).color(DIM));
+            let why = match &agent.machine {
+                Some(machine) => trf("Sin conexión con {}; reintentamos automáticamente.", &[&machine.label]),
+                None => tr("Instala Herdr para responder desde aquí."),
+            };
+            ui.label(mono(&why, 10.0).color(DIM));
             return;
         }
         if !inline { input_row(ui, monitor, agent, state, &menu, sending, fs(13.0), true); }
@@ -555,7 +634,7 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
     // On the prompt line the box keeps to the top, level with the glyph,
     // instead of centring in a row taller than itself.
     ui.with_layout(egui::Layout::left_to_right(if roomy { egui::Align::Center } else { egui::Align::Min }), |ui| {
-        let picker = agent.status != "blocked" && !monitor.standalone() && picker_open(&state.screen);
+        let picker = agent.status != "blocked" && !monitor.read_only(agent) && picker_open(&state.screen);
         let hint = if picker { tr("↑↓ y Enter eligen · esc cancela") } else if agent.status == "blocked" { trf("↑↓ y Enter eligen · o responde a {}…", &[&agent.name]) } else { trf("Escribir a {}…", &[&agent.name]) };
         let buttons_width = match agent.status.as_str() { "blocked" => 150.0, "working" => 80.0, _ => 26.0 };
         let mut draft = state.draft.clone();
@@ -661,7 +740,8 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
 /// The harness's "/" commands matching what is typed, with what each does.
 fn slash_matches(state: &mut ChatState, agent: &Agent) -> Vec<(String, String)> {
     if agent.status == "blocked" || !state.draft.starts_with('/') { return vec![]; }
-    let commands = state.slash.get_or_insert_with(|| crate::commands::slash_commands(crate::herdr::harness_for(&agent.name), &agent.cwd, &crate::herdr::home_dir()));
+    let harness = crate::herdr::harness_for(&agent.name);
+    let commands = state.slash.get_or_insert_with(|| if agent.is_remote() { crate::commands::built_in_commands(harness) } else { crate::commands::slash_commands(harness, &agent.cwd, &crate::herdr::home_dir()) });
     crate::commands::matching(commands, &state.draft).into_iter().map(|c| (c.name.clone(), c.about.clone())).collect()
 }
 
@@ -788,8 +868,10 @@ pub struct ComposeState {
     pub prompt: String,
     busy: Option<Receiver<Option<String>>>,
     note: Option<String>,
-    /// The harnesses installed here, looked up once.
+    /// The harnesses installed here, looked up once, and those offered now
+    /// (all of them on a saved machine).
     installed: Option<Vec<&'static str>>,
+    kinds: Vec<&'static str>,
 }
 
 pub struct ComposeAction {
@@ -800,11 +882,14 @@ pub struct ComposeAction {
 /// of the agents' or any other) and an optional first prompt, and Herdr
 /// starts the agent in a new workspace there.
 pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &mut ComposeState) -> ComposeAction {
-    let dropped = dropped_paths(ui);
-    if !dropped.is_empty() { add_paths(&mut state.prompt, &dropped); }
-    drop_hint(ui, ui.max_rect());
+    // This computer's paths mean nothing to an agent summoned on another machine.
+    if summon_machine(monitor, prefs).is_none() {
+        let dropped = dropped_paths(ui);
+        if !dropped.is_empty() { add_paths(&mut state.prompt, &dropped); }
+        drop_hint(ui, ui.max_rect());
+    }
     let mut action = ComposeAction { close: false };
-    let (busy, known) = compose_prelude(monitor, prefs, state, &mut action);
+    let (busy, known, machine) = compose_prelude(monitor, prefs, state, &mut action);
     if ui.input(|i| i.key_pressed(Key::Escape)) { action.close = true; }
     let green = Color32::from_rgb(140, 217, 115);
     let total = ui.available_height();
@@ -819,12 +904,16 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
         });
         ui.horizontal(|ui| {
             let mut kind = prefs.create_kind.clone();
-            let kinds = state.installed.clone().unwrap_or_default();
+            let kinds = state.kinds.clone();
             egui::ComboBox::from_id_salt("kind").selected_text(mono(&kind, 11.0)).width(96.0).show_ui(ui, |ui| {
                 for option in kinds { ui.selectable_value(&mut kind, option.to_string(), option); }
             });
             if kind != prefs.create_kind { prefs.create_kind = kind; prefs.save(); }
-            folder_picker(ui, prefs, &known, 11.0);
+            machine_picker(ui, monitor, prefs, 11.0);
+            match &machine {
+                Some(machine) => remote_folder_picker(ui, prefs, machine, &known, 11.0),
+                None => folder_picker(ui, prefs, &known, 11.0),
+            }
         });
         Frame::new().fill(alpha(Color32::BLACK, 0.45)).corner_radius(CornerRadius::same(5)).inner_margin(Margin::same(3)).show(ui, |ui| {
             let height = total - 7.0 * 3.0 - 22.0 - 24.0 - 24.0;
@@ -841,10 +930,11 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let shortcut = ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
-                let can = !busy && !prefs.create_folder.is_empty();
+                let folder = summon_folder(prefs, machine.as_ref());
+                let can = !busy && folder_ready(&folder, machine.as_ref());
                 if (ui.add_enabled(can, egui::Button::new(mono(&tr("Invocar"), 11.0))).on_hover_text(tr("Crear el agente (⌘⏎)")).clicked() || (shortcut && can)) && state.busy.is_none() {
                     state.note = None;
-                    state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt));
+                    state.busy = Some(monitor.create(&prefs.create_kind, &folder, &state.prompt, machine.as_ref()));
                 }
             });
         });
@@ -855,8 +945,10 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
 /// What both summon forms do first: take a finished summon's outcome, look
 /// up the installed harnesses (keeping the chosen one among them) and list
 /// the folders the agents work in, defaulting the folder to a favourite or
-/// the first of them.
-fn compose_prelude(monitor: &Monitor, prefs: &mut Prefs, state: &mut ComposeState, action: &mut ComposeAction) -> (bool, Vec<String>) {
+/// the first of them. On a saved machine the harnesses installed there are
+/// unknown (all are offered; Herdr says if one is missing) and its folders
+/// are those of its own agents.
+fn compose_prelude(monitor: &Monitor, prefs: &mut Prefs, state: &mut ComposeState, action: &mut ComposeAction) -> (bool, Vec<String>, Option<Machine>) {
     if let Some(rx) = &state.busy {
         if let Ok(failure) = rx.try_recv() {
             state.busy = None;
@@ -866,18 +958,81 @@ fn compose_prelude(monitor: &Monitor, prefs: &mut Prefs, state: &mut ComposeStat
             }
         }
     }
-    let kinds = state.installed.get_or_insert_with(crate::herdr::installed_kinds);
+    let machine = summon_machine(monitor, prefs);
+    let local = state.installed.get_or_insert_with(crate::herdr::installed_kinds).clone();
+    let kinds = if machine.is_some() { crate::herdr::CREATABLE_KINDS.to_vec() } else { local };
     if !kinds.contains(&prefs.create_kind.as_str()) { prefs.create_kind = kinds[0].to_string(); prefs.save(); }
-    // Folders the current agents work in, most common first.
+    state.kinds = kinds;
+    // Folders the current agents work in, on the chosen computer, most common first.
     let mut known: Vec<String> = vec![];
-    for agent in &monitor.agents {
-        let path = crate::herdr::expand_home(&agent.cwd);
+    for agent in monitor.agents.iter().filter(|a| a.machine.as_ref().map(|m| &m.id) == machine.as_ref().map(|m| &m.id)) {
+        let path = if machine.is_some() { agent.cwd.clone() } else { crate::herdr::expand_home(&agent.cwd) };
         if !known.contains(&path) { known.push(path); }
     }
-    if prefs.create_folder.is_empty() {
-        if let Some(first) = prefs.favorite_folders.first().or(known.first()).cloned() { prefs.create_folder = first; prefs.save(); }
+    match &machine {
+        Some(m) if !prefs.machine_folders.contains_key(&m.id) => {
+            if let Some(first) = known.first().cloned() { prefs.machine_folders.insert(m.id.clone(), first); prefs.save(); }
+        }
+        Some(_) => {}
+        None if prefs.create_folder.is_empty() => {
+            if let Some(first) = prefs.favorite_folders.first().or(known.first()).cloned() { prefs.create_folder = first; prefs.save(); }
+        }
+        None => {}
     }
-    (state.busy.is_some(), known)
+    (state.busy.is_some(), known, machine)
+}
+
+/// The saved machine the summon panel starts agents on, if one is chosen
+/// and shown; else this computer.
+fn summon_machine(monitor: &Monitor, prefs: &Prefs) -> Option<Machine> {
+    monitor.machines.iter().find(|v| v.machine.id == prefs.create_machine).map(|v| v.machine.clone())
+}
+
+/// The folder to summon in: this computer's, or the one typed for that machine.
+fn summon_folder(prefs: &Prefs, machine: Option<&Machine>) -> String {
+    match machine {
+        Some(m) => prefs.machine_folders.get(&m.id).cloned().unwrap_or_default(),
+        None => prefs.create_folder.clone(),
+    }
+}
+
+fn folder_ready(folder: &str, machine: Option<&Machine>) -> bool {
+    if machine.is_some() { crate::monitor::remote_folder_ok(folder.trim()) } else { !folder.is_empty() }
+}
+
+/// Where to summon: this computer or one of the saved machines shown. Only
+/// there while some machine is.
+fn machine_picker(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, size: f32) {
+    if monitor.machines.is_empty() { return; }
+    let here = tr("Este equipo");
+    let current = summon_machine(monitor, prefs);
+    let before = current.as_ref().map(|m| m.id.clone()).unwrap_or_default();
+    let mut pick = before.clone();
+    let shown = current.map(|m| m.label).unwrap_or_else(|| here.clone());
+    egui::ComboBox::from_id_salt("machine").selected_text(mono(&format!("@{shown}"), size)).truncate().width(110.0).show_ui(ui, |ui| {
+        ui.selectable_value(&mut pick, String::new(), &here);
+        for view in &monitor.machines {
+            let mut text = view.machine.label.clone();
+            if matches!(view.link, Link::Down(_)) { text += &format!(" ({})", tr("sin conexión")); }
+            ui.selectable_value(&mut pick, view.machine.id.clone(), text);
+        }
+    });
+    if pick != before { prefs.create_machine = pick; prefs.save(); }
+}
+
+/// A folder on a saved machine: typed (an absolute path there), or one its
+/// agents already work in. No file dialog: it is not this computer's.
+fn remote_folder_picker(ui: &mut Ui, prefs: &mut Prefs, machine: &Machine, known: &[String], size: f32) {
+    let mut folder = prefs.machine_folders.get(&machine.id).cloned().unwrap_or_default();
+    let before = folder.clone();
+    if !known.is_empty() {
+        egui::ComboBox::from_id_salt("remote-folder").selected_text(mono("▾", size)).width(18.0).show_ui(ui, |ui| {
+            for path in known { ui.selectable_value(&mut folder, path.clone(), path); }
+        });
+    }
+    let edit = egui::TextEdit::singleline(&mut folder).hint_text(tr("Ruta en esa máquina")).font(FontId::monospace(fs(size))).desired_width(ui.available_width());
+    ui.add(edit).on_hover_text(trf("Una carpeta de {}, con su ruta absoluta", &[&machine.label]));
+    if folder != before { prefs.machine_folders.insert(machine.id.clone(), folder); prefs.save(); }
 }
 
 /// The folder to summon in: favourites first (★), then the agents' folders,
@@ -915,7 +1070,7 @@ fn folder_picker(ui: &mut Ui, prefs: &mut Prefs, known: &[String], size: f32) {
 /// optional first prompt and the button.
 pub fn summon_form(ui: &mut Ui, monitor: &Monitor, assets: &crate::assets::Assets, prefs: &mut Prefs, state: &mut ComposeState, now: f64) -> ComposeAction {
     let mut action = ComposeAction { close: false };
-    let (busy, known) = compose_prelude(monitor, prefs, state, &mut action);
+    let (busy, known, machine) = compose_prelude(monitor, prefs, state, &mut action);
     if ui.input(|i| i.key_pressed(Key::Escape)) { action.close = true; }
     let green = Color32::from_rgb(140, 217, 115);
     ui.spacing_mut().item_spacing = vec2(4.0, 5.0);
@@ -927,7 +1082,7 @@ pub fn summon_form(ui: &mut Ui, monitor: &Monitor, assets: &crate::assets::Asset
         });
     });
     // The installed harnesses, as their heroes: the chosen one walks.
-    let kinds = state.installed.clone().unwrap_or_default();
+    let kinds = state.kinds.clone();
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
         for kind in kinds {
@@ -943,7 +1098,11 @@ pub fn summon_form(ui: &mut Ui, monitor: &Monitor, assets: &crate::assets::Asset
         }
     });
     ui.label(mono(&prefs.create_kind, 10.0).strong().color(green));
-    ui.horizontal(|ui| folder_picker(ui, prefs, &known, 10.0));
+    if !monitor.machines.is_empty() { ui.horizontal(|ui| machine_picker(ui, monitor, prefs, 10.0)); }
+    ui.horizontal(|ui| match &machine {
+        Some(machine) => remote_folder_picker(ui, prefs, machine, &known, 10.0),
+        None => folder_picker(ui, prefs, &known, 10.0),
+    });
     let edit = egui::TextEdit::multiline(&mut state.prompt).hint_text(tr("Primer prompt (opcional)")).font(FontId::monospace(fs(10.0))).desired_rows(2).desired_width(f32::INFINITY).interactive(!busy);
     ui.add(edit);
     ui.horizontal(|ui| {
@@ -954,10 +1113,11 @@ pub fn summon_form(ui: &mut Ui, monitor: &Monitor, assets: &crate::assets::Asset
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let shortcut = ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
-            let can = !busy && !prefs.create_folder.is_empty();
+            let folder = summon_folder(prefs, machine.as_ref());
+            let can = !busy && folder_ready(&folder, machine.as_ref());
             if (ui.add_enabled(can, egui::Button::new(mono(&tr("Invocar"), 11.0).color(Color32::WHITE)).fill(alpha(green, 0.35))).on_hover_text(tr("Crear el agente (⌘⏎)")).clicked() || (shortcut && can)) && state.busy.is_none() {
                 state.note = None;
-                state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt));
+                state.busy = Some(monitor.create(&prefs.create_kind, &folder, &state.prompt, machine.as_ref()));
             }
         });
     });

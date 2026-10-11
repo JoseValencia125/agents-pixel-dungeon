@@ -167,7 +167,8 @@ impl Notifier {
         for alert in alerts.iter().filter(|a| wants_notification(prefs, a.kind)) {
             let agent = alert.agent.clone();
             let title = if alert.kind == AlertKind::NeedsHelp { trf("{} necesita atención", &[&agent.name]) } else { trf("{} terminó", &[&agent.name]) };
-            let body = format!("{}\n{}", agent.project, agent.question.clone().unwrap_or_else(|| agent.activity.clone()));
+            let place = match &agent.machine { Some(machine) => format!("{} · @{}", agent.project, machine.label), None => agent.project.clone() };
+            let body = format!("{}\n{}", place, agent.question.clone().unwrap_or_else(|| agent.activity.clone()));
             let open_tx = self.open_tx.clone();
             std::thread::spawn(move || post_one(&title, &body, &agent.id, open_tx));
         }

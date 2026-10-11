@@ -156,6 +156,14 @@ pub fn parse(text: &str) -> Vec<Vec<Span>> {
     lines
 }
 
+/// The background a line runs to the terminal's edge with (a TUI's boxes,
+/// as Pi paints its tool calls and messages), kept by `reflow` as an empty
+/// run at the line's end once its trailing spaces go, for the console to
+/// paint across its width.
+pub fn line_fill(line: &[Span]) -> Option<Color32> {
+    line.last().filter(|s| s.text.is_empty()).and_then(|s| s.bg)
+}
+
 /// The plain text of parsed lines (for tests and searches).
 pub fn plain(lines: &[Vec<Span>]) -> Vec<String> {
     lines.iter().map(|spans| spans.iter().map(|s| s.text.as_str()).collect()).collect()
@@ -172,10 +180,14 @@ pub fn reflow(screen: Vec<Vec<Span>>) -> Vec<Vec<Span>> {
     if widest < 40 { return screen; }
     let mut out: Vec<Vec<Span>> = Vec::with_capacity(screen.len());
     let (mut open, mut hard) = (false, false);
+    let mut above: Option<Color32> = None;
     for mut line in screen {
         let t = text(&line);
         let count = t.trim_end().chars().count();
-        if open && !crate::herdr::starts_block(&t) {
+        let fill = line.last().filter(|s| s.text.ends_with(' ')).and_then(|s| s.bg);
+        // A box's lines stay as the program laid them out (a diff, JSON, a
+        // table inside a tool call); only plain lines are joined.
+        if open && fill.is_none() && above.is_none() && !crate::herdr::starts_block(&t) {
             let last = out.last_mut().expect("an open paragraph");
             // A URL goes on without a space: cut at the last column, or at
             // one of its hyphens (the terminal breaks words there too).
@@ -200,7 +212,9 @@ pub fn reflow(screen: Vec<Vec<Span>>) -> Vec<Vec<Span>> {
                 s.text.truncate(n);
                 if s.text.is_empty() { last.pop(); } else { break; }
             }
+            if let Some(bg) = fill { last.push(Span { text: String::new(), fg: None, bg: Some(bg), bold: false, dim: false, italic: false, underline: false }); }
         }
+        above = fill;
         open = count > 0 && count + 12 >= widest;
         hard = count >= widest;
     }

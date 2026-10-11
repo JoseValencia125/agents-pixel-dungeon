@@ -4,11 +4,11 @@
 //! Background work reports back through a channel the UI drains each frame.
 
 use crate::alerts::{alerts_for, AgentAlert};
-use crate::events::{HerdrStream, StreamMessage};
+use crate::events::{HerdrStream, Requester, StreamMessage};
 use crate::herdr::*;
 use crate::l10n::{tr, trf};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,17 +42,98 @@ pub enum HerdrState {
     Up,
 }
 
+/// The link to a saved SSH machine, as of its last snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Link {
+    Connecting,
+    Up,
+    /// The last attempt failed, with Herdr's reason.
+    Down(String),
+}
+
+/// A saved SSH machine shown in the dungeon: its agents from its last good
+/// snapshot, and how its link is doing. Each machine is read with `herdr
+/// --machine <id> api snapshot`, backing off while it is unreachable. Herdr
+/// serves no event stream over `--machine`, so one is held open over SSH
+/// (see `events`): each event reads the machine again at once, and while
+/// it is open the snapshots are only a reconciliation.
+pub struct MachineView {
+    pub machine: Machine,
+    pub link: Link,
+    pub agents: Vec<Agent>,
+    pub last_ok: Option<Instant>,
+    next_poll: Instant,
+    busy: bool,
+    /// The snapshot in flight: only its own answer counts, so one from
+    /// before a reset or a hide is dropped and never frees a newer one.
+    request: u64,
+    failures: u32,
+    /// Something changed while a snapshot was in flight: read again after it.
+    dirty: bool,
+    stream: Option<HerdrStream>,
+    stream_panes: Vec<String>,
+    /// The event stream is open (its subscription confirmed).
+    live: bool,
+    next_stream_try: Instant,
+    stream_failures: u32,
+}
+
+impl MachineView {
+    fn new(machine: Machine) -> MachineView {
+        let now = Instant::now();
+        MachineView {
+            machine, link: Link::Connecting, agents: vec![], last_ok: None, next_poll: now, busy: false, request: 0, failures: 0,
+            dirty: false, stream: None, stream_panes: vec![], live: false, next_stream_try: now, stream_failures: 0,
+        }
+    }
+
+    /// Its event stream is open: changes are read the moment they happen.
+    pub fn is_live(&self) -> bool {
+        self.live
+    }
+
+    /// Read the machine as soon as it is free.
+    fn poke(&mut self) {
+        if self.busy { self.dirty = true; } else { self.next_poll = Instant::now(); }
+    }
+}
+
+/// The base of the back-off while a machine is unreachable, and its
+/// longest wait between attempts (5, 10, 20, 40, then 60 s).
+const REMOTE_EVERY: Duration = Duration::from_secs(5);
+const REMOTE_BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// How often a reachable machine is read: often without its event stream,
+/// only to reconcile with it.
+const REMOTE_POLL: Duration = Duration::from_secs(2);
+const REMOTE_RECONCILE: Duration = Duration::from_secs(20);
+/// The longest wait before an event stream that dropped is tried again (a
+/// machine without python3 never opens one and is polled instead).
+const REMOTE_STREAM_BACKOFF_MAX: Duration = Duration::from_secs(120);
+/// Herdr's saved machines are listed from its local file this often.
+const MACHINES_EVERY: Duration = Duration::from_secs(30);
+
+pub fn remote_backoff(failures: u32) -> Duration {
+    (REMOTE_EVERY * 2u32.saturating_pow(failures.saturating_sub(1).min(6))).min(REMOTE_BACKOFF_MAX)
+}
+
 enum Inbox {
     Refresh { generation: u64, result: Result<(Fresh, Vec<Agent>), MonitorError>, herdr: HerdrState },
     Socket { generation: u64, path: Option<String>, panes: Vec<String>, was_up: bool },
     Stream(u64, StreamMessage),
     Sessions(Vec<HerdrSession>),
+    Machines(Option<Vec<SavedMachine>>),
+    Remote { request: u64, machine: String, result: Result<Vec<Agent>, MonitorError> },
+    RemoteStream { machine: String, generation: u64, message: StreamMessage },
+    /// An action reached this machine: read it again now.
+    Poke(String),
     Log(GuildEvent),
-    Created { failure: Option<String>, waiting: Option<(String, String, String, String)>, log: Option<GuildEvent> },
+    Created { failure: Option<String>, waiting: Option<PendingPrompt>, log: Option<GuildEvent> },
 }
 
 struct PendingPrompt {
-    pane: String,
+    /// The new agent's id in the dungeon, and the server its pane is on.
+    id: String,
+    target: HerdrTarget,
     name: String,
     project: String,
     text: String,
@@ -67,8 +148,9 @@ pub struct Monitor {
     pub updated: Option<Instant>,
     pub events: Vec<GuildEvent>,
     pub demo: bool,
-    /// HUD state chip and search box.
+    /// HUD state chip, machine and project scope, and search box.
     pub filter: StatusFilter,
+    pub scope: Scope,
     pub query: String,
     /// The room the user clicked; its chat panel is open while set.
     pub selected: Option<String>,
@@ -85,6 +167,19 @@ pub struct Monitor {
     /// Herdr's availability; while not Up the rooms come from the standalone scan.
     pub herdr: HerdrState,
     next_herdr_try: Instant,
+    /// The machines saved in Herdr (for the menu), and those shown in the
+    /// dungeon: enabled in Herdr and not hidden here.
+    pub saved_machines: Vec<SavedMachine>,
+    pub machines: Vec<MachineView>,
+    hidden_machines: Vec<String>,
+    next_machine_list: Instant,
+    listing_machines: bool,
+    requests: u64,
+    // The local agents last shown, and whether the first local refresh is in:
+    // machines are read only after it, so the guild starts with its own rooms.
+    local: Vec<Agent>,
+    local_done: bool,
+    published: bool,
 
     inbox: Receiver<Inbox>,
     outbox: Sender<Inbox>,
@@ -132,6 +227,16 @@ impl Monitor {
             changed: false,
             herdr: HerdrState::Unknown,
             next_herdr_try: Instant::now(),
+            scope: Scope::default(),
+            saved_machines: vec![],
+            machines: vec![],
+            hidden_machines: vec![],
+            next_machine_list: Instant::now(),
+            listing_machines: false,
+            requests: 0,
+            local: vec![],
+            local_done: false,
+            published: false,
             inbox,
             outbox,
             wake: Arc::new(|| {}),
@@ -161,11 +266,11 @@ impl Monitor {
     }
 
     pub fn visible_agents(&self) -> Vec<Agent> {
-        filter_agents(&self.agents, self.filter, &self.query)
+        filter_agents(&self.agents, self.filter, &self.query).into_iter().filter(|a| self.scope.admits(a)).collect()
     }
 
     pub fn is_filtering(&self) -> bool {
-        self.filter != StatusFilter::All || !self.query.trim().is_empty()
+        self.filter != StatusFilter::All || !self.scope.is_all() || !self.query.trim().is_empty()
     }
 
     /// Without Herdr the rooms are read-only: nothing can be typed into an agent.
@@ -173,9 +278,87 @@ impl Monitor {
         !self.demo && self.herdr != HerdrState::Up
     }
 
-    /// The HUD shows once there are enough rooms to sift, or while a filter hides some.
+    /// Whether nothing can be sent to this agent: a local one without the
+    /// local Herdr, a remote one while its machine is unreachable.
+    pub fn read_only(&self, agent: &Agent) -> bool {
+        match &agent.machine {
+            Some(machine) => matches!(self.link_of(&machine.id), Some(Link::Down(_)) | None),
+            None => self.standalone(),
+        }
+    }
+
+    pub fn link_of(&self, machine: &str) -> Option<&Link> {
+        self.machines.iter().find(|v| v.machine.id == machine).map(|v| &v.link)
+    }
+
+    /// Rooms whose machine is unreachable: shown as last seen, faded.
+    pub fn stale_ids(&self) -> HashSet<String> {
+        self.machines.iter().filter(|v| matches!(v.link, Link::Down(_))).flat_map(|v| v.agents.iter().map(|a| a.id.clone())).collect()
+    }
+
+    /// The HUD shows once there are enough rooms to sift, while a filter
+    /// hides some, or while machines are shown (for their scope menu).
     pub fn shows_hud(&self) -> bool {
-        self.agents.len() >= 3 || self.is_filtering()
+        self.agents.len() >= 3 || self.is_filtering() || !self.machines.is_empty()
+    }
+
+    /// What the banner says while shown machines are out of reach: the
+    /// first one, how long since its last good snapshot, and how many more.
+    pub fn machines_note(&self, now: Instant) -> Option<String> {
+        let down: Vec<&MachineView> = self.machines.iter().filter(|v| matches!(v.link, Link::Down(_))).collect();
+        let first = down.first()?;
+        let mut text = trf("{} sin conexión", &[&first.machine.label]);
+        if let Some(last) = first.last_ok {
+            text += &format!(" · {}", trf("última actualización {}", &[&ago(now.saturating_duration_since(last).as_secs_f64())]));
+        }
+        if down.len() > 1 { text += &format!(" · +{}", down.len() - 1); }
+        Some(text)
+    }
+
+    /// Read every shown machine on the next poll instead of waiting out its back-off.
+    pub fn retry_machines(&mut self) {
+        let now = Instant::now();
+        for view in &mut self.machines { view.next_poll = now; }
+    }
+
+    pub fn set_scope(&mut self, scope: Scope) {
+        if self.scope != scope { self.scope = scope; self.changed = true; }
+    }
+
+    /// Machines (profile ids) not to show; the others Herdr has enabled are.
+    pub fn set_hidden_machines(&mut self, hidden: Vec<String>) {
+        if self.hidden_machines == hidden { return; }
+        self.hidden_machines = hidden;
+        let saved = self.saved_machines.clone();
+        self.apply_machines(saved);
+    }
+
+    /// Keep one view per machine that is enabled in Herdr and not hidden:
+    /// new ones start connecting, dropped ones leave with their rooms, and a
+    /// renamed one keeps its rooms under the new label.
+    fn apply_machines(&mut self, saved: Vec<SavedMachine>) {
+        let wanted: Vec<Machine> = saved.iter().filter(|m| m.enabled && !self.hidden_machines.contains(&m.machine.id)).map(|m| m.machine.clone()).collect();
+        if self.saved_machines != saved { self.saved_machines = saved; self.changed = true; }
+        let gone: Vec<Machine> = self.machines.iter().filter(|v| !wanted.iter().any(|m| m.id == v.machine.id)).map(|v| v.machine.clone()).collect();
+        self.machines.retain(|v| wanted.iter().any(|m| m.id == v.machine.id));
+        let mut touched = !gone.is_empty();
+        // One line for a machine that leaves, not one per room.
+        for machine in &gone { self.log(trf("{} salió de la guild", &[&machine.label]), "left"); }
+        for machine in wanted {
+            match self.machines.iter_mut().find(|v| v.machine.id == machine.id) {
+                Some(view) if view.machine.label != machine.label => {
+                    for agent in &mut view.agents { agent.machine = Some(machine.clone()); }
+                    view.machine = machine;
+                    touched = true;
+                }
+                Some(_) => {}
+                None => { self.machines.push(MachineView::new(machine)); touched = true; }
+            }
+        }
+        if let Some(scope) = &self.scope.machine {
+            if scope != LOCAL && !self.machines.iter().any(|v| &v.machine.id == scope) { self.scope.machine = None; }
+        }
+        if touched { self.changed = true; self.publish(&gone.iter().map(|m| m.id.clone()).collect::<Vec<_>>()); }
     }
 
     pub fn select(&mut self, id: Option<String>) {
@@ -205,6 +388,8 @@ impl Monitor {
     pub fn set_demo(&mut self, enabled: bool) {
         self.generation += 1;
         self.demo = enabled;
+        // Demo agents are all on this computer: a machine scope would hide them.
+        if enabled { self.scope.machine = None; }
         self.reset();
     }
 
@@ -233,6 +418,11 @@ impl Monitor {
 
     fn reset(&mut self) {
         self.drop_stream();
+        self.machines.clear();
+        self.local.clear();
+        self.local_done = false;
+        self.published = false;
+        self.next_machine_list = Instant::now();
         self.agents.clear();
         self.events.clear();
         self.updated = None;
@@ -248,17 +438,74 @@ impl Monitor {
         self.events.truncate(40);
     }
 
+    /// Show the local agents (Herdr's, the standalone scan's or the demo's),
+    /// with the remote machines' beside them.
     pub fn apply(&mut self, next: Vec<Agent>) {
+        self.local = next;
+        self.publish(&[]);
+        self.updated = Some(Instant::now());
+        self.error = None;
+    }
+
+    /// One remote machine's snapshot: its rooms are replaced as a whole, so
+    /// a reconnection never leaves a duplicate or a ghost behind.
+    pub fn apply_remote(&mut self, machine: &str, result: Result<Vec<Agent>, MonitorError>) {
+        let Some(index) = self.machines.iter().position(|v| v.machine.id == machine) else { return };
+        let now = Instant::now();
+        let view = &mut self.machines[index];
+        view.busy = false;
+        let label = view.machine.label.clone();
+        match result {
+            Ok(agents) => {
+                let first = view.last_ok.is_none();
+                let was_down = matches!(view.link, Link::Down(_));
+                view.link = Link::Up;
+                view.failures = 0;
+                view.last_ok = Some(now);
+                view.next_poll = if view.dirty { now } else { now + if view.live { REMOTE_RECONCILE } else { REMOTE_POLL } };
+                view.dirty = false;
+                let count = agents.len();
+                view.agents = agents;
+                self.changed = true;
+                if first {
+                    self.log(trf("{} conectada · {} agentes", &[&label, &count]), "info");
+                } else if was_down {
+                    self.log(trf("{} reconectada", &[&label]), "info");
+                }
+                let quiet = if first { vec![machine.to_string()] } else { vec![] };
+                self.publish(&quiet);
+            }
+            Err(error) => {
+                view.failures += 1;
+                view.next_poll = now + remote_backoff(view.failures);
+                let text = error.text();
+                let news = !matches!(view.link, Link::Down(_));
+                if view.link != Link::Down(text.clone()) { view.link = Link::Down(text.clone()); self.changed = true; }
+                if news { self.log(trf("{} sin conexión: {}", &[&label, &text]), "left"); }
+            }
+        }
+    }
+
+    /// Show the local and the remote agents together, logging and alerting
+    /// what changed. A machine that just connected or left (`quiet`) brings
+    /// or takes its rooms without one line each.
+    fn publish(&mut self, quiet: &[String]) {
+        let loud = |agent: &Agent| agent.machine.as_ref().map(|m| !quiet.contains(&m.id)).unwrap_or(true);
+        let mut next = self.local.clone();
+        if !self.demo {
+            for view in &self.machines { next.extend(view.agents.iter().cloned()); }
+        }
         // Sort last: background jobs and subagents can change a status after
         // Herdr's, and whoever needs attention must lead the grid.
         let next = sort_agents(next);
         let previous: HashMap<String, Agent> = self.agents.iter().map(|a| (a.id.clone(), a.clone())).collect();
         let ids: Vec<String> = next.iter().map(|a| a.id.clone()).collect();
-        if self.updated.is_some() {
+        if self.published {
             let alerts = alerts_for(&previous, &next);
             self.alerts.extend(alerts);
         }
-        if self.updated.is_none() {
+        if !self.published {
+            self.published = true;
             self.log(trf("Guild conectada · {} agentes", &[&next.len()]), "info");
         } else {
             for agent in &next {
@@ -270,17 +517,15 @@ impl Monitor {
                     if agent.subagents > old.subagents {
                         self.log(trf("{} · {} subagentes activos", &[&agent.project, &agent.subagents]), "subagents");
                     }
-                } else {
+                } else if loud(agent) {
                     self.log(trf("{} entró a la guild", &[&agent.project]), "joined");
                 }
             }
-            let gone: Vec<String> = self.agents.iter().filter(|a| !ids.contains(&a.id)).map(|a| a.project.clone()).collect();
+            let gone: Vec<String> = self.agents.iter().filter(|a| !ids.contains(&a.id) && loud(a)).map(|a| a.project.clone()).collect();
             for project in gone { self.log(trf("{} salió de la guild", &[&project]), "left"); }
         }
         if self.agents != next { self.changed = true; }
         self.agents = next;
-        self.updated = Some(Instant::now());
-        self.error = None;
         if let Some(selected) = &self.selected {
             if !ids.contains(selected) { self.selected = None; self.changed = true; }
         }
@@ -296,6 +541,7 @@ impl Monitor {
                 Inbox::Refresh { generation, result, herdr } => {
                     self.busy = false;
                     if generation != self.generation { self.refresh(); continue; }
+                    self.local_done = true;
                     if herdr != self.herdr { self.herdr = herdr; self.changed = true; }
                     if herdr == HerdrState::Down || herdr == HerdrState::Missing {
                         // Try Herdr again in a few seconds; the scan carries on meanwhile.
@@ -370,16 +616,44 @@ impl Monitor {
                 Inbox::Sessions(sessions) => {
                     if self.sessions != sessions { self.sessions = sessions; self.changed = true; }
                 }
+                Inbox::Machines(saved) => {
+                    self.listing_machines = false;
+                    self.next_machine_list = Instant::now() + MACHINES_EVERY;
+                    // Herdr could not list them: keep the machines as they are.
+                    if let (Some(saved), false) = (saved, self.demo) { self.apply_machines(saved); }
+                }
+                Inbox::Remote { request, machine, result } => {
+                    if !self.machines.iter().any(|v| v.machine.id == machine && v.busy && v.request == request) { continue; }
+                    self.apply_remote(&machine, result);
+                }
+                Inbox::Poke(machine) => {
+                    if let Some(view) = self.machines.iter_mut().find(|v| v.machine.id == machine) { view.poke(); }
+                }
+                Inbox::RemoteStream { machine, generation, message } => {
+                    let Some(view) = self.machines.iter_mut().find(|v| v.machine.id == machine) else { continue };
+                    if view.stream.as_ref().map(|s| s.generation) != Some(generation) { continue; }
+                    match message {
+                        // Read it now: anything may have changed while subscribing.
+                        StreamMessage::Open => { view.live = true; view.stream_failures = 0; view.poke(); }
+                        StreamMessage::Event(_) => view.poke(),
+                        StreamMessage::Close => {
+                            view.stream = None;
+                            view.stream_panes.clear();
+                            view.live = false;
+                            view.stream_failures += 1;
+                            view.next_stream_try = Instant::now() + (REMOTE_EVERY * 2u32.saturating_pow(view.stream_failures.saturating_sub(1).min(6))).min(REMOTE_STREAM_BACKOFF_MAX);
+                            view.poke();
+                        }
+                    }
+                }
                 Inbox::Log(event) => { self.events.insert(0, event); self.events.truncate(40); }
                 Inbox::Created { failure, waiting, log } => {
                     if let Some(log) = log { self.events.insert(0, log); self.events.truncate(40); }
-                    if let Some((pane, name, project, text)) = waiting {
-                        self.log(trf("{} espera tu respuesta; su prompt se enviará cuando esté listo.", &[&project]), "blocked");
-                        if text.is_empty() {
-                            self.select(Some(pane));
-                        } else {
-                            self.pending_prompts.push(PendingPrompt { pane, name, project, text, tries: 180, seen: false, next: Instant::now() });
-                        }
+                    if let Some(pending) = waiting {
+                        self.log(trf("{} espera tu respuesta; su prompt se enviará cuando esté listo.", &[&pending.project]), "blocked");
+                        // Its chat opens once its room is there (a machine's
+                        // shows up with its next snapshot); then a prompt waits.
+                        self.pending_prompts.push(pending);
                     }
                     let _ = failure;
                     self.refresh();
@@ -391,6 +665,7 @@ impl Monitor {
             self.refresh();
             self.check_pending_prompts();
         }
+        self.poll_machines();
         if self.changed { touched = true; }
         touched
     }
@@ -448,6 +723,73 @@ impl Monitor {
         });
     }
 
+    /// List Herdr's saved machines now and then, and read each shown machine
+    /// when its turn comes: one snapshot in flight per machine, never in
+    /// demo mode, and only once the local agents are in.
+    fn poll_machines(&mut self) {
+        if self.demo || !self.local_done { return; }
+        self.keep_remote_streams();
+        let now = Instant::now();
+        let due = (!self.listing_machines && now >= self.next_machine_list) || self.machines.iter().any(|v| !v.busy && now >= v.next_poll);
+        if !due || herdr_binary().is_err() { return; }
+        if !self.listing_machines && now >= self.next_machine_list {
+            self.listing_machines = true;
+            let sender = self.outbox.clone();
+            let wake = self.wake.clone();
+            std::thread::spawn(move || {
+                let _ = sender.send(Inbox::Machines(list_machines()));
+                wake();
+            });
+        }
+        for view in self.machines.iter_mut().filter(|v| !v.busy && now >= v.next_poll) {
+            self.requests += 1;
+            let request = self.requests;
+            view.busy = true;
+            view.request = request;
+            let machine = view.machine.clone();
+            let sender = self.outbox.clone();
+            let wake = self.wake.clone();
+            std::thread::spawn(move || {
+                let result = run_herdr_on(&["api", "snapshot"], &HerdrTarget::Machine(machine.id.clone()), Duration::from_secs(10))
+                    .and_then(|data| decode_remote_snapshot(&data, &machine));
+                let _ = sender.send(Inbox::Remote { request, machine: machine.id, result });
+                wake();
+            });
+        }
+    }
+
+    /// Keep an event stream open on each reachable machine's agent panes,
+    /// reopening it when they change; none while a machine is out of reach.
+    fn keep_remote_streams(&mut self) {
+        let now = Instant::now();
+        for view in &mut self.machines {
+            if view.link != Link::Up || view.machine.target.is_empty() {
+                if view.stream.take().is_some() { view.stream_panes.clear(); view.live = false; }
+                continue;
+            }
+            let mut panes: Vec<String> = view.agents.iter().map(|a| a.pane.clone()).collect();
+            panes.sort();
+            if (view.stream.is_some() && panes == view.stream_panes) || now < view.next_stream_try { continue; }
+            self.streams_made += 1;
+            let stream = HerdrStream::remote(&view.machine.target, &view.machine.session, &panes, self.streams_made);
+            let (tx, rx) = channel::<(u64, StreamMessage)>();
+            let sender = self.outbox.clone();
+            let wake = self.wake.clone();
+            let machine = view.machine.id.clone();
+            std::thread::spawn(move || {
+                while let Ok((generation, message)) = rx.recv() {
+                    if sender.send(Inbox::RemoteStream { machine: machine.clone(), generation, message }).is_err() { break; }
+                    wake();
+                }
+            });
+            stream.start(tx);
+            // The one it replaces stops as it drops.
+            view.stream = Some(stream);
+            view.stream_panes = panes;
+            view.live = false;
+        }
+    }
+
     /// Keep one event stream open on the current agent panes, reopening it
     /// when they change and retrying a few seconds after it drops.
     fn keep_stream(&mut self) {
@@ -481,24 +823,18 @@ impl Monitor {
 
     // ---- Actions on an agent's pane
 
-    /// Run herdr commands off the UI thread; the receiver gets None or an
-    /// error message.
-    fn act(&self, commands: Vec<Vec<String>>) -> Receiver<Option<String>> {
+    /// Run herdr commands on the agent's own server (its machine, or the
+    /// local session) off the UI thread; the receiver gets None or an error
+    /// message. A remote machine is read again right after.
+    fn act(&self, agent: &Agent, commands: Vec<Vec<String>>) -> Receiver<Option<String>> {
         let (tx, rx) = channel();
-        let session = self.session.clone();
+        let target = agent.target(&self.session);
         let demo = self.demo;
         let wake = self.wake.clone();
+        let poke = self.outbox.clone();
         std::thread::spawn(move || {
-            let mut failure = None;
-            if !demo {
-                for args in &commands {
-                    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                    if run_herdr(&refs, &session, Duration::from_secs(6)).is_err() {
-                        failure = Some(tr("Herdr rechazó la acción. Revisa el panel del agente."));
-                        break;
-                    }
-                }
-            }
+            let failure = if demo { None } else { run_all(&target, &commands) };
+            if let (HerdrTarget::Machine(id), None) = (&target, &failure) { let _ = poke.send(Inbox::Poke(id.clone())); }
             let _ = tx.send(failure);
             wake();
         });
@@ -520,20 +856,20 @@ impl Monitor {
         let (tx, rx) = channel();
         if message.is_empty() { let _ = tx.send(None); return rx; }
         let inner = if agent.status == "blocked" {
-            self.act(vec![Monitor::args(&["pane", "send-text", &agent.id, &message]), Monitor::args(&["pane", "send-keys", &agent.id, "enter"])])
+            self.act(agent, vec![Monitor::args(&["pane", "send-text", &agent.pane, &message]), Monitor::args(&["pane", "send-keys", &agent.pane, "enter"])])
         } else if erase > 0 {
-            let mut keys = Monitor::args(&["agent", "send-keys", &agent.id]);
+            let mut keys = Monitor::args(&["agent", "send-keys", &agent.pane]);
             keys.extend(std::iter::repeat_n("backspace".to_string(), erase));
-            let erased = self.act(vec![keys]);
+            let erased = self.act(agent, vec![keys]);
             let (inner_tx, inner_rx) = channel();
-            let (session, demo, target, text) = (self.session.clone(), self.demo, agent.id.clone(), message.clone());
+            let (server, demo, pane, text) = (agent.target(&self.session), self.demo, agent.pane.clone(), message.clone());
             std::thread::spawn(move || {
                 let failure = erased.recv().unwrap_or(None);
-                let _ = inner_tx.send(if failure.is_some() || demo { failure } else { prompt_failure(&session, &target, &text) });
+                let _ = inner_tx.send(if failure.is_some() || demo { failure } else { prompt_failure(&server, &pane, &text) });
             });
             inner_rx
         } else {
-            self.prompt(&agent.id, &message)
+            self.prompt(agent.target(&self.session), &agent.pane, &message)
         };
         let log = self.outbox.clone();
         let project = agent.project.clone();
@@ -550,31 +886,27 @@ impl Monitor {
     /// Press keys in the agent's pane: "enter" accepts a permission prompt's
     /// highlighted option, "esc" rejects it or interrupts the agent.
     pub fn press(&self, keys: &[String], agent: &Agent) -> Receiver<Option<String>> {
-        let mut args = Monitor::args(&["agent", "send-keys", &agent.id]);
+        let mut args = Monitor::args(&["agent", "send-keys", &agent.pane]);
         args.extend(keys.iter().cloned());
-        self.act(vec![args])
+        self.act(agent, vec![args])
     }
 
     /// End the agent's session by typing /exit in its chat. A working or
     /// asking agent first gets esc, and a pause so the terminal does not read
     /// esc + "/" as Alt+/.
     pub fn finish(&self, agent: &Agent) -> Receiver<Option<String>> {
-        let exit = vec![Monitor::args(&["pane", "send-text", &agent.id, "/exit"]), Monitor::args(&["pane", "send-keys", &agent.id, "enter"])];
-        if agent.status != "working" && agent.status != "blocked" { return self.act(exit); }
+        let exit = vec![Monitor::args(&["pane", "send-text", &agent.pane, "/exit"]), Monitor::args(&["pane", "send-keys", &agent.pane, "enter"])];
+        if agent.status != "working" && agent.status != "blocked" { return self.act(agent, exit); }
         let (tx, rx) = channel();
-        let first = self.act(vec![Monitor::args(&["agent", "send-keys", &agent.id, "esc"])]);
-        let session = self.session.clone();
+        let first = self.act(agent, vec![Monitor::args(&["agent", "send-keys", &agent.pane, "esc"])]);
+        let target = agent.target(&self.session);
         let demo = self.demo;
+        let poke = self.outbox.clone();
         std::thread::spawn(move || {
             if let Some(failure) = first.recv().unwrap_or(None) { let _ = tx.send(Some(failure)); return; }
             std::thread::sleep(Duration::from_millis(600));
-            let mut failure = None;
-            if !demo {
-                for args in &exit {
-                    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                    if run_herdr(&refs, &session, Duration::from_secs(6)).is_err() { failure = Some(tr("Herdr rechazó la acción. Revisa el panel del agente.")); break; }
-                }
-            }
+            let failure = if demo { None } else { run_all(&target, &exit) };
+            if let (HerdrTarget::Machine(id), None) = (&target, &failure) { let _ = poke.send(Inbox::Poke(id.clone())); }
             let _ = tx.send(failure);
         });
         rx
@@ -585,7 +917,8 @@ impl Monitor {
     /// scrollback, to scroll through. Demo mode paints a plausible screen.
     pub fn screen(&self, agent: &Agent, history: bool) -> Receiver<String> {
         let (tx, rx) = channel();
-        let session = self.session.clone();
+        let target = agent.target(&self.session);
+        let bridge = self.bridge(agent);
         let demo = self.demo;
         let agent = agent.clone();
         let wake = self.wake.clone();
@@ -594,9 +927,7 @@ impl Monitor {
                 format!("\x1b[38;2;215;119;87m●\x1b[0m \x1b[1m{}\x1b[0m\n  \x1b[2m⎿ Leyendo archivos del proyecto…\x1b[0m\n\n\x1b[38;2;136;136;136m────────────────────────────\x1b[0m\n❯ \x1b[2mTry \"fix the failing test\"\x1b[0m", agent.activity)
             } else {
                 let (source, lines) = if history { ("recent", "300") } else { ("visible", "80") };
-                run_herdr(&["agent", "read", &agent.id, "--source", source, "--lines", lines, "--format", "ansi"], &session, Duration::from_secs(4))
-                    .map(|d| String::from_utf8_lossy(&d).to_string())
-                    .unwrap_or_default()
+                read_terminal(&agent, &target, bridge.as_ref(), source, lines, "ansi")
             };
             let _ = tx.send(text);
             wake();
@@ -604,22 +935,37 @@ impl Monitor {
         rx
     }
 
+    /// The open bridge to a remote agent's machine, for its terminal reads.
+    fn bridge(&self, agent: &Agent) -> Option<Requester> {
+        let machine = agent.machine.as_ref()?;
+        let view = self.machines.iter().find(|v| v.machine.id == machine.id && v.live)?;
+        view.stream.as_ref().map(|s| s.requester())
+    }
+
+    /// Whether a remote agent's terminal is read through its machine's open
+    /// bridge (a round trip) rather than a `herdr --machine` each time.
+    pub fn reads_fast(&self, agent: &Agent) -> bool {
+        !agent.is_remote() || self.bridge(agent).is_some()
+    }
+
     /// Bring the agent's pane to the front inside Herdr.
     pub fn focus(&self, agent: &Agent) -> Receiver<Option<String>> {
-        self.act(vec![Monitor::args(&["agent", "focus", &agent.id])])
+        self.act(agent, vec![Monitor::args(&["agent", "focus", &agent.pane])])
     }
 
     /// Submit a prompt with `herdr agent prompt`. Herdr only reports
     /// "stalled" or "unverifiable" when it cannot see the agent react within
     /// five seconds; that is not proof the text was lost, so it counts as sent.
-    fn prompt(&self, target: &str, text: &str) -> Receiver<Option<String>> {
+    fn prompt(&self, server: HerdrTarget, target: &str, text: &str) -> Receiver<Option<String>> {
         let (tx, rx) = channel();
-        let session = self.session.clone();
         let demo = self.demo;
         let (target, text) = (target.to_string(), text.to_string());
         let wake = self.wake.clone();
+        let poke = self.outbox.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(if demo { None } else { prompt_failure(&session, &target, &text) });
+            let failure = if demo { None } else { prompt_failure(&server, &target, &text) };
+            if let (HerdrTarget::Machine(id), None) = (&server, &failure) { let _ = poke.send(Inbox::Poke(id.clone())); }
+            let _ = tx.send(failure);
             wake();
         });
         rx
@@ -628,13 +974,18 @@ impl Monitor {
     /// Start a new agent: a Herdr workspace in `folder` (its root pane is a
     /// fresh shell), `herdr agent start` of `kind` in it, then the first
     /// prompt if there is one. It shows up in the dungeon with the next
-    /// snapshot. The receiver gets None or an error message.
-    pub fn create(&self, kind: &str, folder: &str, prompt: &str) -> Receiver<Option<String>> {
+    /// snapshot. On a saved `machine` every step runs there and the folder is
+    /// an absolute path on that machine (Herdr does not expand `~` there; it
+    /// would fall back to the home folder). The receiver gets None or an
+    /// error message.
+    pub fn create(&self, kind: &str, folder: &str, prompt: &str, machine: Option<&Machine>) -> Receiver<Option<String>> {
         let (tx, rx) = channel();
-        let session = self.session.clone();
+        let server = match machine { Some(m) => HerdrTarget::Machine(m.id.clone()), None => HerdrTarget::Session(self.session.clone()) };
+        let machine = machine.cloned();
         let demo = self.demo;
-        let path = expand_home(folder);
-        let label = std::path::Path::new(&path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+        let path = if machine.is_some() { folder.trim().trim_end_matches(['/', '\\']).to_string() } else { expand_home(folder) };
+        // The folder's own name, whichever separator its machine uses.
+        let label = path.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
         let name = agent_name(kind, &label);
         let text = prompt.trim().to_string();
         let kind = kind.to_string();
@@ -646,18 +997,21 @@ impl Monitor {
                 None
             } else {
                 (|| -> Result<(), MonitorError> {
-                    if !std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+                    if machine.is_some() {
+                        // Another computer's folder cannot be checked from here; Herdr says if it is wrong.
+                        if !remote_folder_ok(&path) { return Err(MonitorError::Message(tr("Escribe una ruta absoluta de esa máquina."))); }
+                    } else if !std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
                         return Err(MonitorError::Message(tr("La carpeta no existe.")));
                     }
-                    let created = run_herdr(&["workspace", "create", "--cwd", &path, "--label", &label, "--no-focus"], &session, Duration::from_secs(8))?;
+                    let created = run_herdr_on(&["workspace", "create", "--cwd", &path, "--label", &label, "--no-focus"], &server, Duration::from_secs(12))?;
                     let pane = root_pane(&created).ok_or_else(|| MonitorError::Message(tr("Herdr no devolvió el panel nuevo.")))?;
-                    match start_agent(&session, &name, &kind, &pane) {
+                    match start_agent(&server, &name, &kind, &pane) {
                         Ok(_) => {}
                         Err(e) if e.code() == Some("agent_not_ready") => waiting_pane = Some(pane.clone()),
                         Err(e) => {
                             // Nothing runs in the new workspace: close it instead of leaving an empty shell behind.
                             if let Some(workspace) = created_workspace(&created) {
-                                let _ = run_herdr(&["workspace", "close", &workspace], &session, Duration::from_secs(4));
+                                let _ = run_herdr_on(&["workspace", "close", &workspace], &server, Duration::from_secs(8));
                             }
                             let why = e.text();
                             let base = trf("{} no arrancó. Revisa que esté instalado.", &[&kind]);
@@ -665,7 +1019,7 @@ impl Monitor {
                         }
                     }
                     if waiting_pane.is_none() && !text.is_empty() {
-                        match run_herdr(&["agent", "prompt", &name, &text], &session, Duration::from_secs(10)) {
+                        match run_herdr_on(&["agent", "prompt", &name, &text], &server, Duration::from_secs(12)) {
                             Ok(_) => {}
                             Err(e) if matches!(e.code(), Some("agent_prompt_stalled" | "agent_prompt_unverifiable")) => {}
                             Err(e) if e.code() == Some("agent_blocked") => waiting_pane = Some(pane),
@@ -677,8 +1031,19 @@ impl Monitor {
                 .err()
                 .map(|e| e.text())
             };
-            let log = failure.is_none().then(|| GuildEvent::new(trf("Invocaste a {} en {}", &[&kind, &label]), "joined"));
-            let waiting = waiting_pane.map(|pane| (pane, name.clone(), label.clone(), text.clone()));
+            let place = match &machine { Some(m) => format!("{label} · {}", m.label), None => label.clone() };
+            let log = failure.is_none().then(|| GuildEvent::new(trf("Invocaste a {} en {}", &[&kind, &place]), "joined"));
+            let waiting = waiting_pane.map(|pane| PendingPrompt {
+                id: machine.as_ref().map(|m| remote_id(&m.id, &pane)).unwrap_or_else(|| pane.clone()),
+                target: server.clone(),
+                name: name.clone(),
+                project: label.clone(),
+                text: text.clone(),
+                tries: 180,
+                seen: false,
+                next: Instant::now(),
+            });
+            if let Some(m) = &machine { let _ = sender.send(Inbox::Poke(m.id.clone())); }
             let _ = sender.send(Inbox::Created { failure: failure.clone(), waiting, log });
             let _ = tx.send(failure);
             wake();
@@ -694,19 +1059,23 @@ impl Monitor {
         let mut keep = vec![];
         let mut logs: Vec<GuildEvent> = vec![];
         let mut select: Option<String> = None;
-        let mut sends: Vec<(String, String, String)> = vec![];
+        let mut sends: Vec<(HerdrTarget, String, String, String)> = vec![];
         for mut pending in std::mem::take(&mut self.pending_prompts) {
             if now < pending.next { keep.push(pending); continue; }
             pending.next = now + Duration::from_secs(1);
             if pending.tries == 0 {
-                logs.push(GuildEvent::new(trf("{} no quedó listo; su prompt no se envió.", &[&pending.project]), "left"));
+                if !pending.text.is_empty() { logs.push(GuildEvent::new(trf("{} no quedó listo; su prompt no se envió.", &[&pending.project]), "left")); }
                 continue;
             }
             pending.tries -= 1;
-            let status = self.agents.iter().find(|a| a.id == pending.pane).map(|a| a.status.clone());
-            if status.is_some() && !pending.seen { pending.seen = true; select = Some(pending.pane.clone()); }
+            let status = self.agents.iter().find(|a| a.id == pending.id).map(|a| a.status.clone());
+            if status.is_some() && !pending.seen { pending.seen = true; select = Some(pending.id.clone()); }
+            if pending.text.is_empty() {
+                if !pending.seen { keep.push(pending); }
+                continue;
+            }
             match status.as_deref() {
-                Some("idle") | Some("done") => { sends.push((pending.name.clone(), pending.text.clone(), pending.project.clone())); continue; }
+                Some("idle") | Some("done") => { sends.push((pending.target.clone(), pending.name.clone(), pending.text.clone(), pending.project.clone())); continue; }
                 None if pending.seen => continue, // the pane went away
                 _ => keep.push(pending),
             }
@@ -715,8 +1084,8 @@ impl Monitor {
         for log in logs { self.events.insert(0, log); }
         self.events.truncate(40);
         if let Some(pane) = select { self.select(Some(pane)); }
-        for (name, text, project) in sends {
-            let rx = self.prompt(&name, &text);
+        for (server, name, text, project) in sends {
+            let rx = self.prompt(server, &name, &text);
             let sender = self.outbox.clone();
             std::thread::spawn(move || {
                 let failure = rx.recv().unwrap_or(None);
@@ -734,7 +1103,8 @@ impl Monitor {
     /// answered without switching windows.
     pub fn tail(&self, agent: &Agent, lines: usize) -> Receiver<Vec<String>> {
         let (tx, rx) = channel();
-        let session = self.session.clone();
+        let target = agent.target(&self.session);
+        let bridge = self.bridge(agent);
         let demo = self.demo;
         let agent = agent.clone();
         let wake = self.wake.clone();
@@ -766,9 +1136,7 @@ impl Monitor {
                     format!("● {}\n  ⎿ {}", agent.activity, tr("Leyendo archivos del proyecto…"))
                 }
             } else {
-                run_herdr(&["agent", "read", &agent.id, "--source", "recent", "--lines", "60", "--format", "text"], &session, Duration::from_secs(4))
-                    .map(|d| String::from_utf8_lossy(&d).to_string())
-                    .unwrap_or_default()
+                read_terminal(&agent, &target, bridge.as_ref(), "recent", "60", "text")
             };
             let rows = meaningful_lines(&text);
             let keep = if agent.status == "blocked" { 12 } else { lines };
@@ -784,21 +1152,54 @@ impl Monitor {
 /// shell takes a few hundred milliseconds to reach its prompt and Herdr
 /// answers `agent_pane_busy` ("not an available shell") until then, so that
 /// code is retried for up to ten seconds; any other answer is final.
-fn start_agent(session: &str, name: &str, kind: &str, pane: &str) -> Result<Vec<u8>, MonitorError> {
+fn start_agent(server: &HerdrTarget, name: &str, kind: &str, pane: &str) -> Result<Vec<u8>, MonitorError> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match run_herdr(&["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000"], session, Duration::from_secs(65)) {
+        match run_herdr_on(&["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000"], server, Duration::from_secs(65)) {
             Err(e) if e.code() == Some("agent_pane_busy") && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(250)),
             other => return other,
         }
     }
 }
 
-fn prompt_failure(session: &str, target: &str, text: &str) -> Option<String> {
-    match run_herdr(&["agent", "prompt", target, text], session, Duration::from_secs(10)) {
+/// Run commands in order on one server; the first refusal stops them.
+fn run_all(server: &HerdrTarget, commands: &[Vec<String>]) -> Option<String> {
+    let timeout = Duration::from_secs(if matches!(server, HerdrTarget::Machine(_)) { 10 } else { 6 });
+    for args in commands {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        if run_herdr_on(&refs, server, timeout).is_err() { return Some(tr("Herdr rechazó la acción. Revisa el panel del agente.")); }
+    }
+    None
+}
+
+/// A folder on a remote machine: an absolute path (`/srv/x`, or `C:\x` and
+/// `\\host\x` on a Windows machine). `herdr --machine … workspace create
+/// --cwd ~/x` does not expand `~` on the server.
+pub fn remote_folder_ok(path: &str) -> bool {
+    let drive = path.len() >= 3 && path.as_bytes()[0].is_ascii_alphabetic() && path.as_bytes()[1] == b':' && matches!(path.as_bytes()[2], b'\\' | b'/');
+    path.starts_with('/') || path.starts_with("\\\\") || drive
+}
+
+fn prompt_failure(server: &HerdrTarget, target: &str, text: &str) -> Option<String> {
+    let timeout = Duration::from_secs(if matches!(server, HerdrTarget::Machine(_)) { 12 } else { 10 });
+    match run_herdr_on(&["agent", "prompt", target, text], server, timeout) {
         Ok(_) => None,
         Err(e) if matches!(e.code(), Some("agent_prompt_stalled" | "agent_prompt_unverifiable")) => None,
         Err(e) if e.code() == Some("agent_blocked") => Some(tr("El agente está esperando una respuesta; contéstale primero.")),
         Err(_) => Some(tr("Herdr rechazó la acción. Revisa el panel del agente.")),
     }
+}
+
+/// An agent's terminal text (`agent read`): through its machine's open
+/// bridge when there is one, else with `herdr [--machine]`; empty when it
+/// could not be read.
+fn read_terminal(agent: &Agent, target: &HerdrTarget, bridge: Option<&Requester>, source: &str, lines: &str, format: &str) -> String {
+    let params = serde_json::json!({ "target": agent.pane, "source": source, "lines": lines.parse::<u32>().ok(), "format": format, "strip_ansi": format != "ansi" });
+    // Herdr's refusal (a pane that went away) is as good as the CLI's.
+    if let Some(reply) = bridge.and_then(|b| b.request("agent.read", params)).and_then(|rx| rx.recv_timeout(Duration::from_secs(8)).ok()) {
+        return reply.get("result").and_then(|r| r.get("read")).and_then(|r| r.get("text")).and_then(Value::as_str).unwrap_or_default().to_string();
+    }
+    run_herdr_on(&["agent", "read", &agent.pane, "--source", source, "--lines", lines, "--format", format], target, Duration::from_secs(if agent.is_remote() { 8 } else { 4 }))
+        .map(|d| String::from_utf8_lossy(&d).to_string())
+        .unwrap_or_default()
 }

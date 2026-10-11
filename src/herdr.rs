@@ -13,7 +13,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
+    /// Unique in the dungeon: the pane id for a local agent, the machine's
+    /// profile id and the pane id for a remote one (two servers can both
+    /// have a `w1:p1`).
     pub id: String,
+    /// The pane id on its own Herdr server: what commands target.
+    pub pane: String,
+    /// The saved SSH machine the agent runs on; None on this computer.
+    pub machine: Option<Machine>,
     pub name: String,
     pub status: String,
     pub project: String,
@@ -41,6 +48,8 @@ impl Agent {
     pub fn new(id: &str, name: &str, status: &str, project: &str, activity: &str, cwd: &str) -> Agent {
         Agent {
             id: id.into(),
+            pane: id.into(),
+            machine: None,
             name: name.into(),
             status: status.into(),
             project: project.into(),
@@ -55,6 +64,19 @@ impl Agent {
             question_transcript: None,
             limit_resets: None,
         }
+    }
+
+    /// The Herdr server that owns the agent's pane: its saved machine, or
+    /// the local `session`. A remote agent never resolves to the local server.
+    pub fn target(&self, session: &str) -> HerdrTarget {
+        match &self.machine {
+            Some(machine) => HerdrTarget::Machine(machine.id.clone()),
+            None => HerdrTarget::Session(session.to_string()),
+        }
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.machine.is_some()
     }
 
     pub fn folder(&self) -> String {
@@ -191,12 +213,7 @@ pub fn decode_snapshot_parts(data: &[u8]) -> Result<(Vec<Agent>, HashMap<String,
     let root: Value = serde_json::from_slice(data).map_err(|_| invalid())?;
     let snapshot = root.get("result").and_then(|r| r.get("snapshot")).ok_or_else(invalid)?;
     let agents = snapshot.get("agents").and_then(Value::as_array).ok_or_else(invalid)?;
-    let mut names = HashMap::new();
-    for space in snapshot.get("workspaces").and_then(Value::as_array).into_iter().flatten() {
-        if let (Some(id), Some(label)) = (str_of(space, "workspace_id"), str_of(space, "label")) {
-            names.insert(id.to_string(), label.to_string());
-        }
-    }
+    let names = workspace_names(snapshot);
     let mut unique: HashMap<String, Agent> = HashMap::new();
     for row in agents {
         if let Some(agent) = agent_from_row(row, &names) {
@@ -204,6 +221,17 @@ pub fn decode_snapshot_parts(data: &[u8]) -> Result<(Vec<Agent>, HashMap<String,
         }
     }
     Ok((sort_agents(unique.into_values().collect()), names))
+}
+
+/// Workspace id → label, from a snapshot.
+fn workspace_names(snapshot: &Value) -> HashMap<String, String> {
+    let mut names = HashMap::new();
+    for space in snapshot.get("workspaces").and_then(Value::as_array).into_iter().flatten() {
+        if let (Some(id), Some(label)) = (str_of(space, "workspace_id"), str_of(space, "label")) {
+            names.insert(id.to_string(), label.to_string());
+        }
+    }
+    names
 }
 
 /// An agent from a Herdr pane row (a snapshot's agent or an event's pane),
@@ -313,14 +341,40 @@ fn is_executable(path: &Path) -> bool {
     std::fs::metadata(path).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
 }
 
+/// Which Herdr server a command goes to: a local session, or a saved SSH
+/// machine (by profile id). Herdr refuses `--machine` with `--session`: the
+/// machine's profile names its own session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HerdrTarget {
+    Session(String),
+    Machine(String),
+}
+
+impl HerdrTarget {
+    /// The arguments that go before the command.
+    pub fn prefix(&self) -> Vec<String> {
+        match self {
+            HerdrTarget::Session(session) if session == "default" => vec![],
+            HerdrTarget::Session(session) => vec!["--session".into(), session.clone()],
+            HerdrTarget::Machine(id) => vec!["--machine".into(), id.clone()],
+        }
+    }
+}
+
 /// Run `herdr [--session s] <arguments>` and return its stdout. The process
 /// is killed after `timeout` so a stuck server never hangs the UI.
 pub fn run_herdr(arguments: &[&str], session: &str, timeout: Duration) -> Result<Vec<u8>, MonitorError> {
+    run_herdr_on(arguments, &HerdrTarget::Session(session.to_string()), timeout)
+}
+
+/// Run `herdr <target> <arguments>` on a local session or a saved machine.
+pub fn run_herdr_on(arguments: &[&str], target: &HerdrTarget, timeout: Duration) -> Result<Vec<u8>, MonitorError> {
     let binary = herdr_binary()?;
     let mut command = Command::new(binary);
-    if session != "default" { command.args(["--session", session]); }
+    command.args(target.prefix());
     command.args(arguments).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let unreachable = || MonitorError::Message(tr("Sin conexión con Herdr. Abre tu sesión; reintentamos automáticamente."));
+    let remote = matches!(target, HerdrTarget::Machine(_));
+    let unreachable = || MonitorError::Message(tr(if remote { "Sin conexión con la máquina. Reintentamos automáticamente." } else { "Sin conexión con Herdr. Abre tu sesión; reintentamos automáticamente." }));
     let mut child = command.spawn().map_err(|_| unreachable())?;
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
@@ -339,8 +393,23 @@ pub fn run_herdr(arguments: &[&str], session: &str, timeout: Duration) -> Result
     let complaint = err.join().unwrap_or_default();
     match status {
         Some(s) if s.success() => Ok(data),
+        // A machine that cannot be reached says why in plain text (SSH, authentication).
+        _ if remote && herdr_error(&complaint).is_none() => Err(plain_error(&complaint).unwrap_or_else(unreachable)),
         _ => Err(herdr_error(&complaint).unwrap_or_else(unreachable)),
     }
+}
+
+/// The last line of a plain-text complaint, without the CLI's "error: "
+/// prefix. A failed SSH connection comes as `Error: Custom { kind: Other,
+/// error: "machine 'x': … Connection refused" }`: only the quoted reason.
+pub fn plain_error(data: &[u8]) -> Option<MonitorError> {
+    let text = String::from_utf8_lossy(data);
+    let line = text.lines().map(str::trim).rfind(|l| !l.is_empty())?;
+    let line = match (line.find("error: \""), line.rfind('"')) {
+        (Some(start), Some(end)) if end > start + 8 => &line[start + 8..end],
+        _ => line.strip_prefix("error: ").or_else(|| line.strip_prefix("Error: ")).unwrap_or(line),
+    };
+    Some(MonitorError::Message(line.chars().take(160).collect()))
 }
 
 pub fn fetch_snapshot(session: &str) -> Result<Vec<Agent>, MonitorError> {
@@ -356,6 +425,8 @@ pub fn enrich(agents: Vec<Agent>) -> Vec<Agent> {
     agents
         .into_iter()
         .map(|mut agent| {
+            // Another computer's files are not here: nothing local describes a remote agent.
+            if agent.is_remote() { return agent; }
             let path = expand_home(&agent.cwd);
             agent.branch = git_branch(&path);
             if agent.name == "claude" {
@@ -643,7 +714,7 @@ fn active_subagent_files(session: &str, within: Duration) -> Vec<(PathBuf, Syste
 /// long ago the last good update was. None while all is well.
 pub fn connection_note(error: Option<&str>, updated: Option<Instant>, now: Instant, stale_after: f64) -> Option<(String, bool)> {
     let age = updated.map(|u| now.saturating_duration_since(u).as_secs_f64());
-    let ago = age.map(|a| if a < 90.0 { trf("hace {} s", &[&(a as i64)]) } else { trf("hace {} min", &[&((a / 60.0) as i64)]) });
+    let ago = age.map(ago);
     if error.is_some() {
         let mut text = tr("Herdr desconectado");
         if let Some(ago) = ago { text += &format!(" · {}", trf("última actualización {}", &[&ago])); }
@@ -652,6 +723,11 @@ pub fn connection_note(error: Option<&str>, updated: Option<Instant>, now: Insta
     let (age, ago) = (age?, ago?);
     if age < stale_after { return None; }
     Some((trf("Datos sin actualizar · última actualización {}", &[&ago]), false))
+}
+
+/// "12 s ago", "3 min ago".
+pub fn ago(seconds: f64) -> String {
+    if seconds < 90.0 { trf("hace {} s", &[&(seconds as i64)]) } else { trf("hace {} min", &[&((seconds / 60.0) as i64)]) }
 }
 
 /// Harnesses offered when creating an agent (all are `herdr agent start --kind` values).
@@ -796,6 +872,74 @@ pub fn list_sessions() -> Vec<HerdrSession> {
     run_herdr(&["session", "list", "--json"], "default", Duration::from_secs(2)).map(|d| decode_sessions(&d)).unwrap_or_default()
 }
 
+/// A saved SSH machine an agent runs on: Herdr's profile id (what
+/// `--machine` is given), its label, and what its live event stream
+/// connects to: the SSH target and the Herdr session there.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Machine {
+    pub id: String,
+    pub label: String,
+    pub target: String,
+    pub session: String,
+}
+
+/// A saved SSH machine, from `herdr machine list --json`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedMachine {
+    pub machine: Machine,
+    pub enabled: bool,
+}
+
+pub fn decode_machines(data: &[u8]) -> Option<Vec<SavedMachine>> {
+    let root: Value = serde_json::from_slice(data).ok()?;
+    let rows = root.as_array()?;
+    Some(
+        rows.iter()
+            .filter_map(|row| {
+                let id = str_of(row, "id")?.to_string();
+                let label = str_of(row, "label").filter(|l| !l.trim().is_empty()).unwrap_or(&id).to_string();
+                let target = str_of(row, "target").unwrap_or("").to_string();
+                let session = str_of(row, "session").filter(|s| !s.is_empty()).unwrap_or("default").to_string();
+                Some(SavedMachine {
+                    machine: Machine { id, label, target, session },
+                    enabled: row.get("enabled").and_then(Value::as_bool).unwrap_or(false),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The machines saved in Herdr (a local file, no SSH); None when Herdr
+/// could not list them.
+pub fn list_machines() -> Option<Vec<SavedMachine>> {
+    run_herdr(&["machine", "list", "--json"], "default", Duration::from_secs(3)).ok().and_then(|d| decode_machines(&d))
+}
+
+/// A remote machine's agents from its snapshot: each keeps its pane id for
+/// commands, gets an id unique in the dungeon, and its folder as the
+/// machine reports it (its home is not this computer's).
+pub fn decode_remote_snapshot(data: &[u8], machine: &Machine) -> Result<Vec<Agent>, MonitorError> {
+    let invalid = || MonitorError::Message(tr("Herdr no entregó un snapshot válido."));
+    let root: Value = serde_json::from_slice(data).map_err(|_| invalid())?;
+    let snapshot = root.get("result").and_then(|r| r.get("snapshot")).ok_or_else(invalid)?;
+    let rows = snapshot.get("agents").and_then(Value::as_array).ok_or_else(invalid)?;
+    let names = workspace_names(snapshot);
+    let mut unique: HashMap<String, Agent> = HashMap::new();
+    for row in rows {
+        let Some(mut agent) = agent_from_row(row, &names) else { continue };
+        agent.cwd = str_of(row, "foreground_cwd").or_else(|| str_of(row, "cwd")).unwrap_or("").to_string();
+        agent.id = remote_id(&machine.id, &agent.pane);
+        agent.machine = Some(machine.clone());
+        unique.insert(agent.id.clone(), agent);
+    }
+    Ok(sort_agents(unique.into_values().collect()))
+}
+
+/// A remote agent's id in the dungeon: `<machine profile id>/<pane id>`.
+pub fn remote_id(machine: &str, pane: &str) -> String {
+    format!("{machine}/{pane}")
+}
+
 /// Which rooms the HUD's state chips let through.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StatusFilter {
@@ -848,16 +992,43 @@ pub fn fold(text: &str) -> String {
         .collect()
 }
 
+/// Which machine and project the HUD's scope menu lets through; None is all.
+/// The machine is a profile id, or `LOCAL` for this computer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Scope {
+    pub machine: Option<String>,
+    pub project: Option<String>,
+}
+
+/// The scope's name for this computer.
+pub const LOCAL: &str = "local";
+
+impl Scope {
+    pub fn admits(&self, agent: &Agent) -> bool {
+        let machine = match (&self.machine, &agent.machine) {
+            (None, _) => true,
+            (Some(want), None) => want == LOCAL,
+            (Some(want), Some(machine)) => *want == machine.id,
+        };
+        machine && self.project.as_ref().map(|p| *p == agent.project).unwrap_or(true)
+    }
+
+    pub fn is_all(&self) -> bool {
+        self.machine.is_none() && self.project.is_none()
+    }
+}
+
 /// Agents that pass the state filter and whose project, harness, branch,
-/// folder or activity contain every word of the query (ignoring case and
-/// accents). Order is kept, so attention stays first.
+/// folder, machine or activity contain every word of the query (ignoring
+/// case and accents). Order is kept, so attention stays first.
 pub fn filter_agents(agents: &[Agent], status: StatusFilter, query: &str) -> Vec<Agent> {
     let words: Vec<String> = fold(query).split_whitespace().map(str::to_string).collect();
     agents
         .iter()
         .filter(|agent| {
             if !status.admits(agent) { return false; }
-            let haystack = fold(&[agent.project.as_str(), agent.name.as_str(), agent.branch.as_deref().unwrap_or(""), &agent.folder(), agent.cwd.as_str(), agent.activity.as_str()].join("\n"));
+            let machine = agent.machine.as_ref().map(|m| m.label.as_str()).unwrap_or("");
+            let haystack = fold(&[agent.project.as_str(), agent.name.as_str(), agent.branch.as_deref().unwrap_or(""), &agent.folder(), agent.cwd.as_str(), machine, agent.activity.as_str()].join("\n"));
             words.iter().all(|w| haystack.contains(w.as_str()))
         })
         .cloned()
