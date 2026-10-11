@@ -13,7 +13,10 @@ use egui::{pos2, vec2, Align2, Color32, Context, CornerRadius, FontId, Frame, Ke
 use std::sync::mpsc::Receiver;
 
 pub const HUD_HEIGHT: f32 = 28.0;
+/// The chat panel's height under the rooms until its edge is dragged, and
+/// the least it can be dragged to (the console and the box still fit).
 pub const PANEL_HEIGHT: f32 = 232.0;
+pub const MIN_PANEL: f32 = 160.0;
 pub const PANEL_FILL: Color32 = Color32::from_rgb(23, 20, 28);
 pub const HUD_FILL: Color32 = Color32::from_rgb(19, 17, 23);
 const DIM: Color32 = Color32::from_rgb(150, 150, 155);
@@ -658,8 +661,8 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
         }
     }
 
-    // The panel fills what it is given: PANEL_HEIGHT under the rooms, the
-    // whole side in full screen.
+    // The panel fills what it is given: the height its edge was dragged to
+    // under the rooms, the whole side in full screen.
     let total = ui.available_height();
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 7.0);
