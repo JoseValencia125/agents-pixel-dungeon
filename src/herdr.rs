@@ -1177,16 +1177,15 @@ pub fn question_lines(message: &str, needs: Option<&str>) -> Vec<String> {
     lines.into_iter().filter(|l| !l.trim().is_empty()).collect()
 }
 
-/// Whether a trimmed line is a numbered option ("❯ 2. Opus", "3) No").
+/// Whether a trimmed line is a numbered option ("❯ 2. Opus", "› 1. Yes", "3) No").
 pub fn is_option(trimmed: &str) -> bool {
     option_prefix(trimmed).is_some()
 }
 
-/// `^(❯\s*)?\d+[.)]\s+`: the option number and where its text starts.
+/// `^([❯›]\s*)?\d+[.)]\s+`: the option number and where its text starts.
 fn option_prefix(trimmed: &str) -> Option<(bool, u32, usize)> {
-    let mut rest = trimmed;
-    let marked = rest.starts_with('❯');
-    if marked { rest = rest['❯'.len_utf8()..].trim_start(); }
+    let marked = after_marker(trimmed).is_some();
+    let rest = after_marker(trimmed).unwrap_or(trimmed);
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() { return None; }
     let after = &rest[digits.len()..];
@@ -1230,9 +1229,21 @@ pub fn shell_blocker(screen: &str) -> Option<String> {
 
 /// The hint under a menu driven by arrow keys ("Enter to confirm · Esc to
 /// cancel"; Kiro's "↑↓ to navigate · ↵ to select" and "esc to close · Enter
-/// to see more options").
+/// to see more options"; Codex's "enter select · esc back" and "Press enter
+/// to confirm or esc to cancel"), in any case.
 pub fn is_menu_footer(trimmed: &str) -> bool {
-    ["Enter to confirm", "Enter to select", "Esc to cancel", "Enter to continue", "↑↓ to navigate", "↵ to select", "Enter to see more options"].iter().any(|s| trimmed.contains(s))
+    let lower = trimmed.to_lowercase();
+    ["enter to confirm", "enter to select", "esc to cancel", "enter to continue", "↑↓ to navigate", "↵ to select", "enter to see more options", "enter select · esc"].iter().any(|s| lower.contains(s))
+}
+
+/// What a terminal points at its highlighted option with: ❯ (Claude Code,
+/// Kiro) or › (Codex, which also marks its prompt and past messages so).
+const MARKERS: [char; 2] = ['❯', '›'];
+
+/// The text after a leading highlight marker, if the line starts with one.
+fn after_marker(trimmed: &str) -> Option<&str> {
+    let first = trimmed.chars().next().filter(|c| MARKERS.contains(c))?;
+    Some(trimmed[first.len_utf8()..].trim_start())
 }
 
 impl MenuOptions {
@@ -1244,11 +1255,16 @@ impl MenuOptions {
 
     /// A menu whose options have no numbers ("❯ Yes, I trust this folder",
     /// "  No, exit"): the run of lines around the highlighted one whose text
-    /// starts in the same column, numbered here in order.
+    /// starts in the same column, numbered here in order. A › only counts
+    /// above a menu's footer: Codex marks its past messages with it too.
     fn unnumbered(lines: &[String]) -> MenuOptions {
         let mut menu = MenuOptions::default();
-        let footer = lines.iter().rposition(|l| is_menu_footer(l.trim())).unwrap_or(lines.len());
-        let Some(marked) = lines[..footer].iter().rposition(|l| { let t = l.trim_start(); t.starts_with('❯') && !t['❯'.len_utf8()..].trim().is_empty() }) else { return menu };
+        let footer_at = lines.iter().rposition(|l| is_menu_footer(l.trim()));
+        let footer = footer_at.unwrap_or(lines.len());
+        let Some(marked) = lines[..footer].iter().rposition(|l| {
+            let t = l.trim_start();
+            after_marker(t).is_some_and(|rest| !rest.trim().is_empty()) && (t.starts_with('❯') || footer_at.is_some())
+        }) else { return menu };
         let marker = lines[marked].chars().take_while(|c| c.is_whitespace()).count();
         let column = marker + 1 + lines[marked].chars().skip(marker + 1).take_while(|c| c.is_whitespace()).count();
         let text_at = |line: &String| -> Option<String> {
@@ -1256,7 +1272,7 @@ impl MenuOptions {
             let rest: String = line.chars().skip(column).collect();
             let head: String = line.chars().take(column).collect();
             let plain = lead == column;
-            let pointed = head.trim() == "❯" && lead == marker;
+            let pointed = after_marker(head.trim()).is_some_and(str::is_empty) && lead == marker;
             ((plain || pointed) && !rest.trim().is_empty() && !is_menu_footer(line.trim())).then(|| rest.trim_end().to_string())
         };
         let mut first = marked;
@@ -1283,12 +1299,27 @@ impl MenuOptions {
             }
             if marked { menu.highlighted = Some(menu.options.len()); }
             menu.options.push(MenuOption { number, text: trimmed[consumed..].to_string(), line: i });
+            // An option's text the terminal wrapped goes on, indented past its number.
+            let indent = line.len() - line.trim_start().len();
+            for next in &lines[i + 1..] {
+                let lead = next.len() - next.trim_start().len();
+                if lead <= indent + 2 || option_prefix(next.trim()).is_some() || is_menu_footer(next.trim()) { break; }
+                let text = &mut menu.options.last_mut().unwrap().text;
+                text.push(' ');
+                text.push_str(next.trim());
+            }
         }
         menu
     }
 
     pub fn is_menu(&self) -> bool {
         self.highlighted.is_some()
+    }
+
+    /// The option that turns the request down to say something instead
+    /// ("No, and tell Codex what to do differently"), if there is one.
+    pub fn tell_instead(&self) -> Option<usize> {
+        self.options.iter().position(|o| { let t = o.text.to_lowercase(); t.contains("tell") && (t.contains("differently") || t.contains("instead")) })
     }
 
     /// The keys that move the terminal's highlight to option `index` and pick it.
@@ -1311,7 +1342,12 @@ pub fn meaningful_lines(text: &str) -> Vec<String> {
     // stays: it is above the menu's footer, unlike the input prompt.
     let rows: Vec<&str> = text.split('\n').collect();
     let menu_end = rows.iter().rposition(|l| is_menu_footer(l.trim()));
+    // Codex's prompt is the last › line below any menu (the ones above are
+    // past messages), with its model and folder on the line under it.
+    let codex_prompt = rows.iter().rposition(|l| l.trim().starts_with('›')).filter(|&i| menu_end.is_none_or(|end| i > end) && option_prefix(rows[i].trim()).is_none());
+    let codex_status = codex_prompt.and_then(|p| (p + 1..rows.len()).find(|&i| !rows[i].trim().is_empty())).filter(|&i| rows[i].contains(" · "));
     for (index, raw) in rows.iter().enumerate() {
+        if Some(index) == codex_prompt || Some(index) == codex_status { continue; }
         let line = raw.trim_end();
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.chars().all(|c| "─━═╌┄-".contains(c)) { skipping = false; continue; }
@@ -1320,7 +1356,7 @@ pub fn meaningful_lines(text: &str) -> Vec<String> {
         let option = option_prefix(trimmed).is_some();
         let status = ["✻", "✳", "✢", "✽", "✶", "※"].iter().any(|s| trimmed.starts_with(s));
         let footer = ["⏵", "▶▶", "►", "⏸"].iter().any(|s| trimmed.starts_with(s))
-            || ["? for shortcuts", "shift+tab to cycle", "esc to interrupt"].iter().any(|s| trimmed.contains(s));
+            || ["? for shortcuts", "shift+tab to cycle", "esc to interrupt", "← for agents"].iter().any(|s| trimmed.contains(s));
         if status { skipping = true; continue; }
         let in_menu = menu_end.map(|end| index < end).unwrap_or(false);
         if footer || (trimmed.starts_with('❯') && !option && !in_menu) { continue; }

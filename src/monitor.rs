@@ -115,6 +115,9 @@ pub struct Monitor {
 
 /// Snapshots double as a reconciliation while the stream is live.
 const RECONCILE_EVERY: Duration = Duration::from_secs(60);
+/// The wait before an Enter that follows text or arrows, as Herdr's own
+/// `agent prompt` waits (300 ms).
+const SUBMIT_PAUSE: Duration = Duration::from_millis(300);
 
 impl Monitor {
     pub fn new(session: String, filter: StatusFilter) -> Monitor {
@@ -520,6 +523,12 @@ impl Monitor {
     /// Run herdr commands off the UI thread; the receiver gets None or an
     /// error message.
     fn act(&self, commands: Vec<Vec<String>>) -> Receiver<Option<String>> {
+        self.act_paced(commands, Duration::ZERO)
+    }
+
+    /// `act` with a pause between commands, so the agent's terminal has
+    /// redrawn before the next keys arrive.
+    fn act_paced(&self, commands: Vec<Vec<String>>, pause: Duration) -> Receiver<Option<String>> {
         let (tx, rx) = channel();
         let session = self.session.clone();
         let demo = self.demo;
@@ -527,7 +536,8 @@ impl Monitor {
         std::thread::spawn(move || {
             let mut failure = None;
             if !demo {
-                for args in &commands {
+                for (i, args) in commands.iter().enumerate() {
+                    if i > 0 && !pause.is_zero() { std::thread::sleep(pause); }
                     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                     if run_herdr(&refs, &session, Duration::from_secs(6)).is_err() {
                         failure = Some(tr("Herdr rechazó la acción. Revisa el panel del agente."));
@@ -547,18 +557,22 @@ impl Monitor {
 
     /// Type a message into the agent's chat and press Enter. Herdr refuses
     /// `agent prompt` while a permission prompt is open, so a blocked agent
-    /// gets the raw keystrokes instead (e.g. an answer to its question).
-    /// `erase` backspaces in the agent's input go first: a terminal that put
-    /// an interrupted message back there would otherwise get the edited one
-    /// after it.
+    /// gets the raw keystrokes instead (e.g. an answer to its question): on
+    /// one line, as each newline would press Enter, and Enter a moment after
+    /// the text, as `agent prompt` does.
+    /// `erase` backspaces in the agent's input go first, from its end: what
+    /// is left there (an interrupted message put back, an unknown command)
+    /// would otherwise be sent along with the message.
     pub fn send_erasing(&self, erase: usize, text: &str, agent: &Agent) -> Receiver<Option<String>> {
         let message = text.trim().to_string();
         let (tx, rx) = channel();
         if message.is_empty() { let _ = tx.send(None); return rx; }
         let inner = if agent.status == "blocked" {
-            self.act(vec![Monitor::args(&["pane", "send-text", &agent.id, &message]), Monitor::args(&["pane", "send-keys", &agent.id, "enter"])])
+            let line = message.split_whitespace().collect::<Vec<_>>().join(" ");
+            self.act_paced(vec![Monitor::args(&["pane", "send-text", &agent.id, &line]), Monitor::args(&["pane", "send-keys", &agent.id, "enter"])], SUBMIT_PAUSE)
         } else if erase > 0 {
-            let mut keys = Monitor::args(&["agent", "send-keys", &agent.id]);
+            // ctrl+e first: the cursor may not be at the end of what is there.
+            let mut keys = Monitor::args(&["agent", "send-keys", &agent.id, "ctrl+e"]);
             keys.extend(std::iter::repeat_n("backspace".to_string(), erase));
             let erased = self.act(vec![keys]);
             let (inner_tx, inner_rx) = channel();
@@ -583,12 +597,43 @@ impl Monitor {
         rx
     }
 
+    /// Answer a menu in words: `keys` turn its request down first (typed
+    /// into the menu, letters would pick its shortcuts), then the text goes
+    /// as a prompt as soon as the agent takes one again.
+    pub fn decline_and_send(&self, keys: &[String], text: &str, agent: &Agent) -> Receiver<Option<String>> {
+        let declined = self.press(keys, agent);
+        let (tx, rx) = channel();
+        let (session, demo, target, message, project) = (self.session.clone(), self.demo, agent.id.clone(), text.to_string(), agent.project.clone());
+        let (log, wake) = (self.outbox.clone(), self.wake.clone());
+        std::thread::spawn(move || {
+            let mut failure = declined.recv().unwrap_or(None);
+            if failure.is_none() && !demo {
+                // Herdr says agent_blocked until the menu is gone.
+                for _ in 0..20 {
+                    match run_herdr(&["agent", "prompt", &target, &message], &session, Duration::from_secs(10)) {
+                        Err(e) if e.code() == Some("agent_blocked") => { std::thread::sleep(Duration::from_millis(250)); failure = Some(tr("El agente está esperando una respuesta; contéstale primero.")); }
+                        Err(e) if !matches!(e.code(), Some("agent_prompt_stalled" | "agent_prompt_unverifiable")) => { failure = Some(tr("Herdr rechazó la acción. Revisa el panel del agente.")); break; }
+                        _ => { failure = None; break; }
+                    }
+                }
+            }
+            if failure.is_none() { let _ = log.send(Inbox::Log(GuildEvent::new(trf("Tú → {}: {}", &[&project, &message]), "message"))); }
+            let _ = tx.send(failure);
+            wake();
+        });
+        rx
+    }
+
     /// Press keys in the agent's pane: "enter" accepts a permission prompt's
-    /// highlighted option, "esc" rejects it or interrupts the agent.
+    /// highlighted option, "esc" rejects it or interrupts the agent. Herdr
+    /// writes the keys of one call at once, so an Enter after arrows goes a
+    /// moment later: the menu has moved its highlight by then.
     pub fn press(&self, keys: &[String], agent: &Agent) -> Receiver<Option<String>> {
-        let mut args = Monitor::args(&["agent", "send-keys", &agent.id]);
-        args.extend(keys.iter().cloned());
-        self.act(vec![args])
+        let send = |keys: &[String]| { let mut args = Monitor::args(&["agent", "send-keys", &agent.id]); args.extend(keys.iter().cloned()); args };
+        match keys.split_last() {
+            Some((last, moves)) if last == "enter" && !moves.is_empty() => self.act_paced(vec![send(moves), send(&keys[keys.len() - 1..])], SUBMIT_PAUSE),
+            _ => self.act(vec![send(keys)]),
+        }
     }
 
     /// End the agent's session by typing /exit in its chat. A working or

@@ -781,7 +781,7 @@ fn last_marked_line(screen: &[Vec<Span>]) -> Option<(usize, bool)> {
         let t = t.trim();
         !t.is_empty() && !t.chars().all(|c| matches!(c, '─' | '━' | '═' | '╌' | '┄' | '-'))
     });
-    let picker = nearest.map(|t| crate::herdr::is_menu_footer(t.trim()) || (t.trim_start().starts_with('❯') && crate::herdr::is_option(t.trim()))).unwrap_or(false);
+    let picker = nearest.map(|t| crate::herdr::is_menu_footer(t.trim()) || (t.trim_start().starts_with(['❯', '›']) && crate::herdr::is_option(t.trim()))).unwrap_or(false);
     Some((index, picker))
 }
 
@@ -804,15 +804,28 @@ fn submit(state: &mut ChatState, monitor: &Monitor, agent: &Agent, menu: &MenuOp
         }
     }
     state.choice = None;
+    // Words typed at a menu would hit its one-key shortcuts (Codex approves
+    // on the y of "try"): turn the request down with its "tell it instead"
+    // option, or esc, and send them as a message once it takes one.
+    if agent.status == "blocked" && menu.is_menu() && !monitor.standalone() {
+        let text = state.draft.trim().to_string();
+        if state.sending.is_some() || text.is_empty() { return; }
+        let keys = menu.tell_instead().map(|i| menu.keys_choosing(i)).unwrap_or_else(|| vec!["esc".into()]);
+        state.run(monitor.decline_and_send(&keys, &text, agent));
+        state.draft.clear();
+        return;
+    }
     submit_text(state, monitor, agent);
 }
 
 fn submit_text(state: &mut ChatState, monitor: &Monitor, agent: &Agent) {
     let text = state.draft.clone();
     if state.sending.is_some() || text.trim().is_empty() { return; }
-    // A message put back after esc: if the terminal put it back in its own
-    // input too, that goes first, so the edited one does not follow it.
-    let erase = if state.restored { erase_count(&state.screen, state.last_sent.as_deref().unwrap_or("")) } else { 0 };
+    // Whatever is left in the terminal's own input goes first, or the
+    // message is sent with it (Codex keeps an unknown /command there, and
+    // its cursor at the start: the message would land before it). After
+    // esc that is the interrupted message, which may wrap past the line read.
+    let erase = if state.restored { erase_count(&state.screen, state.last_sent.as_deref().unwrap_or("")) } else { composer_text(&state.screen).map_or(0, |t| t.chars().count()) };
     state.run(monitor.send_erasing(erase, &text, agent));
     if agent.status != "blocked" { state.last_sent = Some(text.trim().to_string()); }
     state.restored = false;

@@ -163,6 +163,27 @@ pub fn run() {
     assert!(shell_blocker("[oh-my-zsh] Would you like to update? [Y/n] ").is_some(), "A waiting oh-my-zsh prompt not recognised");
     assert!(shell_blocker("➜  x iro-cli\nzsh: correct 'iro-cli' to 'kiro-cli' [nyae]?").is_some_and(|w| w.contains("iro-cli")), "zsh's correction prompt not recognised");
     assert_eq!(shell_blocker("Restored session: Sun Oct 11\n➜  herdr-pixel-dungeon "), None, "A plain shell prompt taken for a question");
+    // Codex (0.162) marks its highlight, its prompt and past messages with ›.
+    let approval: Vec<String> = ["› Run the shell command: touch b.txt", "• Running touch b.txt", "  Would you like to run the following command?", "  $ touch b.txt", "› 1. Yes, proceed (y)", "  2. Yes, and don't ask again for commands that start with `touch b.txt;",  "     touch c.txt` (p)", "  3. No, and tell Codex what to do differently (esc)", "  Press enter to confirm or esc to cancel"].iter().map(|l| l.to_string()).collect();
+    let menu = MenuOptions::new(&approval);
+    assert_eq!((menu.options.len(), menu.highlighted, menu.options[0].text.as_str()), (3, Some(0), "Yes, proceed (y)"), "Codex's approval not read as a menu: {menu:?}");
+    assert_eq!(menu.keys_choosing(2), vec!["down", "down", "enter"], "Codex's approval would be answered with text, not arrows");
+    assert_eq!(menu.tell_instead(), Some(2), "Words typed at Codex's approval would hit its y/p shortcuts");
+    assert_eq!(menu.options[1].text, "Yes, and don't ask again for commands that start with `touch b.txt; touch c.txt` (p)", "A wrapped option lost its second line");
+    let wrapped: Vec<String> = ["  Update Model Permissions", "› 1. Ask for approval (current)  Read and edit workspace files, with approval required for internet access", "                                 or edits outside the workspace", "  2. Read Only                   Read workspace files", "  enter select · esc back"].iter().map(|l| l.to_string()).collect();
+    let menu = MenuOptions::new(&wrapped);
+    assert!(menu.options.len() == 2 && menu.options[0].text.ends_with("access or edits outside the workspace"), "A wrapped option lost its second line: {menu:?}");
+    assert!(MenuOptions::new(&["› fix the tests".to_string(), "› and the docs".to_string()]).options.is_empty(), "Codex's past messages taken for a menu");
+    assert!(is_menu_footer("enter select · esc back") && is_menu_footer("Press enter to confirm or esc to cancel"), "Codex's menu footers not recognised");
+    let picker = crate::ansi::parse("  Select Model and Effort\n  1. GPT-6.1-Sol            Latest model.\n› 2. GPT-6-Astra (current)  Frontier model.\n  enter select · esc back");
+    assert_eq!((crate::ui::prompt_line(&picker), crate::ui::picker_open(&picker), crate::ui::composer_text(&picker)), (None, true, None), "Codex's /model picker taken for typed text");
+    let idle = "› Run the shell command: touch a.txt\n• Done. Created a.txt.\n\n› Ask Codex to do anything\n\n  GPT-6-Astra medium · ~/proj\n  ← for agents · ? for shortcuts";
+    assert_eq!(meaningful_lines(idle), vec!["› Run the shell command: touch a.txt", "• Done. Created a.txt."], "Codex's prompt, model line or past message mishandled");
+    let leftover = crate::ansi::parse("• Unrecognized command '/approvals'.\n› /approvals\n  GPT-6-Astra medium · ~/proj");
+    let empty = crate::ansi::parse("› \x1b[2mAsk Codex to do anything\x1b[0m\n  GPT-6-Astra medium · ~/proj");
+    assert_eq!((crate::ui::composer_text(&leftover), crate::ui::composer_text(&empty)), (Some("/approvals".to_string()), None), "Codex's leftover input not seen, or its placeholder taken for it");
+    let codex = crate::commands::slash_commands("codex", "/nonexistent", std::path::Path::new("/nonexistent"));
+    assert!(codex.iter().any(|c| c.name == "permissions") && codex.iter().any(|c| c.name == "exit") && !codex.iter().any(|c| c.name == "approvals" || c.name == "quit"), "Codex offered commands it no longer knows");
     let typed = crate::ansi::parse(&format!("● done\n{rule}\n❯ fix the tests\n{rule}\n  ? for shortcuts"));
     assert_eq!((crate::ui::prompt_line(&typed), crate::ui::picker_open(&typed)), (Some(2), false), "A prompt with typed text was taken for a picker");
     let empty = crate::ansi::parse(&format!("● Interrupted\n{rule}\n❯ \x1b[2mTry \"fix the tests\"\x1b[0m\n{rule}"));
