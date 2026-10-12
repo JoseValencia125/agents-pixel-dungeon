@@ -182,6 +182,25 @@ pub fn run() {
     let leftover = crate::ansi::parse("• Unrecognized command '/approvals'.\n› /approvals\n  GPT-6-Astra medium · ~/proj");
     let empty = crate::ansi::parse("› \x1b[2mAsk Codex to do anything\x1b[0m\n  GPT-6-Astra medium · ~/proj");
     assert_eq!((crate::ui::composer_text(&leftover), crate::ui::composer_text(&empty)), (Some("/approvals".to_string()), None), "Codex's leftover input not seen, or its placeholder taken for it");
+    // Kiro (2.29) paints its placeholder grey, not dim, after the cursor.
+    let kiro_empty = crate::ansi::parse("kiro_default · auto · ◔ 2%\n› \x1b[0m\x1b[7m \x1b[0m\x1b[38;2;158;158;158mask a question or describe a task ↵\x1b[0m");
+    let kiro_typed = crate::ansi::parse("› hello there\x1b[0m\x1b[7m \x1b[0m");
+    assert_eq!((crate::ui::composer_text(&kiro_empty), crate::ui::composer_text(&kiro_typed)), (None, Some("hello there".to_string())), "Kiro's placeholder taken for typing");
+    let kiro_approval: Vec<String> = ["↓ Shell touch kiro_a.txt", " shell requires approval", " ❯ Yes, single permission", "   Trust, always allow in this session", "   No (Tab to edit)", " esc to close · ↑↓ to navigate · ↵ to select · Tab to edit"].map(String::from).to_vec();
+    let menu = MenuOptions::new(&kiro_approval);
+    assert_eq!((menu.options.len(), menu.highlighted, menu.affirmative()), (3, Some(0), None), "Kiro's approval not read as a menu");
+    // Claude Code (2.1.296): a description under each option is not part of it.
+    let ask: Vec<String> = [" ☐ Fix scope", "Should the fix for calc.py be a patch or a full rewrite?", "❯ 1. Patch", "     Make minimal, targeted changes to the existing calc.py and keep its current structure.", "  2. Full rewrite", "     Replace calc.py with a new implementation designed from scratch.", "  3. Type something.", "  4. Chat about this", "Enter to select · ↑/↓ to navigate · Esc to cancel"].map(String::from).to_vec();
+    let menu = MenuOptions::new(&ask);
+    assert_eq!(menu.options.iter().map(|o| o.text.as_str()).collect::<Vec<_>>(), vec!["Patch", "Full rewrite", "Type something.", "Chat about this"], "Claude's option descriptions joined to the options");
+    // A long list keeps its first option, and its scroll arrow is no part of a number.
+    let models: Vec<String> = ["  Select model", "    1.  Default (recommended)  Opus 5.5 · Best for everyday, complex tasks", "  ❯ 2.  Opus 5.5 ✔             For complex work and everyday tasks", "    3.  Fable 5.1              For your toughest challenges", "    4.  Sonnet 5.5             Most efficient for simpler tasks", "    5.  Haiku 5.5              Fastest for quick answers", "    6.  Haiku 4.5              Fastest for quick answers", "    7.  Sonnet 5               Efficient for routine tasks", "    8.  Opus 5                 Best for everyday, complex tasks", "    9.  Fable 5                Most capable for your hardest and longest-running tasks", "  ↓ 10. Opus 4.8               Best for everyday, complex tasks", "     … +3 models", "  ◐ Medium effort (default) ←/→ to adjust", "  Enter to set as default · s to use this session only · Esc to cancel"].map(String::from).to_vec();
+    let head = crate::herdr::menu_head(&models, models.len() - 12);
+    let menu = MenuOptions::new(&models[head..]);
+    assert_eq!((menu.options.len(), menu.highlighted, menu.options[9].text.split_whitespace().take(2).collect::<Vec<_>>().join(" ")), (10, Some(1), "Opus 4.8".to_string()), "A long menu lost its first or last option");
+    // Folder trust starts on "No, exit": accepting picks the yes.
+    let trust: Vec<String> = [" Claude Code'll be able to read, edit, and execute files here.", " ❯ No, exit", "   Yes, I trust this folder", " Enter to confirm · Esc to cancel"].map(String::from).to_vec();
+    assert_eq!(MenuOptions::new(&trust).affirmative(), Some(1), "Accepting Claude's folder trust would exit it");
     let codex = crate::commands::slash_commands("codex", "/nonexistent", std::path::Path::new("/nonexistent"));
     assert!(codex.iter().any(|c| c.name == "permissions") && codex.iter().any(|c| c.name == "exit") && !codex.iter().any(|c| c.name == "approvals" || c.name == "quit"), "Codex offered commands it no longer knows");
     let typed = crate::ansi::parse(&format!("● done\n{rule}\n❯ fix the tests\n{rule}\n  ? for shortcuts"));
@@ -304,7 +323,8 @@ pub fn run() {
     assert!(commands.iter().any(|c| c.name == "help") && commands.iter().any(|c| c.name == "compact"));
     let names = |draft: &str| crate::commands::matching(&commands, draft).iter().map(|c| c.name.clone()).collect::<Vec<_>>();
     assert!(names("/co").contains(&"compact".to_string()) && names("/co").iter().all(|n| n.starts_with("co")) && names("/compact x").is_empty() && names("hi").is_empty());
-    assert!(crate::commands::slash_commands("kiro", "/nonexistent", std::path::Path::new("/nonexistent")).iter().any(|c| c.name == "quit"));
+    let kiro = crate::commands::slash_commands("kiro", "/nonexistent", std::path::Path::new("/nonexistent"));
+    assert!(kiro.iter().any(|c| c.name == "exit") && kiro.iter().any(|c| c.name == "chat") && !kiro.iter().any(|c| c.name == "save" || c.name == "tangent"), "Kiro offered commands it no longer knows");
     let created = br#"{"result":{"root_pane":{"pane_id":"w3:p1"},"workspace":{"workspace_id":"w3"}}}"#;
     assert!(created_workspace(created).as_deref() == Some("w3") && created_workspace(b"{}").is_none());
     let codex = [

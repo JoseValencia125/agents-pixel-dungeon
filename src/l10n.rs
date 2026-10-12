@@ -134,6 +134,7 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("Mostrar en Finder: {}", ["Show in Finder: {}", "Afficher dans le Finder : {}", "Mostra nel Finder: {}", "Mostrar no Finder: {}"]),
         ("Abrir una terminal en esta carpeta", ["Open a terminal in this folder", "Ouvrir un terminal dans ce dossier", "Apri un terminale in questa cartella", "Abrir um terminal nesta pasta"]),
         ("Registro de la guild", ["Guild log", "Journal de la guilde", "Registro della gilda", "Registro da guilda"]),
+        ("Aceptar lo que pide el agente: su opción marcada, o el «Sí» si la marcada es un «No»", ["Accept what the agent asks: its highlighted option, or the “Yes” when that one is a “No”", "Accepter ce que demande l’agent : son option en surbrillance, ou le « Oui » si celle-ci est un « Non »", "Accetta ciò che chiede l’agente: l’opzione evidenziata, o il «Sì» se quella è un «No»", "Aceitar o que o agente pede: a opção destacada, ou o «Sim» se ela for um «Não»"]),
         ("Cocinando en background", ["Brewing in the background", "Mijote en arrière-plan", "In cottura in background", "Cozinhando em segundo plano"]),
         ("Aún no pasa nada.", ["Nothing has happened yet.", "Rien ne s’est encore passé.", "Non è ancora successo nulla.", "Nada aconteceu ainda."]),
         // Connection

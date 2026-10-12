@@ -716,8 +716,8 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
             submit(state, monitor, agent, menu);
         }
         if agent.status == "blocked" {
-            if ui.add_enabled(!sending, egui::Button::new(mono(&tr("Aceptar"), 11.0))).on_hover_text(tr("Elegir la opción marcada del agente (⏎ en su terminal)")).clicked() {
-                match state.choice { Some(choice) => answer(state, monitor, agent, &menu, choice), None => state.run(monitor.press(&["enter".into()], agent)) }
+            if ui.add_enabled(!sending, egui::Button::new(mono(&tr("Aceptar"), 11.0))).on_hover_text(tr("Aceptar lo que pide el agente: su opción marcada, o el «Sí» si la marcada es un «No»")).clicked() {
+                match state.choice.or(menu.affirmative()) { Some(choice) => answer(state, monitor, agent, &menu, choice), None => state.run(monitor.press(&["enter".into()], agent)) }
             }
             if ui.add_enabled(!sending, egui::Button::new(mono(&tr("Rechazar"), 11.0))).on_hover_text(tr("Cancelar la petición del agente (esc en su terminal)")).clicked() {
                 state.run(monitor.press(&["esc".into()], agent));
@@ -836,7 +836,12 @@ fn submit_text(state: &mut ChatState, monitor: &Monitor, agent: &Agent) {
 /// without the dim placeholder), if anything.
 pub(crate) fn composer_text(screen: &[Vec<Span>]) -> Option<String> {
     let line = &screen[prompt_line(screen)?];
-    let text: String = line.iter().filter(|s| !s.dim).map(|s| s.text.as_str()).collect();
+    // Kiro paints its placeholder grey rather than dim, right after the
+    // cursor when nothing is typed: the grey from there on is not typing.
+    let grey = |s: &Span| s.fg.is_some_and(|c| c.r() == c.g() && c.g() == c.b() && (90..200).contains(&c.r()));
+    let typed_before = |i: usize| line[..i].iter().any(|s| !s.dim && s.bg.is_none() && s.text.trim().chars().any(|c| !matches!(c, '❯' | '›' | '>')));
+    let placeholder = line.iter().enumerate().position(|(i, s)| grey(s) && !s.text.trim().is_empty() && !typed_before(i)).unwrap_or(line.len());
+    let text: String = line[..placeholder].iter().filter(|s| !s.dim).map(|s| s.text.as_str()).collect();
     let text = text.trim_start();
     let typed = text.chars().skip(1).collect::<String>().trim().to_string();
     (!typed.is_empty()).then_some(typed)

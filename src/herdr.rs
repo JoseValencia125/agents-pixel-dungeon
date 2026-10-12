@@ -1186,6 +1186,8 @@ pub fn is_option(trimmed: &str) -> bool {
 fn option_prefix(trimmed: &str) -> Option<(bool, u32, usize)> {
     let marked = after_marker(trimmed).is_some();
     let rest = after_marker(trimmed).unwrap_or(trimmed);
+    // Claude Code marks a list that scrolls on its first and last option ("↓ 10. Opus 4.8").
+    let rest = rest.strip_prefix(['↓', '↑']).map(str::trim_start).unwrap_or(rest);
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() { return None; }
     let after = &rest[digits.len()..];
@@ -1289,6 +1291,7 @@ impl MenuOptions {
 
     fn numbered(lines: &[String]) -> MenuOptions {
         let mut menu = MenuOptions::default();
+        let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
         for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
             let Some((marked, number, consumed)) = option_prefix(trimmed) else { continue };
@@ -1299,14 +1302,20 @@ impl MenuOptions {
             }
             if marked { menu.highlighted = Some(menu.options.len()); }
             menu.options.push(MenuOption { number, text: trimmed[consumed..].to_string(), line: i });
-            // An option's text the terminal wrapped goes on, indented past its number.
+            // An option's text the terminal wrapped goes on, indented past its
+            // number: only when its next word would not have fit on the line
+            // (Claude Code's description under an option is a line of its own).
             let indent = line.len() - line.trim_start().len();
+            let mut previous = line.chars().count();
             for next in &lines[i + 1..] {
                 let lead = next.len() - next.trim_start().len();
                 if lead <= indent + 2 || option_prefix(next.trim()).is_some() || is_menu_footer(next.trim()) { break; }
+                let word = next.split_whitespace().next().map_or(0, |w| w.chars().count());
+                if previous + 1 + word <= width { break; }
                 let text = &mut menu.options.last_mut().unwrap().text;
                 text.push(' ');
                 text.push_str(next.trim());
+                previous = next.chars().count();
             }
         }
         menu
@@ -1322,6 +1331,15 @@ impl MenuOptions {
         self.options.iter().position(|o| { let t = o.text.to_lowercase(); t.contains("tell") && (t.contains("differently") || t.contains("instead")) })
     }
 
+    /// The option that says yes when the highlighted one says no (Claude
+    /// Code's folder trust starts on "No, exit"), so accepting accepts.
+    pub fn affirmative(&self) -> Option<usize> {
+        let says = |i: usize, words: &[&str]| self.options.get(i).is_some_and(|o| { let t = o.text.to_lowercase(); words.iter().any(|w| t == *w || t.starts_with(&format!("{w},")) || t.starts_with(&format!("{w} "))) });
+        let highlighted = self.highlighted?;
+        if !says(highlighted, &["no", "exit", "cancel"]) { return None; }
+        (0..self.options.len()).find(|&i| says(i, &["yes"]))
+    }
+
     /// The keys that move the terminal's highlight to option `index` and pick it.
     pub fn keys_choosing(&self, index: usize) -> Vec<String> {
         let delta = index as i64 - self.highlighted.unwrap_or(0) as i64;
@@ -1329,6 +1347,15 @@ impl MenuOptions {
         keys.push("enter".into());
         keys
     }
+}
+
+/// Where a blocked agent's last lines start, moved back to the menu's first
+/// option when the cut would leave it out (a long list, as Claude Code's
+/// /model, with descriptions under each option).
+pub fn menu_head(rows: &[String], start: usize) -> usize {
+    let Some(first) = rows[start..].iter().find_map(|l| option_prefix(l.trim()).map(|(_, n, _)| n)) else { return start };
+    if first <= 1 { return start; }
+    (start.saturating_sub(40)..start).rev().find(|&i| option_prefix(rows[i].trim()).is_some_and(|(_, n, _)| n == 1)).unwrap_or(start)
 }
 
 /// The lines of an agent's terminal that say something, without Claude

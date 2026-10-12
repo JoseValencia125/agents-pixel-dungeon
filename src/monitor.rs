@@ -572,8 +572,9 @@ impl Monitor {
             self.act_paced(vec![Monitor::args(&["pane", "send-text", &agent.id, &line]), Monitor::args(&["pane", "send-keys", &agent.id, "enter"])], SUBMIT_PAUSE)
         } else if erase > 0 {
             // ctrl+e first: the cursor may not be at the end of what is there.
+            // Kiro drops backspaces that come together, so its line goes with ctrl+u.
             let mut keys = Monitor::args(&["agent", "send-keys", &agent.id, "ctrl+e"]);
-            keys.extend(std::iter::repeat_n("backspace".to_string(), erase));
+            if harness_for(&agent.name) == "kiro" { keys.push("ctrl+u".into()); } else { keys.extend(std::iter::repeat_n("backspace".to_string(), erase)); }
             let erased = self.act(vec![keys]);
             let (inner_tx, inner_rx) = channel();
             let (session, demo, target, text) = (self.session.clone(), self.demo, agent.id.clone(), message.clone());
@@ -862,6 +863,7 @@ impl Monitor {
             let rows = meaningful_lines(&text);
             let keep = if agent.status == "blocked" { 12 } else { lines };
             let start = rows.len().saturating_sub(keep);
+            let start = if agent.status == "blocked" { menu_head(&rows, start) } else { start };
             let _ = tx.send(rows[start..].to_vec());
             wake();
         });
