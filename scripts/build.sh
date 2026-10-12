@@ -14,6 +14,9 @@ if [ "$(uname)" = "Darwin" ]; then
   mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources/Licenses"
   cp "$BIN" "$APP_DIR/Contents/MacOS/herdr-pixel-dungeon"
   cp "$PROJECT_DIR/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
+  # Cargo.toml holds the version (release-please bumps it); the bundle copies it.
+  VERSION="$(grep -m1 '^version' "$PROJECT_DIR/Cargo.toml" | cut -d'"' -f2)"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP_DIR/Contents/Info.plist"
   cp "$PROJECT_DIR/Resources/Icon/icon.icns" "$APP_DIR/Contents/Resources/icon.icns"
   cp "$PROJECT_DIR/Resources/Licenses/"* "$APP_DIR/Contents/Resources/Licenses/"
   cp "$PROJECT_DIR/LICENSE" "$APP_DIR/Contents/Resources/Licenses/APP-MIT.txt"

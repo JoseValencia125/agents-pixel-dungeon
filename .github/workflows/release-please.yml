@@ -1,0 +1,31 @@
+name: Release Please
+# Every push to main keeps a "release: X.Y.Z" pull request up to date: the next
+# version (from the conventional commits since the last tag) in Cargo.toml and
+# Cargo.lock, and its CHANGELOG.md section. Merging it tags vX.Y.Z, publishes
+# the GitHub release and builds its downloads.
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+  # A tag pushed with GITHUB_TOKEN does not start other workflows, so the
+  # builds run from here.
+  builds:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
