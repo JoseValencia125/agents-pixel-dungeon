@@ -157,6 +157,12 @@ pub fn run() {
     assert_eq!((crate::ui::prompt_line(&quoted), crate::ui::picker_open(&quoted)), (Some(4), false), "Text quoting a picker's footer was taken for a picker");
     let kiro = crate::ansi::parse(&format!("› /model\nSelect model:   type to search\n\n❯ auto                 1.00x credits    Models chosen by task [active]\n  claude-opus-5.5      2.00x credits    Claude Opus 5.5\n(+13 more)\n{rule}\n Settings for selected model: auto      tab to switch panels\n{rule}\n esc to close · ↑↓ to navigate · ↵ to select · tab to switch panels"));
     assert_eq!((crate::ui::prompt_line(&kiro), crate::ui::picker_open(&kiro)), (None, true), "Kiro's /model picker was taken for a prompt");
+    // A new shell that asks something first eats the agent's command.
+    let omz = "Restored session: Sun Oct 11 18:22:00 -03 2026\n[oh-my-zsh] Would you like to update? [Y/n] kiro-cli\n\n➜  herdr-pixel-dungeon iro-cli\nzsh: correct 'iro-cli' to 'kiro-cli' [nyae]?";
+    assert!(shell_blocker(omz).is_some_and(|w| w.contains("omz update")), "oh-my-zsh's update prompt not recognised");
+    assert!(shell_blocker("[oh-my-zsh] Would you like to update? [Y/n] ").is_some(), "A waiting oh-my-zsh prompt not recognised");
+    assert!(shell_blocker("➜  x iro-cli\nzsh: correct 'iro-cli' to 'kiro-cli' [nyae]?").is_some_and(|w| w.contains("iro-cli")), "zsh's correction prompt not recognised");
+    assert_eq!(shell_blocker("Restored session: Sun Oct 11\n➜  herdr-pixel-dungeon "), None, "A plain shell prompt taken for a question");
     let typed = crate::ansi::parse(&format!("● done\n{rule}\n❯ fix the tests\n{rule}\n  ? for shortcuts"));
     assert_eq!((crate::ui::prompt_line(&typed), crate::ui::picker_open(&typed)), (Some(2), false), "A prompt with typed text was taken for a picker");
     let empty = crate::ansi::parse(&format!("● Interrupted\n{rule}\n❯ \x1b[2mTry \"fix the tests\"\x1b[0m\n{rule}"));

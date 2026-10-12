@@ -1215,6 +1215,19 @@ pub struct MenuOption {
     pub line: usize,
 }
 
+/// Why a fresh shell would not run the agent Herdr types into it: a question
+/// it asks first eats the command (oh-my-zsh's update prompt takes its first
+/// letter, and zsh then offers to correct the rest). The warning, with what
+/// to do, read from the pane's screen.
+pub fn shell_blocker(screen: &str) -> Option<String> {
+    if screen.contains("[oh-my-zsh] Would you like to update?") {
+        return Some(tr("oh-my-zsh pregunta si actualizarse y se come el comando. Corre omz update en una terminal (o pon zstyle ':omz:update' mode auto en ~/.zshrc) y vuelve a invocar."));
+    }
+    let correct = screen.lines().rev().find(|l| l.contains("zsh: correct '") && l.contains("[nyae]"))?;
+    let typed = correct.split('\'').nth(1).unwrap_or_default();
+    Some(trf("zsh preguntó si corregir «{}»: algo en la shell nueva se comió parte del comando. Abre una terminal y revisa qué pregunta al arrancar.", &[&typed]))
+}
+
 /// The hint under a menu driven by arrow keys ("Enter to confirm · Esc to
 /// cancel"; Kiro's "↑↓ to navigate · ↵ to select" and "esc to close · Enter
 /// to see more options").

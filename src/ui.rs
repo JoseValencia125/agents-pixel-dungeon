@@ -904,12 +904,14 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
             let edit = egui::TextEdit::multiline(&mut state.prompt).hint_text(tr("Primer prompt (opcional)")).font(FontId::monospace(fs(11.0))).desired_rows(4).frame(false).desired_width(f32::INFINITY).interactive(!busy);
             ui.add_sized(vec2(ui.available_width(), height.max(40.0)), edit);
         });
+        // A failure says what to do, so it wraps above the button instead of being cut.
+        if let (false, Some(note)) = (busy, &state.note) {
+            ui.label(RichText::new(note).size(fs(10.0)).color(Color32::from_rgb(255, 159, 10)));
+        }
         ui.horizontal(|ui| {
             if busy {
                 ui.spinner();
                 ui.label(RichText::new(tr("Invocando…")).size(fs(10.0)).color(DIM));
-            } else if let Some(note) = &state.note {
-                ui.label(RichText::new(note).size(fs(10.0)).color(Color32::from_rgb(255, 159, 10)));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let shortcut = ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
@@ -1016,13 +1018,17 @@ pub fn summon_form(ui: &mut Ui, monitor: &Monitor, assets: &crate::assets::Asset
     });
     ui.label(mono(&prefs.create_kind, 10.0).strong().color(green));
     ui.horizontal(|ui| folder_picker(ui, prefs, &known, 10.0));
-    let edit = egui::TextEdit::multiline(&mut state.prompt).hint_text(tr("Primer prompt (opcional)")).font(FontId::monospace(fs(10.0))).desired_rows(2).desired_width(f32::INFINITY).interactive(!busy);
+    // A failure says what to do: it wraps above the button, and the prompt
+    // gives up a row so the room still holds it.
+    let note = state.note.clone().filter(|_| !busy);
+    let edit = egui::TextEdit::multiline(&mut state.prompt).hint_text(tr("Primer prompt (opcional)")).font(FontId::monospace(fs(10.0))).desired_rows(if note.is_some() { 1 } else { 2 }).desired_width(f32::INFINITY).interactive(!busy);
     ui.add(edit);
+    if let Some(note) = note {
+        ui.label(RichText::new(note).size(fs(9.0)).color(Color32::from_rgb(255, 159, 10)));
+    }
     ui.horizontal(|ui| {
         if busy {
             ui.spinner();
-        } else if let Some(note) = &state.note {
-            ui.add(egui::Label::new(RichText::new(note).size(fs(9.0)).color(Color32::from_rgb(255, 159, 10))).truncate());
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let shortcut = ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));

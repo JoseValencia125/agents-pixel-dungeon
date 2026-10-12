@@ -691,13 +691,21 @@ impl Monitor {
                         Ok(_) => {}
                         Err(e) if e.code() == Some("agent_not_ready") => waiting_pane = Some(pane.clone()),
                         Err(e) => {
+                            // What the shell shows says why, if anything does: read it before closing.
+                            let screen = pane_screen(&session, &pane);
                             // Nothing runs in the new workspace: close it instead of leaving an empty shell behind.
                             if let Some(workspace) = created_workspace(&created) {
                                 let _ = run_herdr(&["workspace", "close", &workspace], &session, Duration::from_secs(4));
                             }
+                            if let Some(blocker) = shell_blocker(&screen) { return Err(MonitorError::Message(blocker)); }
                             let why = e.text();
                             let base = trf("{} no arrancó. Revisa que esté instalado.", &[&kind]);
-                            return Err(MonitorError::Message(if why.is_empty() { base } else { format!("{base} ({why})") }));
+                            let last = screen.lines().rev().map(str::trim).find(|l| !l.is_empty()).map(|l| l.chars().take(60).collect::<String>());
+                            return Err(MonitorError::Message(match (e.code(), last) {
+                                (Some("timeout"), Some(last)) => trf("{} no arrancó. La terminal nueva quedó en: «{}»", &[&kind, &last]),
+                                _ if why.is_empty() => base,
+                                _ => format!("{base} ({why})"),
+                            }));
                         }
                     }
                     if waiting_pane.is_none() && !text.is_empty() {
@@ -816,13 +824,21 @@ impl Monitor {
     }
 }
 
+/// The visible text of a pane, or nothing if Herdr does not answer.
+fn pane_screen(session: &str, pane: &str) -> String {
+    run_herdr(&["pane", "read", pane, "--source", "visible", "--format", "text"], session, Duration::from_secs(3)).map(|out| String::from_utf8_lossy(&out).into_owned()).unwrap_or_default()
+}
+
 /// `herdr agent start` in a pane that was created a moment ago. The pane's
 /// shell takes a few hundred milliseconds to reach its prompt and Herdr
 /// answers `agent_pane_busy` ("not an available shell") until then, so that
-/// code is retried for up to ten seconds; any other answer is final.
+/// code is retried for up to ten seconds; any other answer is final. A shell
+/// that asks something first (see `shell_blocker`) is not typed into: the
+/// command would only answer its question.
 fn start_agent(session: &str, name: &str, kind: &str, pane: &str) -> Result<Vec<u8>, MonitorError> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
+        if let Some(blocker) = shell_blocker(&pane_screen(session, pane)) { return Err(MonitorError::Message(blocker)); }
         match run_herdr(&["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000"], session, Duration::from_secs(65)) {
             Err(e) if e.code() == Some("agent_pane_busy") && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(250)),
             other => return other,
