@@ -134,6 +134,7 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("Mostrar en Finder: {}", ["Show in Finder: {}", "Afficher dans le Finder : {}", "Mostra nel Finder: {}", "Mostrar no Finder: {}"]),
         ("Abrir una terminal en esta carpeta", ["Open a terminal in this folder", "Ouvrir un terminal dans ce dossier", "Apri un terminale in questa cartella", "Abrir um terminal nesta pasta"]),
         ("Registro de la guild", ["Guild log", "Journal de la guilde", "Registro della gilda", "Registro da guilda"]),
+        ("Cocinando en background", ["Brewing in the background", "Mijote en arrière-plan", "In cottura in background", "Cozinhando em segundo plano"]),
         ("Aún no pasa nada.", ["Nothing has happened yet.", "Rien ne s’est encore passé.", "Non è ancora successo nulla.", "Nada aconteceu ainda."]),
         // Connection
         ("Esperando a Herdr…", ["Waiting for Herdr…", "En attente de Herdr…", "In attesa di Herdr…", "Aguardando o Herdr…"]),

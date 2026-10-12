@@ -1227,15 +1227,14 @@ impl Room {
         }
     }
 
-    /// What the cauldrons stand for, when the pointer is on them.
-    pub fn shells_tip(&self, origin: Pos2, pointer: Pos2) -> Option<String> {
+    /// What the cauldrons stand for, when the pointer is on them: where
+    /// they stand, and per shell its description · running time and last line.
+    pub fn shells_tip(&self, origin: Pos2, pointer: Pos2) -> Option<(Rect, Vec<(String, Option<String>)>)> {
         let f = Room::frame().translate(origin.to_vec2());
-        if !self.shells_rect(f)?.contains(pointer) { return None; }
+        let area = self.shells_rect(f)?;
+        if !area.contains(pointer) { return None; }
         let now = crate::herdr::unix_now();
-        Some(self.shells.iter().map(|s| {
-            let line = format!("{} · {}", s.label, countdown(now - s.started));
-            match &s.last_line { Some(last) => format!("{line}\n   {last}"), None => line }
-        }).collect::<Vec<_>>().join("\n"))
+        Some((area, self.shells.iter().map(|s| (format!("{} · {}", s.label, countdown(now - s.started)), s.last_line.clone())).collect()))
     }
 
     /// The tag at the cot's foot: how long until the hero has recovered
@@ -1506,7 +1505,7 @@ impl Scene {
                     let hit = ui.interact(rect, ui.id().with(id), egui::Sense::click());
                     room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
                     if hit.clicked() { response.clicked = Some(id.clone()); }
-                    if let Some(tip) = hit.hover_pos().and_then(|p| room.shells_tip(rect.min, p)) { hit.clone().on_hover_text(tip); }
+                    if let Some((area, rows)) = hit.hover_pos().and_then(|p| room.shells_tip(rect.min, p)) { crate::ui::shells_note(ui.ctx(), area, &rows); }
                     hit.context_menu(|ui| {
                         if ui.button(tr("Abrir una terminal en esta carpeta")).clicked() {
                             response.terminal = Some(id.clone());

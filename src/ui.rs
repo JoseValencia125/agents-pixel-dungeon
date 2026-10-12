@@ -1110,6 +1110,43 @@ pub fn activity_log(ctx: &Context, events: &[GuildEvent]) -> bool {
     close
 }
 
+/// What a room's cauldrons are brewing, on a parchment like the guild
+/// log's, hung just under them while the pointer is there.
+pub fn shells_note(ctx: &Context, cauldrons: egui::Rect, rows: &[(String, Option<String>)]) {
+    let ink = Color32::from_rgb(61, 38, 20);
+    // As wide as the guild log, or what the window leaves to its right.
+    let screen = ctx.screen_rect();
+    let width = (screen.width() - 12.0).min(260.0);
+    let x = cauldrons.min.x.min(screen.max.x - width - 22.0).max(screen.min.x + 4.0);
+    egui::Area::new(egui::Id::new("shells-note")).fixed_pos(pos2(x, cauldrons.max.y + 2.0)).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
+        Frame::new()
+            .fill(Color32::from_rgb(237, 217, 168))
+            .stroke(Stroke::new(2.0_f32, Color32::from_rgb(115, 74, 36)))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(Margin::same(8))
+            .shadow(egui::epaint::Shadow { offset: [0, 2], blur: 6, spread: 0, color: alpha(Color32::BLACK, 0.5) })
+            .show(ui, |ui| {
+                ui.set_width(width - 18.0);
+                ui.spacing_mut().item_spacing = vec2(5.0, 4.0);
+                ui.label(mono(&tr("Cocinando en background"), 12.0).strong().color(ink));
+                let rule = ui.available_rect_before_wrap();
+                ui.painter().hline(rule.x_range(), rule.min.y, Stroke::new(1.0_f32, alpha(ink, 0.35)));
+                ui.add_space(2.0);
+                for (line, last) in rows {
+                    ui.horizontal_top(|ui| {
+                        let (dot, _) = ui.allocate_exact_size(vec2(6.0, 12.0), egui::Sense::hover());
+                        ui.painter().rect_filled(egui::Rect::from_center_size(pos2(dot.center().x, dot.center().y + 1.0), vec2(6.0, 6.0)), CornerRadius::ZERO, Color32::from_rgb(38, 153, 64));
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.add(egui::Label::new(mono(line, 10.0).color(ink)).wrap());
+                            if let Some(last) = last { ui.add(egui::Label::new(mono(last, 10.0).color(alpha(ink, 0.6))).truncate()); }
+                        });
+                    });
+                }
+            });
+    });
+}
+
 fn tone_color(tone: &str) -> Color32 {
     match tone {
         "blocked" => Color32::RED,
