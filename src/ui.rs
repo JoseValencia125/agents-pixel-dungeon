@@ -1745,7 +1745,7 @@ pub fn emblem_editor(ctx: &Context, editor: &mut EmblemEditor) -> EditorOutcome 
         });
         // A row of choices, each drawn as the emblem with it.
         let section = |ui: &mut Ui, title: &str| { ui.add_space(2.0); ui.label(mono(title, 10.0).strong().color(DIM)); };
-        section(ui, &tr("Color"));
+        section(ui, &tr("Color principal"));
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             for (i, (name, colour)) in COLOURS.iter().enumerate() {
@@ -1759,6 +1759,16 @@ pub fn emblem_editor(ctx: &Context, editor: &mut EmblemEditor) -> EditorOutcome 
                     editor.emblem.primary = i;
                     editor.emblem.secondary = metal_apart(i, editor.emblem.secondary);
                 }
+            }
+        });
+        section(ui, &tr("Color secundario"));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            for (i, (name, colour)) in crate::identity::METALS.iter().enumerate() {
+                let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());
+                ui.painter().rect_filled(rect.shrink(3.0), CornerRadius::same(4), *colour);
+                if editor.emblem.secondary == i { ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(2.0_f32, Color32::WHITE), egui::StrokeKind::Inside); }
+                if response.on_hover_text(*name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { editor.emblem.secondary = i; }
             }
         });
         let mut choice = |ui: &mut Ui, title: &str, count: usize, build: &dyn Fn(&mut crate::identity::Identity, usize), picked: &dyn Fn(&crate::identity::Identity) -> usize| {

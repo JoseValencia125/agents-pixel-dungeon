@@ -952,7 +952,9 @@ impl eframe::App for App {
             if action.open { self.open_herdr(); }
             if action.dismiss { self.banner_dismissed = true; }
         } else if let Some((text, lost)) = &note { ui::connection_banner(ctx, text, *lost); }
-        if hovering || self.show_log {
+        // Full screen has no strip of buttons: esc and the menu leave it, and
+        // the bar under the rooms summons and opens the log.
+        if (hovering || self.show_log) && !self.fullscreen {
             let action = ui::controls(ctx, self.prefs.sound_enabled, self.show_log, self.fullscreen);
             if action.compose { let on = !self.monitor.composing; self.monitor.set_composing(on); }
             if action.log { self.show_log = !self.show_log; }
