@@ -9,6 +9,7 @@ mod assets;
 mod commands;
 mod events;
 mod herdr;
+mod identity;
 mod l10n;
 mod monitor;
 mod prefs;
@@ -231,6 +232,7 @@ impl App {
         if demo { monitor.demo = true; }
         let mut scene = Scene::new();
         scene.reduced_motion = reduce_motion();
+        scene.overrides = prefs.projects.clone();
         let login = login_item();
         let login_enabled = login.as_ref().map(|l| l.is_enabled().unwrap_or(false)).unwrap_or(false);
         let mut visuals = egui::Visuals::dark();
@@ -815,7 +817,7 @@ impl eframe::App for App {
             // Full screen: who waits for you, over the rooms.
             if calls_h > 0.0 {
                 let rect = Rect::from_min_max(full.min, egui::pos2(scene_rect.max.x, scene_rect.min.y));
-                if let Some(id) = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| { ui.set_clip_rect(rect); ui::calls(ui, &calls) }).inner {
+                if let Some(id) = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| { ui.set_clip_rect(rect); ui::calls(ui, &calls, &self.scene) }).inner {
                     self.monitor.select(Some(id));
                 }
             }

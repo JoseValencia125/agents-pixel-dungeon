@@ -888,6 +888,23 @@ pub fn filter_agents(agents: &[Agent], status: StatusFilter, query: &str) -> Vec
         .collect()
 }
 
+/// The demo's repos have no folder to read: their emblem's metadata, as if
+/// they did.
+pub fn demo_meta(agent: &Agent) -> Option<crate::identity::ProjectMeta> {
+    use crate::identity::Kind;
+    if !agent.id.starts_with("demo:") { return None; }
+    let name = agent.folder();
+    let kind = match name.as_str() {
+        "website" | "design-system" => Kind::Web,
+        "api-service" => Kind::Systems,
+        "mobile-app" => Kind::Mobile,
+        "documentation" => Kind::Docs,
+        "game-engine" => Kind::Game,
+        _ => Kind::Unknown,
+    };
+    Some(crate::identity::ProjectMeta { key: format!("guild/{name}"), owner: Some("guild".into()), name, kind })
+}
+
 pub fn demo_agents(tick: usize) -> Vec<Agent> {
     let specs: [(&str, &str, &str, &str); 6] = [
         ("claude", "Website", "working", "Construyendo la página de ajustes"),

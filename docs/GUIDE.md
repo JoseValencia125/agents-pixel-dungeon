@@ -56,6 +56,16 @@ When an agent starts needing help the app also posts a desktop notification (Not
 
 The scroll button unrolls the guild's log on a parchment: agents joining and leaving, state changes, subagents starting and the messages you sent, newest first with the time. It keeps the last 40 lines in memory only.
 
+## Each repo's guild
+
+A room's top band is its repo's: an emblem, the repo's name and its colour, which never change with the agent's state (the state is the room itself, the light and word at the bottom right, and the red frame while it needs you). The emblem is worked out from the repo, with no setup and the same on every launch and machine:
+
+- **What it is made from**: `owner/repo` from the folder's `origin` remote (any host, SSH or HTTPS); without a remote, the repo's or folder's name. Two clones of a repo share their emblem.
+- **The charge** (the figure in the middle) comes from a family chosen by the project's files: games (`project.godot`, Unreal, Unity) a sword, heart or crown; mobile (Android, Flutter, Xcode) a phone or bolt; docs (MkDocs, mdBook, Docusaurus, or only Markdown) a book or quill; Ruby (`Gemfile`) a gem or crown; Python a snake or flask; Rust, Go, C/C++, JVM and .NET a gear or anvil; web (`package.json`, Deno, TypeScript) a scroll, bolt or leaf; infrastructure (Docker, Terraform, Helm) a crate or tower. Anything else draws from all nineteen charges.
+- **The rest** (colour among twelve, a second tincture among six, partition among six, shield among six, and which charge of the family) comes from a hash of that name (FNV-1a), so related repos still look apart.
+
+To choose for yourself, add `projects` to `settings.json`, keyed by the name the emblem is made from (hover a room's band to see it): `"projects": {"someone/app": {"name": "App", "color": "yellow", "symbol": "quill", "kind": "game"}}`. Every field is optional. Colours: red, orange, amber, yellow, green, forest, cyan, blue, magenta, pink, steel, tan. Charges: gear, anvil, snake, flask, gem, crown, phone, bolt, sword, heart, scroll, leaf, book, quill, crate, tower, star, moon, eye. Kinds: game, mobile, docs, ruby, python, systems, web, infra. Restart the app after editing it.
+
 ## Many agents
 
 Resize the widget from its edges or the grip in its bottom-right corner: rooms wrap into as many columns as fit, and the window snaps to whole rooms. It starts at two columns and up to four rows; the size you pick is remembered, the smallest is one room. With fewer agents than columns it narrows (a single agent is one square), and it grows with the agents up to your row count; past that, scroll with the trackpad or wheel — a small badge counts the rooms hidden below or above and jumps to them. An agent that starts needing attention takes the first room and the view scrolls to it.

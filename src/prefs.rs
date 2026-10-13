@@ -37,6 +37,10 @@ pub struct Prefs {
     pub claude_usage_live: bool,
     /// Folders starred in the summon panel, offered first.
     pub favorite_folders: Vec<String>,
+    /// Optional choices for a repo's emblem, by its key (`owner/repo`, or the
+    /// folder's name): `{"someone/app": {"name": "App", "color": "yellow",
+    /// "symbol": "quill", "kind": "game"}}`. Every repo gets one without it.
+    pub projects: std::collections::BTreeMap<String, crate::identity::ProjectOverride>,
     #[serde(skip)]
     pub path: Option<PathBuf>,
 }
@@ -64,6 +68,7 @@ impl Default for Prefs {
             kiro_plan: 0,
             claude_usage_live: false,
             favorite_folders: vec![],
+            projects: Default::default(),
             path: None,
         }
     }

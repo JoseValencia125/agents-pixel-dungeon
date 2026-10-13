@@ -6,14 +6,16 @@
 
 use crate::assets::{Assets, Sprite};
 use crate::herdr::{harness_for, Agent};
+use crate::identity::{Identity, ProjectMeta, ProjectOverride};
 use crate::l10n::tr;
 use egui::emath::Rot2;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, FontId, Mesh, Painter, Pos2, Rect, Shape, Stroke, Vec2};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const ART: Vec2 = vec2(144.0, 100.0);
 pub const FOOTER: f32 = 36.0; // caption band under the room: chat title + folder · branch
-pub const ROW_H: f32 = 158.0 + FOOTER; // room art 100 px at 1.5 pt/px + 8 pt frame, plus the footer
+pub const HEADER: f32 = 28.0; // the repo's band over the room: its emblem and name
+pub const ROW_H: f32 = 158.0 + HEADER + FOOTER; // room art 100 px at 1.5 pt/px + 8 pt frame, plus header and footer
 pub const ROW_W: f32 = 220.0; // room art 144 px at 1.5 pt/px + 4 pt frame
 pub const HERO: f32 = 32.0; // 16 px sprite at 2 pt/px
 pub const GAP: f32 = 6.0;
@@ -343,9 +345,11 @@ pub struct Room {
     status: String,
     harness: &'static str,
     name: String,
-    color: Color32,
     activity: String,
-    repo: String,
+    /// The agent's folder, and its repo's emblem (worked out again only
+    /// when the folder or the user's choice for it changes).
+    cwd: String,
+    identity: Identity,
     branch: String,
     /// Shells the agent left running in the background: a cauldron each.
     shells: Vec<crate::shells::Shell>,
@@ -390,9 +394,9 @@ impl Room {
             status: String::new(),
             harness: harness_for(&agent.name),
             name: agent.name.clone(),
-            color: agent_color(&agent.status),
             activity: String::new(),
-            repo: String::new(),
+            cwd: String::new(),
+            identity: crate::identity::identity(&ProjectMeta { key: String::new(), owner: None, name: String::new(), kind: crate::identity::Kind::Unknown }),
             branch: String::new(),
             shells: vec![],
             action: None,
@@ -430,7 +434,13 @@ impl Room {
 
     /// The room frame inside the cell.
     fn frame() -> Rect {
-        Rect::from_min_size(pos2(2.0, 4.0), vec2(ROW_W - 4.0, ROW_H - 8.0 - FOOTER))
+        Rect::from_min_size(pos2(2.0, 4.0 + HEADER), vec2(ROW_W - 4.0, ROW_H - 8.0 - HEADER - FOOTER))
+    }
+
+    /// The repo's band over the room, in cell points.
+    fn header() -> Rect {
+        let f = Room::frame();
+        Rect::from_min_max(pos2(f.min.x, f.min.y - HEADER), pos2(f.max.x, f.min.y))
     }
 
     /// Room-art pixel (origin top-left) to cell points, matching how the
@@ -453,9 +463,7 @@ impl Room {
     /// Apply the agent's latest data. If the status changed, swap the room.
     pub fn update(&mut self, agent: &Agent, animated: bool) {
         self.name = agent.name.clone();
-        self.color = agent_color(&agent.status);
         self.activity = agent.activity.clone();
-        self.repo = agent.folder();
         self.branch = agent.branch.clone().unwrap_or_default();
         self.shells = agent.shells.clone();
         self.harness = harness_for(&agent.name);
@@ -1029,7 +1037,8 @@ impl Room {
     pub fn draw(&self, painter: &Painter, origin: Pos2, assets: &Assets, selected: bool) {
         let at = |p: Pos2| pos2(origin.x + p.x, origin.y + p.y);
         let f = Room::frame().translate(origin.to_vec2());
-        let cell = Rect::from_min_max(f.min, pos2(f.max.x, f.max.y + FOOTER));
+        let header = Room::header().translate(origin.to_vec2());
+        let cell = Rect::from_min_max(header.min, pos2(f.max.x, f.max.y + FOOTER));
         let t = self.routine_clock;
         let style = self.style;
         // Footer band under the room.
@@ -1159,7 +1168,20 @@ impl Room {
         // Rounded corners: cover what the square clip let through.
         cover_corners(painter, f, 6.0, BACKGROUND);
         cover_corners(painter, cell, 6.0, BACKGROUND);
-        // Frame.
+        // The repo's band: its colour, emblem and name, whatever the state.
+        let identity = &self.identity;
+        let primary = identity.primary_color();
+        painter.rect_filled(header, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, blend(Color32::from_rgb(18, 15, 23), primary, 0.16));
+        painter.rect_filled(Rect::from_min_max(pos2(header.min.x, header.max.y - 2.0), header.max), CornerRadius::ZERO, primary);
+        draw_emblem(painter, identity, pos2(header.min.x + 7.0, header.center().y - 12.0 - 1.0), 2.0);
+        let name_room = header.width() - 40.0;
+        let name_color = blend(primary, Color32::WHITE, 0.5);
+        let name = fit_text(painter, &identity.name, FontId::monospace(13.0), name_room);
+        let name_at = pos2(header.min.x + 34.0, header.center().y - 1.0);
+        painter.text(name_at, Align2::LEFT_CENTER, &name, FontId::monospace(13.0), name_color);
+        painter.text(pos2(name_at.x + 0.7, name_at.y), Align2::LEFT_CENTER, &name, FontId::monospace(13.0), name_color);
+        // Frame: quiet, so the repo's colour leads; it only lights up for
+        // an agent that needs you or is out of credits.
         let stroke = if style.status == "blocked" && !self.in_transition {
             let bright = Color32::from_rgb(255, 51, 56);
             let dim = Color32::from_rgb(89, 13, 20);
@@ -1168,13 +1190,11 @@ impl Room {
             let q = (std::f32::consts::TAU * self.clock / 2.4).sin() * 0.5 + 0.5;
             Stroke::new(2.0_f32, blend(Color32::from_rgb(74, 30, 99), LIMITED, q))
         } else {
-            Stroke::new(1.0_f32, with_alpha(style.color, 0.85))
+            Stroke::new(1.0_f32, Color32::from_rgb(58, 52, 68))
         };
         painter.rect_stroke(cell, CornerRadius::same(6), stroke, egui::StrokeKind::Inside);
-        // Labels: the repo (top-left), then the footer: what the agent is
-        // doing, its branch (bottom-left) and the room's state (bottom-right).
-        let repo_chars = (((f.width() - 32.0) / 7.8) as usize).max(4);
-        label(painter, pos2(f.min.x + 12.0, f.min.y + 14.0), Align2::LEFT_CENTER, &Room::clip(&self.repo, repo_chars), 13.0, self.color, true);
+        // The footer: what the agent is doing, its branch (bottom-left) and
+        // the room's state with its light (bottom-right).
         let usable_chars = ((f.width() - 28.0) / 6.65) as usize;
         painter.text(pos2(f.min.x + 10.0, f.max.y + 11.0), Align2::LEFT_CENTER, Room::clip(&self.activity, usable_chars), FontId::monospace(11.0), Color32::WHITE);
         // The new state shows at once, while the hero is still walking
@@ -1185,11 +1205,23 @@ impl Room {
         let at = pos2(f.max.x - 10.0, f.max.y + FOOTER - 10.0);
         painter.text(at, Align2::RIGHT_CENTER, &title, FontId::monospace(11.0), title_color);
         let title_rect = painter.text(pos2(at.x + 0.6, at.y), Align2::RIGHT_CENTER, &title, FontId::monospace(11.0), title_color);
-        let branch_chars = (((title_rect.min.x - f.min.x - 22.0) / 6.65) as usize).max(4);
+        painter.circle_filled(pos2(title_rect.min.x - 8.0, at.y), 3.5, shown.color);
+        painter.circle_stroke(pos2(title_rect.min.x - 8.0, at.y), 3.5, Stroke::new(1.0_f32, Color32::from_black_alpha(140)));
+        let branch_chars = (((title_rect.min.x - f.min.x - 36.0) / 6.65) as usize).max(4);
         painter.text(pos2(f.min.x + 10.0, at.y), Align2::LEFT_CENTER, Room::clip(&self.branch, branch_chars), FontId::monospace(11.0), Color32::from_gray(209));
         if selected {
             painter.rect_stroke(cell.expand(2.0), CornerRadius::same(7), Stroke::new(2.0_f32, Color32::from_rgb(217, 242, 166)), egui::StrokeKind::Outside);
         }
+    }
+
+    /// The repo's full name and key, while the pointer is on its band.
+    pub fn header_tip(&self, origin: Pos2, pointer: Pos2) -> Option<String> {
+        if !Room::header().translate(origin.to_vec2()).contains(pointer) { return None; }
+        let identity = &self.identity;
+        let mut tip = identity.name.clone();
+        if identity.key != identity.name.to_lowercase() { tip += &format!("\n{}", identity.key); }
+        if !identity.kind.label().is_empty() { tip += &format!(" · {}", identity.kind.label()); }
+        Some(tip)
     }
 
     /// Where the cauldrons of the shells it left running stand: the room's
@@ -1343,6 +1375,43 @@ fn label(painter: &Painter, at: Pos2, align: Align2, text: &str, size: f32, colo
     rect
 }
 
+/// A repo's emblem, 10×12 pixels of `px` points from `top_left`: a dark
+/// edge, the field in its colour with the partition in the second one, and
+/// the charge inked in the middle.
+pub fn draw_emblem(painter: &Painter, identity: &Identity, top_left: Pos2, px: f32) {
+    let ppp = painter.ctx().pixels_per_point();
+    let top_left = pos2((top_left.x * ppp).round() / ppp, (top_left.y * ppp).round() / ppp);
+    let mask = identity.shape.mask();
+    let inside = |x: i32, y: i32| (0..10).contains(&x) && (0..12).contains(&y) && mask[y as usize].as_bytes()[x as usize] == b'#';
+    let charge = identity.symbol.pixels();
+    let inked = |x: i32, y: i32| (2..8).contains(&x) && (2..8).contains(&y) && charge[(y - 2) as usize].as_bytes()[(x - 2) as usize] == b'#';
+    let (primary, secondary, ink) = (identity.primary_color(), identity.secondary_color(), identity.ink());
+    let edge = Color32::from_rgb(24, 20, 37);
+    let rim = |x: i32, y: i32| !(inside(x - 1, y) && inside(x + 1, y) && inside(x, y - 1) && inside(x, y + 1));
+    let mut mesh = Mesh::default();
+    for y in 0..12 {
+        for x in 0..10 {
+            if !inside(x, y) { continue; }
+            let near_rim = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| inside(x + dx, y + dy) && rim(x + dx, y + dy));
+            let color = if rim(x, y) { edge } else if inked(x, y) { ink } else if identity.pattern.second(x as usize, y as usize, near_rim) { secondary } else { primary };
+            mesh.add_colored_rect(Rect::from_min_size(pos2(top_left.x + x as f32 * px, top_left.y + y as f32 * px), vec2(px, px)), color);
+        }
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+/// `text` cut with "…" to fit `width` points in `font`.
+fn fit_text(painter: &Painter, text: &str, font: FontId, width: f32) -> String {
+    let fits = |t: &str| painter.layout_no_wrap(t.to_string(), font.clone(), Color32::WHITE).size().x <= width;
+    if fits(text) { return text.to_string(); }
+    let mut cut: String = text.to_string();
+    while cut.pop().is_some() {
+        let shown = format!("{}…", cut.trim_end());
+        if fits(&shown) { return shown; }
+    }
+    "…".into()
+}
+
 /// Paint the window background over the corners of a square-clipped rect,
 /// so it reads as rounded.
 fn cover_corners(painter: &Painter, rect: Rect, radius: f32, color: Color32) {
@@ -1391,6 +1460,8 @@ pub struct Scene {
     /// Full screen: rooms keep their places, so nobody asking scrolls the
     /// dungeon to the top (they are called over it instead).
     pub keep_order: bool,
+    /// The user's choices for some repos' emblems (settings' `projects`).
+    pub overrides: BTreeMap<String, ProjectOverride>,
     /// The summon panel is open: the spare room holds its form.
     pub summoning: bool,
     summon_shown: bool,
@@ -1411,12 +1482,18 @@ impl Scene {
             empty_text: tr("Sin agentes en la sesión"),
             summon_tile: false,
             keep_order: false,
+            overrides: BTreeMap::new(),
             summoning: false,
             summon_shown: false,
             seeds: 7,
             clock: 0.0,
             last_time: None,
         }
+    }
+
+    /// An agent's repo emblem, once its room is up.
+    pub fn identity(&self, id: &str) -> Option<&Identity> {
+        self.rooms.get(id).map(|room| &room.identity)
     }
 
     pub fn set_selected(&mut self, id: Option<String>) {
@@ -1438,12 +1515,18 @@ impl Scene {
         self.order = agents.iter().map(|a| a.id.clone()).collect();
         if newly_asking && self.selected.is_none() && !self.keep_order { self.scroll_request = Some(ScrollRequest::Top); }
         for agent in agents {
-            match self.rooms.get_mut(&agent.id) {
-                Some(room) => room.update(agent, !self.reduced_motion),
+            let room = match self.rooms.get_mut(&agent.id) {
+                Some(room) => { room.update(agent, !self.reduced_motion); room }
                 None => {
                     self.seeds = self.seeds.wrapping_mul(1664525).wrapping_add(1013904223);
-                    self.rooms.insert(agent.id.clone(), Room::new(agent, self.seeds));
+                    self.rooms.entry(agent.id.clone()).or_insert(Room::new(agent, self.seeds))
                 }
+            };
+            // The emblem, read from the folder once (a few small files).
+            if room.cwd != agent.cwd || room.identity.key.is_empty() {
+                room.cwd = agent.cwd.clone();
+                let meta = crate::herdr::demo_meta(agent).unwrap_or_else(|| crate::identity::read_meta(&agent.cwd));
+                room.identity = crate::identity::apply_override(&meta, self.overrides.get(&meta.key));
             }
         }
     }
@@ -1511,6 +1594,7 @@ impl Scene {
                     room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
                     if hit.clicked() { response.clicked = Some(id.clone()); }
                     if let Some((area, rows)) = hit.hover_pos().and_then(|p| room.shells_tip(rect.min, p)) { crate::ui::shells_note(ui.ctx(), area, &rows); }
+                    let hit = match hit.hover_pos().and_then(|p| room.header_tip(rect.min, p)) { Some(tip) => hit.on_hover_text(tip), None => hit };
                     hit.context_menu(|ui| {
                         if ui.button(tr("Abrir una terminal en esta carpeta")).clicked() {
                             response.terminal = Some(id.clone());

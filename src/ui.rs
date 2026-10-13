@@ -170,7 +170,7 @@ pub fn calls_height(count: usize) -> f32 {
 }
 
 /// The agent picked from the list, to open.
-pub fn calls(ui: &mut Ui, agents: &[Agent]) -> Option<String> {
+pub fn calls(ui: &mut Ui, agents: &[Agent], scene: &crate::scene::Scene) -> Option<String> {
     let mut picked = None;
     let rect = ui.max_rect();
     ui.painter().rect_filled(rect, CornerRadius::ZERO, HUD_FILL);
@@ -185,11 +185,15 @@ pub fn calls(ui: &mut Ui, agents: &[Agent]) -> Option<String> {
             let (rect, response) = ui.allocate_exact_size(row, egui::Sense::click());
             let fill = if response.hovered() { alpha(color, 0.22) } else { alpha(color, 0.12) };
             ui.painter().rect(rect, CornerRadius::same(4), fill, egui::Stroke::new(1.0_f32, alpha(color, 0.55)), egui::StrokeKind::Inside);
-            ui.painter().circle_filled(egui::pos2(rect.min.x + 10.0, rect.center().y), 3.5, color);
+            // The repo's emblem (its guild), or the state's dot until its room is up.
+            match scene.identity(&agent.id) {
+                Some(identity) => crate::scene::draw_emblem(ui.painter(), identity, egui::pos2(rect.min.x + 5.0, rect.center().y - 9.0), 1.5),
+                None => { ui.painter().circle_filled(egui::pos2(rect.min.x + 10.0, rect.center().y), 3.5, color); }
+            }
             let font = FontId::monospace(fs(11.0));
             // The card's own word for the state, short enough to leave the folder whole.
             let state = ui.painter().text(egui::pos2(rect.max.x - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, tr(if agent.status == "blocked" { "ATENCIÓN" } else { "LISTO" }), font.clone(), color);
-            let room = (state.min.x - rect.min.x - 30.0).max(0.0);
+            let room = (state.min.x - rect.min.x - 34.0).max(0.0);
             // The folder, cut with "…" where the state starts.
             let ink = Color32::from_gray(225);
             let mut text = agent.folder();
@@ -197,7 +201,7 @@ pub fn calls(ui: &mut Ui, agents: &[Agent]) -> Option<String> {
             while name.size().x > room && text.pop().is_some() {
                 name = ui.painter().layout_no_wrap(format!("{}…", text.trim_end()), font.clone(), ink);
             }
-            ui.painter().galley(egui::pos2(rect.min.x + 20.0, rect.center().y - name.size().y / 2.0), name, ink);
+            ui.painter().galley(egui::pos2(rect.min.x + 24.0, rect.center().y - name.size().y / 2.0), name, ink);
             let response = response.on_hover_text(if agent.activity.is_empty() { tr("Abrir su chat") } else { agent.activity.clone() }).on_hover_cursor(egui::CursorIcon::PointingHand);
             if response.clicked() { picked = Some(agent.id.clone()); }
         }
