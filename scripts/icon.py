@@ -1,36 +1,25 @@
 #!/usr/bin/env python3
-"""Draw the app icon: the guild's knight helm (the menu bar glyph, in steel
-and gold) on a dark dungeon-stone tile, as pixel art scaled up with no
-smoothing. Writes Resources/Icon/icon.png (1024 px) and the sizes an
-.iconset needs. Pure Python, no PIL."""
+"""Draw the app icon: a crystal orb on a golden stand showing a terminal
+prompt (a bright green chevron and underscore), on a dark dungeon-stone
+tile, as pixel art scaled up with no smoothing. The orb is the agent's
+scrying glass; the >_ says it is a coding agent in a terminal. Writes
+Resources/Icon/icon.png (1024 px) and the sizes an .iconset needs. Pure
+Python, no PIL."""
 import os, struct, zlib
 
-HELM = [
-    "......####......",
-    "....########....",
-    "...##########...",
-    "..############..",
-    "..##........##..",
-    "..##........##..",
-    "..#####..#####..",
-    "..#####..#####..",
-    "..#####..#####..",
-    "..############..",
-    "..##.#.##.#.##..",
-    "...##########...",
-    "..############..",
-    ".##############.",
-]
 # Endesga-32 colours, as in the sprites.
 BG = (0x3a, 0x44, 0x66)
 BG_EDGE = (0x26, 0x2b, 0x44)
 BG_LIGHT = (0x5a, 0x69, 0x88)
-STEEL = (0x8b, 0x9b, 0xb4)
-STEEL_LIGHT = (0xc0, 0xcb, 0xdc)
-STEEL_DARK = (0x5a, 0x69, 0x88)
 INK = (0x18, 0x14, 0x25)
+SCREEN = (0x1a, 0x20, 0x28)        # greenish-black orb interior
 GOLD = (0xfe, 0xe7, 0x61)
-RED = (0xe4, 0x3b, 0x44)
+GOLD_DARK = (0xc0, 0x96, 0x38)
+PORTAL = (0x78, 0x6e, 0xdc)        # orb ring
+PORTAL_LIGHT = (0xb4, 0xa0, 0xfa)
+TERM = (0x63, 0xe6, 0x8f)          # terminal green
+TERM_DARK = (0x3b, 0xa6, 0x66)
+WHITE = (0xec, 0xf0, 0xf8)
 
 SIZE = 44  # canvas in art pixels
 
@@ -48,41 +37,63 @@ def pixels():
             # Faint bricks.
             brick = ((y // 6) % 2 == 0 and x % 12 == 0) or ((y // 6) % 2 == 1 and (x + 6) % 12 == 0) or y % 6 == 0
             px[(x, y)] = BG_EDGE if edge else (BG_LIGHT if brick and (x + y) % 3 == 0 else BG)
-    # The helm, 2x, centred, with a 1 px ink outline.
-    scale = 2
-    hw, hh = 16 * scale, len(HELM) * scale
-    ox, oy = (SIZE - hw) // 2, (SIZE - hh) // 2 + 1
-    cells = {}
-    for y, row in enumerate(HELM):
-        first = row.find("#")
-        last = row.rfind("#")
-        for x, ch in enumerate(row):
-            if ch == "#":
-                color = STEEL_LIGHT if y <= 2 or (x <= 3 and y <= 9) else STEEL
-                if y >= 11:
-                    color = STEEL_DARK
-                cells[(x, y)] = color
-            elif first != -1 and first < x < last:
-                cells[(x, y)] = INK  # visor and breathing holes
-    # Gold crest band and red plume.
-    for x in range(6, 10):
-        cells[(x, 3)] = GOLD
-    for y in range(0, 3):
-        cells[(7, y - 1)] = RED if y > 0 else RED
-        cells[(8, y - 1)] = RED
-    for (x, y), color in cells.items():
-        for dy in range(scale):
-            for dx in range(scale):
-                px[(ox + x * scale + dx, oy + y * scale + dy)] = color
-    # Outline: ink around any helm pixel that borders the tile.
-    helm_set = set((ox + x * scale + dx, oy + y * scale + dy) for (x, y) in cells for dx in range(scale) for dy in range(scale))
-    outline = set()
-    for (x, y) in helm_set:
-        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-            if (nx, ny) not in helm_set and (nx, ny) in px:
-                outline.add((nx, ny))
-    for p in outline:
-        px[p] = INK
+
+    def inside(x, y):
+        return (x, y) in px
+
+    def dot(x, y, c):
+        if inside(x, y):
+            px[(x, y)] = c
+
+    def box(x0, y0, x1, y1, c):
+        for yy in range(y0, y1 + 1):
+            for xx in range(x0, x1 + 1):
+                dot(xx, yy, c)
+
+    # ---- Crystal orb, centred and a touch above middle ----
+    ocx, ocy, orad = 22, 19, 15
+    for yy in range(ocy - orad, ocy + orad + 1):
+        for xx in range(ocx - orad, ocx + orad + 1):
+            d = (xx - ocx) ** 2 + (yy - ocy) ** 2
+            if d <= orad ** 2:
+                dot(xx, yy, SCREEN)
+            if (orad - 1) ** 2 < d <= orad ** 2:
+                dot(xx, yy, PORTAL)
+            elif (orad - 2) ** 2 < d <= (orad - 1) ** 2:
+                dot(xx, yy, PORTAL_LIGHT)
+    # highlight glint
+    for (hx, hy) in [(-7, -9), (-6, -9), (-7, -8), (-8, -8)]:
+        dot(ocx + hx, ocy + hy, WHITE)
+
+    # ---- Big obvious >_ prompt, centred as a group in the orb ----
+    # The group spans the chevron (8 px wide) + a 2 px gap + the
+    # underscore (9 px wide) = 19 px. Centre it on the orb centre.
+    group_w = 19
+    left = ocx - group_w // 2
+    # Chevron ">": symmetric, 7 rows, constant 2px stroke, tip centred.
+    gx, gy = left, ocy - 4
+    for dy in range(7):
+        step = dy if dy <= 3 else 6 - dy   # 0,1,2,3,2,1,0
+        x0 = step * 2
+        dot(gx + x0, gy + dy, TERM)
+        dot(gx + x0 + 1, gy + dy, TERM)
+    # soft inner shadow along the lower edge for thickness
+    for dy in range(4, 7):
+        step = 6 - dy
+        dot(gx + step * 2, gy + dy, TERM_DARK)
+
+    # Underscore "_": wide bar sharing the chevron baseline.
+    ux0 = left + 10
+    uy = gy + 6
+    box(ux0, uy, ux0 + 8, uy, TERM)
+    box(ux0, uy - 1, ux0 + 8, uy - 1, TERM_DARK)
+
+    # ---- Golden stand ----
+    by = ocy + orad
+    box(ocx - 7, by, ocx + 7, by + 1, GOLD_DARK)
+    box(ocx - 4, by + 2, ocx + 4, by + 3, GOLD)
+    box(ocx - 8, by + 4, ocx + 8, by + 4, GOLD_DARK)
+
     return px
 
 def png(path, size, px):
