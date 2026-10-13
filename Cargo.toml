@@ -4,6 +4,7 @@ version = "2.1.2"
 edition = "2021"
 description = "A native pixel-art guild for your live Herdr agents, for macOS and Linux."
 license = "MIT"
+authors = ["Diabolo Studio (https://diabolostudio.com/)"]
 default-run = "agents-pixel-dungeon"
 
 [[bin]]

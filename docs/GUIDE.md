@@ -137,4 +137,4 @@ A banner over the rooms offers **Install Herdr** (its official installer, `curl 
 
 ## Support
 
-If the dungeon is useful to you, you can [sponsor the project on GitHub](https://github.com/sponsors/JoseValencia125). Sponsorships help pay for the time spent drawing new heroes and rooms and keeping up with Herdr releases.
+Agents Pixel Dungeon is made by [Diabolo Studio](https://diabolostudio.com/). If the dungeon is useful to you, you can [sponsor the project on GitHub](https://github.com/sponsors/JoseValencia125). Sponsorships help pay for the time spent drawing new heroes and rooms and keeping up with Herdr releases.

@@ -2,7 +2,7 @@
 
 # Agents Pixel Dungeon
 
-**A native pixel-art guild for your live [Herdr](https://herdr.dev) agents, for macOS and Linux.**
+**A native pixel-art guild for your live [Herdr](https://herdr.dev) agents, for macOS and Linux.** Made by [Diabolo Studio](https://diabolostudio.com/).
 
 Each coding agent is a hero in a dungeon room that changes with its real Herdr status: working at the forge, asking for your attention, exhausted on an infirmary cot until its usage limit resets, reading while it waits, done. Click a room to answer the agent, accept or decline its permission prompts, or summon a new one. Rust, `egui`, a status item in the menu bar or tray, no browser or server.
 
@@ -97,7 +97,7 @@ Thank you for supporting independent open-source development. ⚔️
 
 ## Credits and licenses
 
-Created by **Nacho Valencia**: code and all pixel art. MIT, see [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
+Created by **[Diabolo Studio](https://diabolostudio.com/)** (Nacho Valencia): code and all pixel art. MIT, see [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
 
 Inspired by **[Claude Dungeon](https://github.com/thousandsky2024/claude-pixel-agent-web)** by [thousandsky2024](https://github.com/thousandsky2024), which first pictured coding agents as dungeon heroes. No code or artwork from it is included.
 

@@ -616,7 +616,7 @@ impl App {
             TrayAction::ConsoleNormal => self.set_console_scale(1.0),
             TrayAction::RoomSize(size) => { self.prefs.room_size = size.to_string(); self.prefs.save(); }
             TrayAction::About => {
-                rfd::MessageDialog::new().set_title(tr("Acerca de Agents Pixel Dungeon")).set_description(format!("Agents Pixel Dungeon {}\n{}", env!("CARGO_PKG_VERSION"), tr("Creado por Nacho Valencia.\nCódigo y pixel art originales · MIT.\n\nProyecto independiente, sin afiliación con Herdr, Inc."))).show();
+                rfd::MessageDialog::new().set_title(tr("Acerca de Agents Pixel Dungeon")).set_description(format!("Agents Pixel Dungeon {}\n{}", env!("CARGO_PKG_VERSION"), tr("Creado por Diabolo Studio (diabolostudio.com) · Nacho Valencia.\nCódigo y pixel art originales · MIT.\n\nProyecto independiente, sin afiliación con Herdr, Inc."))).show();
             }
             TrayAction::Quit => ctx.send_viewport_cmd(ViewportCommand::Close),
         }

@@ -11,5 +11,5 @@
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSUIElement</key><true/>
-<key>NSHumanReadableCopyright</key><string>© 2026 Nacho Valencia. MIT.</string>
+<key>NSHumanReadableCopyright</key><string>© 2026 Nacho Valencia · Diabolo Studio (diabolostudio.com). MIT.</string>
 </dict></plist>

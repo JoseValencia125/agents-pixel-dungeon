@@ -2,7 +2,7 @@
 
 ## Agents Pixel Dungeon
 
-All code and pixel art in this repository are original work, copyright (c) 2026 Nacho Valencia, released under the MIT license in LICENSE.
+Agents Pixel Dungeon is made by Diabolo Studio (https://diabolostudio.com/). All code and pixel art in this repository are original work, copyright (c) 2026 Nacho Valencia, released under the MIT license in LICENSE.
 
 The room backgrounds (Resources/Sprites/rooms) and the heroes (Resources/Sprites/heroes, one per harness) were drawn for this project in Aseprite with the Endesga-32 palette. Their sources are in art/. Hero colours are inspired by each tool's branding; no logos are reproduced, and no affiliation is implied.
 
