@@ -67,6 +67,32 @@ pub fn run() {
     watcher.apply(demo_agents(0));
     watcher.apply(demo_agents(10));
     assert_eq!(watcher.alerts.iter().map(|a| a.kind).collect::<Vec<_>>(), vec![AlertKind::NeedsHelp]);
+    // Background shells: read from ps and the transcript; one that ends rings.
+    let line = "69963 84548 Sun Oct 11 10:19:17 2026 /bin/zsh -c source /Users/me/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && eval 'cd /p && python3 emol.py fetch > data/fetch.log 2>&1' < /dev/null && pwd -P >| /tmp/claude-4330-cwd";
+    let process = crate::shells::parse_ps_line(line).expect("ps line not read");
+    assert_eq!((process.pid, process.ppid), (69963, 84548));
+    assert_eq!(crate::shells::shell_command(&process.command).as_deref(), Some("cd /p && python3 emol.py fetch > data/fetch.log 2>&1"));
+    assert_eq!(crate::shells::shell_command("node /x/cli.js serve"), None, "An MCP server was taken for a shell");
+    assert_eq!(crate::shells::short_command("cd /p && python3 emol.py fetch"), "python3 emol.py fetch");
+    let transcript = [
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sleep 100","description":"Wait a while","run_in_background":true}}]}}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b123. Output is being written to: /tmp/tasks/b123.output. You will be notified."}]},"toolUseResult":{"backgroundTaskId":"b123"}}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"<task-notification><task-id>bquoted</task-id><status>failed</status></task-notification>"}]}}"#,
+        r#"{"type":"user","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>\n<task-id>b123</task-id>\n<status>failed</status>\n<summary>Background command \"Wait a while\" failed (exit code 1)</summary>\n</task-notification>"}}"#,
+    ].join("
+");
+    let launches = crate::shells::parse_launches(&transcript);
+    assert_eq!(launches.by_command.get("sleep 100"), Some(&(Some("b123".into()), Some("Wait a while".into()), Some("/tmp/tasks/b123.output".into()))), "A background launch was not read");
+    assert_eq!(launches.results.iter().map(|r| (r.task.as_str(), r.ok)).collect::<Vec<_>>(), vec![("b123", false)], "A quoted notification counted, or the real one was missed");
+    let shell = crate::shells::Shell { pid: 7, command: "sleep 100".into(), label: "Wait a while".into(), started: 0, task: Some("b123".into()), last_line: None, output: None };
+    let mut brewing = agent("s", "claude", "idle", "p", "a", "~");
+    brewing.shells = vec![shell];
+    let mut ended = agent("s", "claude", "idle", "p", "a", "~");
+    ended.shell_results = launches.results.clone();
+    let mut shells_watch = Monitor::new("default".into(), StatusFilter::All);
+    shells_watch.apply(vec![brewing]);
+    shells_watch.apply(vec![ended]);
+    assert_eq!(shells_watch.alerts.iter().map(|a| (a.kind, a.shell.clone())).collect::<Vec<_>>(), vec![(AlertKind::NeedsHelp, Some(("Wait a while".to_string(), "Background command \"Wait a while\" failed (exit code 1)".to_string())))], "A failed shell did not ring");
     watcher.select(Some("demo:1".into()));
     watcher.apply(vec![]);
     assert!(watcher.selected.is_none());
@@ -113,6 +139,9 @@ pub fn run() {
         assert_eq!(menu.options.iter().map(|o| o.text.as_str()).collect::<Vec<_>>(), vec!["Yes, single permission", "No (Tab to edit)"], "Kiro's approval options not read: {lines:?}");
         assert_eq!((menu.highlighted, menu.is_menu()), (Some(0), true));
     }
+    // Terminal titles that say nothing give way to the session's title.
+    assert!(["kiro-cli", "codex", "zsh", "~/Verbrawl", ""].iter().all(|t| crate::herdr::generic_title(t, if t.contains("codex") { "codex" } else { "kiro" })), "A bare harness or shell title was kept");
+    assert!(!crate::herdr::generic_title("Guion promocional herdr dungeon", "claude"), "A real title was replaced");
     let picker = crate::ansi::parse("❯ /model\n  Select model\n    1. Default (recommended)\n  ❯ 2. Opus 5.5 ✔\n    3. Fable 5.1\n  Enter to set as default");
     assert_eq!((crate::ui::prompt_line(&picker), crate::ui::picker_open(&picker)), (None, true), "A picker's highlight was taken for the prompt");
     // Claude Code's trust dialog: unnumbered options under a menu footer.
@@ -128,6 +157,52 @@ pub fn run() {
     assert_eq!((crate::ui::prompt_line(&quoted), crate::ui::picker_open(&quoted)), (Some(4), false), "Text quoting a picker's footer was taken for a picker");
     let kiro = crate::ansi::parse(&format!("› /model\nSelect model:   type to search\n\n❯ auto                 1.00x credits    Models chosen by task [active]\n  claude-opus-5.5      2.00x credits    Claude Opus 5.5\n(+13 more)\n{rule}\n Settings for selected model: auto      tab to switch panels\n{rule}\n esc to close · ↑↓ to navigate · ↵ to select · tab to switch panels"));
     assert_eq!((crate::ui::prompt_line(&kiro), crate::ui::picker_open(&kiro)), (None, true), "Kiro's /model picker was taken for a prompt");
+    // A new shell that asks something first eats the agent's command.
+    let omz = "Restored session: Sun Oct 11 18:22:00 -03 2026\n[oh-my-zsh] Would you like to update? [Y/n] kiro-cli\n\n➜  herdr-pixel-dungeon iro-cli\nzsh: correct 'iro-cli' to 'kiro-cli' [nyae]?";
+    assert!(shell_blocker(omz).is_some_and(|w| w.contains("omz update")), "oh-my-zsh's update prompt not recognised");
+    assert!(shell_blocker("[oh-my-zsh] Would you like to update? [Y/n] ").is_some(), "A waiting oh-my-zsh prompt not recognised");
+    assert!(shell_blocker("➜  x iro-cli\nzsh: correct 'iro-cli' to 'kiro-cli' [nyae]?").is_some_and(|w| w.contains("iro-cli")), "zsh's correction prompt not recognised");
+    assert_eq!(shell_blocker("Restored session: Sun Oct 11\n➜  herdr-pixel-dungeon "), None, "A plain shell prompt taken for a question");
+    // Codex (0.162) marks its highlight, its prompt and past messages with ›.
+    let approval: Vec<String> = ["› Run the shell command: touch b.txt", "• Running touch b.txt", "  Would you like to run the following command?", "  $ touch b.txt", "› 1. Yes, proceed (y)", "  2. Yes, and don't ask again for commands that start with `touch b.txt;",  "     touch c.txt` (p)", "  3. No, and tell Codex what to do differently (esc)", "  Press enter to confirm or esc to cancel"].iter().map(|l| l.to_string()).collect();
+    let menu = MenuOptions::new(&approval);
+    assert_eq!((menu.options.len(), menu.highlighted, menu.options[0].text.as_str()), (3, Some(0), "Yes, proceed (y)"), "Codex's approval not read as a menu: {menu:?}");
+    assert_eq!(menu.keys_choosing(2), vec!["down", "down", "enter"], "Codex's approval would be answered with text, not arrows");
+    assert_eq!(menu.tell_instead(), Some(2), "Words typed at Codex's approval would hit its y/p shortcuts");
+    assert_eq!(menu.options[1].text, "Yes, and don't ask again for commands that start with `touch b.txt; touch c.txt` (p)", "A wrapped option lost its second line");
+    let wrapped: Vec<String> = ["  Update Model Permissions", "› 1. Ask for approval (current)  Read and edit workspace files, with approval required for internet access", "                                 or edits outside the workspace", "  2. Read Only                   Read workspace files", "  enter select · esc back"].iter().map(|l| l.to_string()).collect();
+    let menu = MenuOptions::new(&wrapped);
+    assert!(menu.options.len() == 2 && menu.options[0].text.ends_with("access or edits outside the workspace"), "A wrapped option lost its second line: {menu:?}");
+    assert!(MenuOptions::new(&["› fix the tests".to_string(), "› and the docs".to_string()]).options.is_empty(), "Codex's past messages taken for a menu");
+    assert!(is_menu_footer("enter select · esc back") && is_menu_footer("Press enter to confirm or esc to cancel"), "Codex's menu footers not recognised");
+    let picker = crate::ansi::parse("  Select Model and Effort\n  1. GPT-6.1-Sol            Latest model.\n› 2. GPT-6-Astra (current)  Frontier model.\n  enter select · esc back");
+    assert_eq!((crate::ui::prompt_line(&picker), crate::ui::picker_open(&picker), crate::ui::composer_text(&picker)), (None, true, None), "Codex's /model picker taken for typed text");
+    let idle = "› Run the shell command: touch a.txt\n• Done. Created a.txt.\n\n› Ask Codex to do anything\n\n  GPT-6-Astra medium · ~/proj\n  ← for agents · ? for shortcuts";
+    assert_eq!(meaningful_lines(idle), vec!["› Run the shell command: touch a.txt", "• Done. Created a.txt."], "Codex's prompt, model line or past message mishandled");
+    let leftover = crate::ansi::parse("• Unrecognized command '/approvals'.\n› /approvals\n  GPT-6-Astra medium · ~/proj");
+    let empty = crate::ansi::parse("› \x1b[2mAsk Codex to do anything\x1b[0m\n  GPT-6-Astra medium · ~/proj");
+    assert_eq!((crate::ui::composer_text(&leftover), crate::ui::composer_text(&empty)), (Some("/approvals".to_string()), None), "Codex's leftover input not seen, or its placeholder taken for it");
+    // Kiro (2.29) paints its placeholder grey, not dim, after the cursor.
+    let kiro_empty = crate::ansi::parse("kiro_default · auto · ◔ 2%\n› \x1b[0m\x1b[7m \x1b[0m\x1b[38;2;158;158;158mask a question or describe a task ↵\x1b[0m");
+    let kiro_typed = crate::ansi::parse("› hello there\x1b[0m\x1b[7m \x1b[0m");
+    assert_eq!((crate::ui::composer_text(&kiro_empty), crate::ui::composer_text(&kiro_typed)), (None, Some("hello there".to_string())), "Kiro's placeholder taken for typing");
+    let kiro_approval: Vec<String> = ["↓ Shell touch kiro_a.txt", " shell requires approval", " ❯ Yes, single permission", "   Trust, always allow in this session", "   No (Tab to edit)", " esc to close · ↑↓ to navigate · ↵ to select · Tab to edit"].map(String::from).to_vec();
+    let menu = MenuOptions::new(&kiro_approval);
+    assert_eq!((menu.options.len(), menu.highlighted, menu.affirmative()), (3, Some(0), None), "Kiro's approval not read as a menu");
+    // Claude Code (2.1.296): a description under each option is not part of it.
+    let ask: Vec<String> = [" ☐ Fix scope", "Should the fix for calc.py be a patch or a full rewrite?", "❯ 1. Patch", "     Make minimal, targeted changes to the existing calc.py and keep its current structure.", "  2. Full rewrite", "     Replace calc.py with a new implementation designed from scratch.", "  3. Type something.", "  4. Chat about this", "Enter to select · ↑/↓ to navigate · Esc to cancel"].map(String::from).to_vec();
+    let menu = MenuOptions::new(&ask);
+    assert_eq!(menu.options.iter().map(|o| o.text.as_str()).collect::<Vec<_>>(), vec!["Patch", "Full rewrite", "Type something.", "Chat about this"], "Claude's option descriptions joined to the options");
+    // A long list keeps its first option, and its scroll arrow is no part of a number.
+    let models: Vec<String> = ["  Select model", "    1.  Default (recommended)  Opus 5.5 · Best for everyday, complex tasks", "  ❯ 2.  Opus 5.5 ✔             For complex work and everyday tasks", "    3.  Fable 5.1              For your toughest challenges", "    4.  Sonnet 5.5             Most efficient for simpler tasks", "    5.  Haiku 5.5              Fastest for quick answers", "    6.  Haiku 4.5              Fastest for quick answers", "    7.  Sonnet 5               Efficient for routine tasks", "    8.  Opus 5                 Best for everyday, complex tasks", "    9.  Fable 5                Most capable for your hardest and longest-running tasks", "  ↓ 10. Opus 4.8               Best for everyday, complex tasks", "     … +3 models", "  ◐ Medium effort (default) ←/→ to adjust", "  Enter to set as default · s to use this session only · Esc to cancel"].map(String::from).to_vec();
+    let head = crate::herdr::menu_head(&models, models.len() - 12);
+    let menu = MenuOptions::new(&models[head..]);
+    assert_eq!((menu.options.len(), menu.highlighted, menu.options[9].text.split_whitespace().take(2).collect::<Vec<_>>().join(" ")), (10, Some(1), "Opus 4.8".to_string()), "A long menu lost its first or last option");
+    // Folder trust starts on "No, exit": accepting picks the yes.
+    let trust: Vec<String> = [" Claude Code'll be able to read, edit, and execute files here.", " ❯ No, exit", "   Yes, I trust this folder", " Enter to confirm · Esc to cancel"].map(String::from).to_vec();
+    assert_eq!(MenuOptions::new(&trust).affirmative(), Some(1), "Accepting Claude's folder trust would exit it");
+    let codex = crate::commands::slash_commands("codex", "/nonexistent", std::path::Path::new("/nonexistent"));
+    assert!(codex.iter().any(|c| c.name == "permissions") && codex.iter().any(|c| c.name == "exit") && !codex.iter().any(|c| c.name == "approvals" || c.name == "quit"), "Codex offered commands it no longer knows");
     let typed = crate::ansi::parse(&format!("● done\n{rule}\n❯ fix the tests\n{rule}\n  ? for shortcuts"));
     assert_eq!((crate::ui::prompt_line(&typed), crate::ui::picker_open(&typed)), (Some(2), false), "A prompt with typed text was taken for a picker");
     let empty = crate::ansi::parse(&format!("● Interrupted\n{rule}\n❯ \x1b[2mTry \"fix the tests\"\x1b[0m\n{rule}"));
@@ -239,6 +314,9 @@ pub fn run() {
     assert!(listed == vec![HerdrSession { name: "default".into(), running: true }, HerdrSession { name: "work".into(), running: false }] && decode_sessions(b"nope").is_empty());
     let named = agent_name("codex", "Mi Proyecto_2");
     assert!(named.starts_with("codex-mi-proyecto-2-") && named.len() == 24, "Agent name: {named}");
+    let long = agent_name("claude", "saludtech-android-app");
+    let accented = agent_name("opencode", "Diseño Ñandú");
+    assert!(long.len() <= 32 && long.starts_with("claude-saludtech-android-") && accented.starts_with("opencode-dise-o-and-"), "Agent names: {long} {accented}");
     assert!(root_pane(br#"{"result":{"root_pane":{"pane_id":"w3:p1"},"tab":{}}}"#).as_deref() == Some("w3:p1") && root_pane(b"{}").is_none());
     let screen = crate::ansi::parse("\x1b[0m\x1b[1m\x1b[38;5;2mok\x1b[0m plain\r\n\x1b[38;2;215;119;87m●\x1b[0m\x1b[48;2;1;2;3m x\x1b[0m\n\n");
     assert!(screen.len() == 2 && crate::ansi::plain(&screen) == ["ok plain", "● x"], "ANSI lines: {:?}", crate::ansi::plain(&screen));
@@ -248,7 +326,8 @@ pub fn run() {
     assert!(commands.iter().any(|c| c.name == "help") && commands.iter().any(|c| c.name == "compact"));
     let names = |draft: &str| crate::commands::matching(&commands, draft).iter().map(|c| c.name.clone()).collect::<Vec<_>>();
     assert!(names("/co").contains(&"compact".to_string()) && names("/co").iter().all(|n| n.starts_with("co")) && names("/compact x").is_empty() && names("hi").is_empty());
-    assert!(crate::commands::slash_commands("kiro", "/nonexistent", std::path::Path::new("/nonexistent")).iter().any(|c| c.name == "quit"));
+    let kiro = crate::commands::slash_commands("kiro", "/nonexistent", std::path::Path::new("/nonexistent"));
+    assert!(kiro.iter().any(|c| c.name == "exit") && kiro.iter().any(|c| c.name == "chat") && !kiro.iter().any(|c| c.name == "save" || c.name == "tangent"), "Kiro offered commands it no longer knows");
     let created = br#"{"result":{"root_pane":{"pane_id":"w3:p1"},"workspace":{"workspace_id":"w3"}}}"#;
     assert!(created_workspace(created).as_deref() == Some("w3") && created_workspace(b"{}").is_none());
     let codex = [
@@ -312,7 +391,7 @@ pub fn run() {
     let _ = std::fs::remove_dir_all(&daemon);
     assert!(natural_cmp("w2:p1", "w10:p1") == std::cmp::Ordering::Less && natural_cmp("a", "A") == std::cmp::Ordering::Equal);
     assert_eq!(l10n::trf("Tú → {}: {}", &[&"a", &"b"]), l10n::text("Tú → {}: {}", &l10n::CURRENT).replacen("{}", "a", 1).replacen("{}", "b", 1));
-    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, {} bundled sprites", ROOM_FILES.len() + 1);
+    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, background shells, {} bundled sprites", ROOM_FILES.len() + 1);
 }
 
 #[cfg(test)]

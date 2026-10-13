@@ -345,7 +345,10 @@ pub struct Room {
     name: String,
     color: Color32,
     activity: String,
-    place: String,
+    repo: String,
+    branch: String,
+    /// Shells the agent left running in the background: a cauldron each.
+    shells: Vec<crate::shells::Shell>,
     action: Option<String>,
     subagents: usize,
     subagent_actions: Vec<String>,
@@ -389,7 +392,9 @@ impl Room {
             name: agent.name.clone(),
             color: agent_color(&agent.status),
             activity: String::new(),
-            place: String::new(),
+            repo: String::new(),
+            branch: String::new(),
+            shells: vec![],
             action: None,
             subagents: usize::MAX,
             subagent_actions: vec![],
@@ -450,7 +455,9 @@ impl Room {
         self.name = agent.name.clone();
         self.color = agent_color(&agent.status);
         self.activity = agent.activity.clone();
-        self.place = agent.folder() + &agent.branch.as_ref().map(|b| format!(" · {b}")).unwrap_or_default();
+        self.repo = agent.folder();
+        self.branch = agent.branch.clone().unwrap_or_default();
+        self.shells = agent.shells.clone();
         self.harness = harness_for(&agent.name);
         self.limit_resets = agent.limit_resets;
         if agent.action != self.action {
@@ -1148,6 +1155,7 @@ impl Room {
         }
         // Particles.
         for p in &self.particles { self.draw_particle(&clipped, p, origin, assets); }
+        self.draw_shells(painter, f, assets);
         // Rounded corners: cover what the square clip let through.
         cover_corners(painter, f, 6.0, BACKGROUND);
         cover_corners(painter, cell, 6.0, BACKGROUND);
@@ -1163,18 +1171,70 @@ impl Room {
             Stroke::new(1.0_f32, with_alpha(style.color, 0.85))
         };
         painter.rect_stroke(cell, CornerRadius::same(6), stroke, egui::StrokeKind::Inside);
-        // Labels: name (top-left), room title (top-right), footer lines.
-        let title = tr(style.title) + &if self.subagents > 0 && self.subagents != usize::MAX { format!(" +{}", self.subagents) } else { String::new() };
-        let title_color = blend(style.color, Color32::WHITE, 0.45);
-        let title_rect = label(painter, pos2(f.max.x - 12.0, f.min.y + 14.0), Align2::RIGHT_CENTER, &title, 13.0, title_color, true);
-        let name_chars = (((f.width() - title_rect.width() - 40.0) / 10.2) as usize).max(4);
-        label(painter, pos2(f.min.x + 12.0, f.min.y + 14.0), Align2::LEFT_CENTER, &Room::clip(&self.name, name_chars), 17.0, self.color, true);
+        // Labels: the repo (top-left), then the footer: what the agent is
+        // doing, its branch (bottom-left) and the room's state (bottom-right).
+        let repo_chars = (((f.width() - 32.0) / 7.8) as usize).max(4);
+        label(painter, pos2(f.min.x + 12.0, f.min.y + 14.0), Align2::LEFT_CENTER, &Room::clip(&self.repo, repo_chars), 13.0, self.color, true);
         let usable_chars = ((f.width() - 28.0) / 6.65) as usize;
         painter.text(pos2(f.min.x + 10.0, f.max.y + 11.0), Align2::LEFT_CENTER, Room::clip(&self.activity, usable_chars), FontId::monospace(11.0), Color32::WHITE);
-        painter.text(pos2(f.max.x - 10.0, f.max.y + FOOTER - 10.0), Align2::RIGHT_CENTER, Room::clip(&self.place, usable_chars), FontId::monospace(11.0), Color32::from_gray(209));
+        // The new state shows at once, while the hero is still walking
+        // over to its new room.
+        let shown = self.pending_style.unwrap_or(style);
+        let title = tr(shown.title) + &if self.subagents > 0 && self.subagents != usize::MAX { format!(" +{}", self.subagents) } else { String::new() };
+        let title_color = blend(shown.color, Color32::WHITE, 0.45);
+        let at = pos2(f.max.x - 10.0, f.max.y + FOOTER - 10.0);
+        painter.text(at, Align2::RIGHT_CENTER, &title, FontId::monospace(11.0), title_color);
+        let title_rect = painter.text(pos2(at.x + 0.6, at.y), Align2::RIGHT_CENTER, &title, FontId::monospace(11.0), title_color);
+        let branch_chars = (((title_rect.min.x - f.min.x - 22.0) / 6.65) as usize).max(4);
+        painter.text(pos2(f.min.x + 10.0, at.y), Align2::LEFT_CENTER, Room::clip(&self.branch, branch_chars), FontId::monospace(11.0), Color32::from_gray(209));
         if selected {
             painter.rect_stroke(cell.expand(2.0), CornerRadius::same(7), Stroke::new(2.0_f32, Color32::from_rgb(217, 242, 166)), egui::StrokeKind::Outside);
         }
+    }
+
+    /// Where the cauldrons of the shells it left running stand: the room's
+    /// bottom-left corner, one each (three at most, then a count).
+    fn shells_rect(&self, f: Rect) -> Option<Rect> {
+        if self.shells.is_empty() { return None; }
+        let shown = self.shells.len().min(3) as f32;
+        Some(Rect::from_min_size(pos2(f.min.x + 10.0, f.max.y - 52.0), vec2(shown * 34.0 + if self.shells.len() > 3 { 24.0 } else { 0.0 }, 38.0)))
+    }
+
+    /// The cauldrons, bubbling over a flickering fire.
+    fn draw_shells(&self, painter: &Painter, f: Rect, assets: &Assets) {
+        let Some(area) = self.shells_rect(f) else { return };
+        for i in 0..self.shells.len().min(3) {
+            let at = pos2(area.min.x + 17.0 + i as f32 * 34.0, area.max.y - 16.0);
+            let phase = self.clock * 6.0 + i as f32 * 1.7;
+            // The fire under it.
+            for (dx, h) in [(-6.0, 4.0), (0.0, 6.0), (6.0, 4.0)] {
+                let flick = h + ((phase + dx).sin() * 1.5).round();
+                painter.rect_filled(Rect::from_min_size(pos2(at.x + dx - 2.0, at.y + 15.0 - flick), vec2(4.0, flick)), CornerRadius::ZERO, Color32::from_rgb(255, 140, 40));
+                painter.rect_filled(Rect::from_min_size(pos2(at.x + dx - 1.0, at.y + 15.0 - flick * 0.5), vec2(2.0, flick * 0.5)), CornerRadius::ZERO, Color32::from_rgb(255, 220, 90));
+            }
+            painter.circle_filled(pos2(at.x, at.y + 2.0), 18.0, with_alpha(Color32::from_rgb(120, 230, 90), 0.12));
+            draw_sprite(painter, assets.prop("cauldron"), at, vec2(32.0, 24.0), false, 0.0, Color32::WHITE);
+            // Bubbles rising off the brew.
+            for b in 0..3 {
+                let t = (self.clock * 0.9 + b as f32 / 3.0 + i as f32 * 0.37) % 1.0;
+                let x = at.x - 7.0 + b as f32 * 7.0 + (t * 9.0 + b as f32).sin() * 2.0;
+                let y = at.y - 12.0 - t * 16.0;
+                painter.rect_filled(Rect::from_center_size(pos2(x, y), vec2(3.0, 3.0)), CornerRadius::ZERO, with_alpha(Color32::from_rgb(150, 240, 110), 1.0 - t));
+            }
+        }
+        if self.shells.len() > 3 {
+            label(painter, pos2(area.max.x - 2.0, area.center().y), Align2::RIGHT_CENTER, &format!("×{}", self.shells.len()), 11.0, Color32::from_rgb(150, 240, 110), true);
+        }
+    }
+
+    /// What the cauldrons stand for, when the pointer is on them: where
+    /// they stand, and per shell its description · running time and last line.
+    pub fn shells_tip(&self, origin: Pos2, pointer: Pos2) -> Option<(Rect, Vec<(String, Option<String>)>)> {
+        let f = Room::frame().translate(origin.to_vec2());
+        let area = self.shells_rect(f)?;
+        if !area.contains(pointer) { return None; }
+        let now = crate::herdr::unix_now();
+        Some((area, self.shells.iter().map(|s| (format!("{} · {}", s.label, countdown(now - s.started)), s.last_line.clone())).collect()))
     }
 
     /// The tag at the cot's foot: how long until the hero has recovered
@@ -1445,6 +1505,7 @@ impl Scene {
                     let hit = ui.interact(rect, ui.id().with(id), egui::Sense::click());
                     room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
                     if hit.clicked() { response.clicked = Some(id.clone()); }
+                    if let Some((area, rows)) = hit.hover_pos().and_then(|p| room.shells_tip(rect.min, p)) { crate::ui::shells_note(ui.ctx(), area, &rows); }
                     hit.context_menu(|ui| {
                         if ui.button(tr("Abrir una terminal en esta carpeta")).clicked() {
                             response.terminal = Some(id.clone());

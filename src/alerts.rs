@@ -18,6 +18,9 @@ pub enum AlertKind {
 pub struct AgentAlert {
     pub kind: AlertKind,
     pub agent: Agent,
+    /// For a background shell that ended: what it was and how it ended. It
+    /// rings as finishing, or as needing help when it failed.
+    pub shell: Option<(String, String)>,
 }
 
 /// The agents whose change deserves an alert, those needing help first.
@@ -27,9 +30,9 @@ pub fn alerts_for(previous: &HashMap<String, Agent>, next: &[Agent]) -> Vec<Agen
         let Some(old) = previous.get(&agent.id) else { continue };
         if old.status == agent.status { continue; }
         if agent.status == "blocked" {
-            alerts.push(AgentAlert { kind: AlertKind::NeedsHelp, agent: agent.clone() });
+            alerts.push(AgentAlert { kind: AlertKind::NeedsHelp, agent: agent.clone(), shell: None });
         } else if agent.status == "done" || (old.status == "working" && agent.status == "idle") {
-            alerts.push(AgentAlert { kind: AlertKind::Finished, agent: agent.clone() });
+            alerts.push(AgentAlert { kind: AlertKind::Finished, agent: agent.clone(), shell: None });
         }
     }
     let (help, done): (Vec<_>, Vec<_>) = alerts.into_iter().partition(|a| a.kind == AlertKind::NeedsHelp);
@@ -166,8 +169,16 @@ impl Notifier {
     pub fn post(&self, prefs: &Prefs, alerts: &[AgentAlert]) {
         for alert in alerts.iter().filter(|a| wants_notification(prefs, a.kind)) {
             let agent = alert.agent.clone();
-            let title = if alert.kind == AlertKind::NeedsHelp { trf("{} necesita atención", &[&agent.name]) } else { trf("{} terminó", &[&agent.name]) };
-            let body = format!("{}\n{}", agent.project, agent.question.clone().unwrap_or_else(|| agent.activity.clone()));
+            let (title, body) = match &alert.shell {
+                Some((label, how)) => (
+                    if alert.kind == AlertKind::NeedsHelp { trf("{}: un shell en segundo plano falló", &[&agent.project]) } else { trf("{}: un shell en segundo plano terminó", &[&agent.project]) },
+                    format!("{label}\n{how}"),
+                ),
+                None => (
+                    if alert.kind == AlertKind::NeedsHelp { trf("{} necesita atención", &[&agent.name]) } else { trf("{} terminó", &[&agent.name]) },
+                    format!("{}\n{}", agent.project, agent.question.clone().unwrap_or_else(|| agent.activity.clone())),
+                ),
+            };
             let open_tx = self.open_tx.clone();
             std::thread::spawn(move || post_one(&title, &body, &agent.id, open_tx));
         }

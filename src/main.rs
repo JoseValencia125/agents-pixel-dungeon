@@ -14,7 +14,9 @@ mod monitor;
 mod prefs;
 mod scene;
 mod selftest;
+mod shells;
 mod standalone;
+mod terminal;
 mod tray;
 mod ui;
 mod usage;
@@ -58,7 +60,7 @@ fn native_fullscreen(on: bool) -> bool {
     let Some(mtm) = MainThreadMarker::new() else { return false };
     let app = NSApplication::sharedApplication(mtm);
     let windows = app.windows();
-    let Some(window) = windows.iter().find(|w| w.styleMask().contains(NSWindowStyleMask::Resizable)) else { return false };
+    let Some(window) = windows.iter().find(|w| w.title().to_string() == "Herdr Pixel Dungeon" && w.styleMask().contains(NSWindowStyleMask::Resizable)) else { return false };
     let is_full = window.styleMask().contains(NSWindowStyleMask::FullScreen);
     if on {
         unsafe { window.setCollectionBehavior(window.collectionBehavior() | NSWindowCollectionBehavior::FullScreenPrimary) };
@@ -119,11 +121,14 @@ fn main() {
             return;
         }
         match herdr::fetch_snapshot(&session) {
-            Ok(agents) => {
+            Ok(mut agents) => {
+                shells::add_shells(&mut agents, &session);
                 println!("OK: {} agentes", agents.len());
                 for a in agents {
                     let left = a.limit_left(herdr::unix_now()).map(|s| format!(" | resets in {}", scene::countdown(s))).unwrap_or_default();
-                    println!("{} | {} | {} | {}{left}", a.id, a.name, a.status, a.project);
+                    println!("{} | {} | {} | {} | {}{left}", a.id, a.name, a.status, a.project, a.activity);
+                    for s in &a.shells { println!("    ⚗ {} | {} | {}s | {} | {}", s.pid, s.label, herdr::unix_now() - s.started, s.task.clone().unwrap_or_default(), s.last_line.clone().unwrap_or_default()); }
+                    for r in &a.shell_results { println!("    ✓ {} | {} | {}", r.task, r.ok, r.summary); }
                 }
             }
             Err(error) => { eprintln!("{error}"); std::process::exit(1); }
@@ -206,6 +211,7 @@ struct App {
     usages: Vec<usage::HarnessUsage>,
     usage_rx: Option<std::sync::mpsc::Receiver<Vec<usage::HarnessUsage>>>,
     next_usage: f64,
+    terminals: terminal::Terminals,
 }
 
 /// The console's narrowest width in full screen; the rooms get whole
@@ -234,6 +240,7 @@ impl App {
         cc.egui_ctx.set_visuals(visuals);
         let mut app = App {
             monitor,
+            terminals: terminal::Terminals::default(),
             prefs,
             sounds: Sounds::new(),
             notifier: Notifier::new(),
@@ -626,10 +633,10 @@ impl App {
 
     /// A terminal to type a command in: in that agent's folder, or in the
     /// open chat's, else where agents were last summoned, else home.
-    fn open_terminal_for(&self, id: Option<&str>) {
+    fn open_terminal_for(&mut self, ctx: &egui::Context, id: Option<&str>) {
         let id = id.map(str::to_string).or_else(|| self.chat.as_ref().map(|c| c.agent_id.clone()));
         let cwd = id.and_then(|id| self.monitor.agents.iter().find(|a| a.id == id).map(|a| a.cwd.clone())).unwrap_or_else(|| self.prefs.create_folder.clone());
-        crate::herdr::open_terminal(&cwd);
+        self.terminals.open(ctx, &cwd);
     }
 
     /// Ask before typing /exit into an agent's chat.
@@ -803,7 +810,7 @@ impl eframe::App for App {
                 self.monitor.select(next);
             }
             if let Some(id) = response.finish { self.confirm_finish(&id); }
-            if let Some(id) = response.terminal { self.open_terminal_for(Some(&id)); }
+            if let Some(id) = response.terminal { self.open_terminal_for(ctx, Some(&id)); }
             if response.summon { let on = !self.monitor.composing; self.monitor.set_composing(on); }
             // Full screen summons in the spare room itself.
             if let (Some((rect, view)), true) = (response.summon_rect, fullscreen && self.monitor.composing) {
@@ -858,6 +865,7 @@ impl eframe::App for App {
                     } else if let Some(chat) = &mut self.chat {
                         if let Some(agent) = self.monitor.agents.iter().find(|a| a.id == chat.agent_id).cloned() {
                             let action = ui::chat_panel(ui, &self.monitor, &agent, chat, now, fullscreen);
+                            if action.terminal { self.terminals.open(ctx, &agent.cwd); }
                             if action.close { self.monitor.select(None); }
                             if action.console_step != 0 { self.step_console_scale(action.console_step); }
                         }
@@ -867,6 +875,8 @@ impl eframe::App for App {
                 });
             }
         });
+
+        self.terminals.show(ctx);
 
         // Overlays.
         let standalone = self.monitor.standalone() && matches!(self.monitor.herdr, HerdrState::Missing | HerdrState::Down);

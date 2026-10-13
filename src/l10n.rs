@@ -12,6 +12,11 @@ pub const LANGUAGES: [&str; 5] = ["es", "en", "fr", "it", "pt"];
 pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock::new(|| {
     let rows: &[(&str, [&str; 4])] = &[
         // Room titles
+        ("Ocultar terminal", ["Hide terminal", "Masquer le terminal", "Nascondi terminale", "Ocultar terminal"]),
+        ("Terminal externa", ["External terminal", "Terminal externe", "Terminale esterno", "Terminal externo"]),
+        ("Nueva sesión", ["New session", "Nouvelle session", "Nuova sessione", "Nova sessão"]),
+        ("Sesión terminada", ["Session ended", "Session terminée", "Sessione terminata", "Sessão encerrada"]),
+        ("Cerrar la ventana conserva la sesión. Usa exit para terminarla.", ["Closing the window keeps the session. Use exit to end it.", "Fermer la fenêtre conserve la session. Utilisez exit pour la terminer.", "Chiudere la finestra conserva la sessione. Usa exit per terminarla.", "Fechar a janela mantém a sessão. Use exit para encerrá-la."]),
         ("TRABAJANDO", ["WORKING", "AU TRAVAIL", "AL LAVORO", "TRABALHANDO"]),
         ("ATENCIÓN", ["ATTENTION", "ATTENTION", "ATTENZIONE", "ATENÇÃO"]),
         ("EN ESPERA", ["WAITING", "EN ATTENTE", "IN ATTESA", "EM ESPERA"]),
@@ -117,11 +122,25 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("Probar sonidos", ["Play the sounds", "Écouter les sons", "Prova i suoni", "Testar sons"]),
         ("Notificaciones", ["Notifications", "Notifications", "Notifiche", "Notificações"]),
         ("Notificaciones activadas", ["Notifications on", "Notifications activées", "Notifiche attive", "Notificações ativadas"]),
+        // Background shells
+        ("Descargar y contar 3000 artículos", ["Download and count 3000 articles", "Télécharger et compter 3000 articles", "Scarica e conta 3000 articoli", "Baixar e contar 3000 artigos"]),
+        ("Ver su salida", ["Show its output", "Voir sa sortie", "Mostra il suo output", "Ver a sua saída"]),
+        ("no", ["no", "non", "no", "não"]),
+        ("sí, detener", ["yes, stop", "oui, arrêter", "sì, ferma", "sim, parar"]),
+        ("Detener este shell", ["Stop this shell", "Arrêter ce shell", "Ferma questa shell", "Parar este shell"]),
+        ("Sin salida todavía.", ["No output yet.", "Pas encore de sortie.", "Ancora nessun output.", "Ainda sem saída."]),
+        ("Terminó.", ["Finished.", "Terminé.", "Finito.", "Terminou."]),
+        ("{} · shell {}: {}", ["{} · shell {}: {}", "{} · shell {} : {}", "{} · shell {}: {}", "{} · shell {}: {}"]),
+        ("{} · shell {}: detenido", ["{} · shell {}: stopped", "{} · shell {} : arrêté", "{} · shell {}: fermata", "{} · shell {}: parado"]),
+        ("{}: un shell en segundo plano falló", ["{}: a background shell failed", "{} : un shell en arrière-plan a échoué", "{}: una shell in background è fallita", "{}: um shell em segundo plano falhou"]),
+        ("{}: un shell en segundo plano terminó", ["{}: a background shell finished", "{} : un shell en arrière-plan a terminé", "{}: una shell in background è terminata", "{}: um shell em segundo plano terminou"]),
         // Activity log
         ("Registro de actividad", ["Activity log", "Journal d’activité", "Registro attività", "Registro de atividade"]),
         ("Mostrar en Finder: {}", ["Show in Finder: {}", "Afficher dans le Finder : {}", "Mostra nel Finder: {}", "Mostrar no Finder: {}"]),
         ("Abrir una terminal en esta carpeta", ["Open a terminal in this folder", "Ouvrir un terminal dans ce dossier", "Apri un terminale in questa cartella", "Abrir um terminal nesta pasta"]),
         ("Registro de la guild", ["Guild log", "Journal de la guilde", "Registro della gilda", "Registro da guilda"]),
+        ("Aceptar lo que pide el agente: su opción marcada, o el «Sí» si la marcada es un «No»", ["Accept what the agent asks: its highlighted option, or the “Yes” when that one is a “No”", "Accepter ce que demande l’agent : son option en surbrillance, ou le « Oui » si celle-ci est un « Non »", "Accetta ciò che chiede l’agente: l’opzione evidenziata, o il «Sì» se quella è un «No»", "Aceitar o que o agente pede: a opção destacada, ou o «Sim» se ela for um «Não»"]),
+        ("Cocinando en background", ["Brewing in the background", "Mijote en arrière-plan", "In cottura in background", "Cozinhando em segundo plano"]),
         ("Aún no pasa nada.", ["Nothing has happened yet.", "Rien ne s’est encore passé.", "Non è ancora successo nulla.", "Nada aconteceu ainda."]),
         // Connection
         ("Esperando a Herdr…", ["Waiting for Herdr…", "En attente de Herdr…", "In attesa di Herdr…", "Aguardando o Herdr…"]),
@@ -149,6 +168,9 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("La carpeta no existe.", ["The folder does not exist.", "Le dossier n’existe pas.", "La cartella non esiste.", "A pasta não existe."]),
         ("Herdr no devolvió el panel nuevo.", ["Herdr did not return the new pane.", "Herdr n’a pas renvoyé le nouveau panneau.", "Herdr non ha restituito il nuovo pannello.", "O Herdr não devolveu o novo painel."]),
         ("{} no arrancó. Revisa que esté instalado.", ["{} did not start. Check that it is installed.", "{} n’a pas démarré. Vérifie qu’il est installé.", "{} non è partito. Controlla che sia installato.", "{} não iniciou. Verifique se está instalado."]),
+        ("{} no arrancó. La terminal nueva quedó en: «{}»", ["{} did not start. The new terminal was left at: “{}”", "{} n’a pas démarré. Le nouveau terminal est resté sur : « {} »", "{} non è partito. Il nuovo terminale è rimasto su: «{}»", "{} não iniciou. O novo terminal ficou em: «{}»"]),
+        ("oh-my-zsh pregunta si actualizarse y se come el comando. Corre omz update en una terminal (o pon zstyle ':omz:update' mode auto en ~/.zshrc) y vuelve a invocar.", ["oh-my-zsh asks whether to update and eats the command. Run omz update in a terminal (or put zstyle ':omz:update' mode auto in ~/.zshrc) and summon again.", "oh-my-zsh demande s’il doit se mettre à jour et avale la commande. Lance omz update dans un terminal (ou mets zstyle ':omz:update' mode auto dans ~/.zshrc) et invoque à nouveau.", "oh-my-zsh chiede se aggiornarsi e si mangia il comando. Esegui omz update in un terminale (o metti zstyle ':omz:update' mode auto in ~/.zshrc) e invoca di nuovo.", "O oh-my-zsh pergunta se deve se atualizar e engole o comando. Rode omz update num terminal (ou coloque zstyle ':omz:update' mode auto no ~/.zshrc) e invoque de novo."]),
+        ("zsh preguntó si corregir «{}»: algo en la shell nueva se comió parte del comando. Abre una terminal y revisa qué pregunta al arrancar.", ["zsh asked whether to correct “{}”: something in the new shell ate part of the command. Open a terminal and check what it asks at startup.", "zsh a proposé de corriger « {} » : quelque chose dans le nouveau shell a avalé une partie de la commande. Ouvre un terminal et regarde ce qu’il demande au démarrage.", "zsh ha chiesto se correggere «{}»: qualcosa nella nuova shell si è mangiato parte del comando. Apri un terminale e guarda cosa chiede all’avvio.", "O zsh perguntou se corrigia «{}»: algo no novo shell engoliu parte do comando. Abra um terminal e veja o que ele pergunta ao iniciar."]),
         ("El agente está esperando una respuesta; contéstale primero.", ["The agent is waiting for an answer; reply to it first.", "L’agent attend une réponse ; réponds-lui d’abord.", "L’agente aspetta una risposta; rispondigli prima.", "O agente está esperando uma resposta; responda primeiro."]),
         ("{} no quedó listo; su prompt no se envió.", ["{} never got ready; its prompt was not sent.", "{} n’a jamais été prêt ; son prompt n’a pas été envoyé.", "{} non è stato pronto; il prompt non è stato inviato.", "{} não ficou pronto; o prompt não foi enviado."]),
         ("{} no recibió su prompt.", ["{} did not get its prompt.", "{} n’a pas reçu son prompt.", "{} non ha ricevuto il prompt.", "{} não recebeu o prompt."]),

@@ -80,6 +80,9 @@ pub struct Monitor {
     pub sessions: Vec<HerdrSession>,
     /// Alerts since the last drain: sounds and notifications are the app's.
     pub alerts: Vec<AgentAlert>,
+    /// Background shells gone from the processes, waiting for the agent's
+    /// transcript to say how they ended (or a few seconds).
+    finishing: Vec<(String, crate::shells::Shell, Instant)>,
     /// Something the window chrome reacts to changed (agents, panels, filter).
     pub changed: bool,
     /// Herdr's availability; while not Up the rooms come from the standalone scan.
@@ -112,6 +115,9 @@ pub struct Monitor {
 
 /// Snapshots double as a reconciliation while the stream is live.
 const RECONCILE_EVERY: Duration = Duration::from_secs(60);
+/// The wait before an Enter that follows text or arrows, as Herdr's own
+/// `agent prompt` waits (300 ms).
+const SUBMIT_PAUSE: Duration = Duration::from_millis(300);
 
 impl Monitor {
     pub fn new(session: String, filter: StatusFilter) -> Monitor {
@@ -129,6 +135,7 @@ impl Monitor {
             session,
             sessions: vec![],
             alerts: vec![],
+            finishing: vec![],
             changed: false,
             herdr: HerdrState::Unknown,
             next_herdr_try: Instant::now(),
@@ -257,6 +264,7 @@ impl Monitor {
         if self.updated.is_some() {
             let alerts = alerts_for(&previous, &next);
             self.alerts.extend(alerts);
+            self.shells_ended(&previous, &next);
         }
         if self.updated.is_none() {
             self.log(trf("Guild conectada · {} agentes", &[&next.len()]), "info");
@@ -284,6 +292,35 @@ impl Monitor {
         if let Some(selected) = &self.selected {
             if !ids.contains(selected) { self.selected = None; self.changed = true; }
         }
+    }
+
+    /// Shells that left the processes since the last refresh wait here for
+    /// the transcript's word on how they ended, up to 20 s, then ring and
+    /// go to the log.
+    fn shells_ended(&mut self, previous: &HashMap<String, Agent>, next: &[Agent]) {
+        for old in previous.values() {
+            let now: Vec<u32> = next.iter().find(|a| a.id == old.id).map(|a| a.shells.iter().map(|s| s.pid).collect()).unwrap_or_default();
+            for shell in old.shells.iter().filter(|s| !now.contains(&s.pid)) {
+                self.finishing.push((old.id.clone(), shell.clone(), Instant::now()));
+            }
+        }
+        let mut waiting = vec![];
+        for (id, shell, gone) in std::mem::take(&mut self.finishing) {
+            let agent = next.iter().find(|a| a.id == id).or_else(|| previous.get(&id));
+            let Some(agent) = agent.cloned() else { continue };
+            let result = shell.task.as_ref().and_then(|t| agent.shell_results.iter().find(|r| &r.task == t)).cloned();
+            if result.is_none() && shell.task.is_some() && gone.elapsed() < Duration::from_secs(20) { waiting.push((id, shell, gone)); continue; }
+            if crate::shells::was_stopped(shell.pid) {
+                self.log(trf("{} · shell {}: detenido", &[&agent.project, &shell.label]), "left");
+                continue;
+            }
+            let ok = result.as_ref().map(|r| r.ok).unwrap_or(true);
+            let how = result.map(|r| r.summary).unwrap_or_else(|| tr("Terminó."));
+            self.log(trf("{} · shell {}: {}", &[&agent.project, &shell.label, &how]), if ok { "done" } else { "blocked" });
+            let kind = if ok { crate::alerts::AlertKind::Finished } else { crate::alerts::AlertKind::NeedsHelp };
+            self.alerts.push(AgentAlert { kind, agent, shell: Some((shell.label.clone(), how)) });
+        }
+        self.finishing = waiting;
     }
 
     /// Drain what the background threads sent and run the timers. Returns
@@ -443,6 +480,8 @@ impl Monitor {
                 // Standalone: the agents running in any terminal, from their processes and files.
                 Ok((None, enrich(crate::standalone::agents())))
             })();
+            // The shells agents left running, from the processes.
+            let result = result.map(|(base, mut shown)| { if !demo { crate::shells::add_shells(&mut shown, &session); } (base, shown) });
             let _ = sender.send(Inbox::Refresh { generation, result, herdr });
             wake();
         });
@@ -484,6 +523,12 @@ impl Monitor {
     /// Run herdr commands off the UI thread; the receiver gets None or an
     /// error message.
     fn act(&self, commands: Vec<Vec<String>>) -> Receiver<Option<String>> {
+        self.act_paced(commands, Duration::ZERO)
+    }
+
+    /// `act` with a pause between commands, so the agent's terminal has
+    /// redrawn before the next keys arrive.
+    fn act_paced(&self, commands: Vec<Vec<String>>, pause: Duration) -> Receiver<Option<String>> {
         let (tx, rx) = channel();
         let session = self.session.clone();
         let demo = self.demo;
@@ -491,7 +536,8 @@ impl Monitor {
         std::thread::spawn(move || {
             let mut failure = None;
             if !demo {
-                for args in &commands {
+                for (i, args) in commands.iter().enumerate() {
+                    if i > 0 && !pause.is_zero() { std::thread::sleep(pause); }
                     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                     if run_herdr(&refs, &session, Duration::from_secs(6)).is_err() {
                         failure = Some(tr("Herdr rechazó la acción. Revisa el panel del agente."));
@@ -511,19 +557,24 @@ impl Monitor {
 
     /// Type a message into the agent's chat and press Enter. Herdr refuses
     /// `agent prompt` while a permission prompt is open, so a blocked agent
-    /// gets the raw keystrokes instead (e.g. an answer to its question).
-    /// `erase` backspaces in the agent's input go first: a terminal that put
-    /// an interrupted message back there would otherwise get the edited one
-    /// after it.
+    /// gets the raw keystrokes instead (e.g. an answer to its question): on
+    /// one line, as each newline would press Enter, and Enter a moment after
+    /// the text, as `agent prompt` does.
+    /// `erase` backspaces in the agent's input go first, from its end: what
+    /// is left there (an interrupted message put back, an unknown command)
+    /// would otherwise be sent along with the message.
     pub fn send_erasing(&self, erase: usize, text: &str, agent: &Agent) -> Receiver<Option<String>> {
         let message = text.trim().to_string();
         let (tx, rx) = channel();
         if message.is_empty() { let _ = tx.send(None); return rx; }
         let inner = if agent.status == "blocked" {
-            self.act(vec![Monitor::args(&["pane", "send-text", &agent.id, &message]), Monitor::args(&["pane", "send-keys", &agent.id, "enter"])])
+            let line = message.split_whitespace().collect::<Vec<_>>().join(" ");
+            self.act_paced(vec![Monitor::args(&["pane", "send-text", &agent.id, &line]), Monitor::args(&["pane", "send-keys", &agent.id, "enter"])], SUBMIT_PAUSE)
         } else if erase > 0 {
-            let mut keys = Monitor::args(&["agent", "send-keys", &agent.id]);
-            keys.extend(std::iter::repeat_n("backspace".to_string(), erase));
+            // ctrl+e first: the cursor may not be at the end of what is there.
+            // Kiro drops backspaces that come together, so its line goes with ctrl+u.
+            let mut keys = Monitor::args(&["agent", "send-keys", &agent.id, "ctrl+e"]);
+            if harness_for(&agent.name) == "kiro" { keys.push("ctrl+u".into()); } else { keys.extend(std::iter::repeat_n("backspace".to_string(), erase)); }
             let erased = self.act(vec![keys]);
             let (inner_tx, inner_rx) = channel();
             let (session, demo, target, text) = (self.session.clone(), self.demo, agent.id.clone(), message.clone());
@@ -547,12 +598,43 @@ impl Monitor {
         rx
     }
 
+    /// Answer a menu in words: `keys` turn its request down first (typed
+    /// into the menu, letters would pick its shortcuts), then the text goes
+    /// as a prompt as soon as the agent takes one again.
+    pub fn decline_and_send(&self, keys: &[String], text: &str, agent: &Agent) -> Receiver<Option<String>> {
+        let declined = self.press(keys, agent);
+        let (tx, rx) = channel();
+        let (session, demo, target, message, project) = (self.session.clone(), self.demo, agent.id.clone(), text.to_string(), agent.project.clone());
+        let (log, wake) = (self.outbox.clone(), self.wake.clone());
+        std::thread::spawn(move || {
+            let mut failure = declined.recv().unwrap_or(None);
+            if failure.is_none() && !demo {
+                // Herdr says agent_blocked until the menu is gone.
+                for _ in 0..20 {
+                    match run_herdr(&["agent", "prompt", &target, &message], &session, Duration::from_secs(10)) {
+                        Err(e) if e.code() == Some("agent_blocked") => { std::thread::sleep(Duration::from_millis(250)); failure = Some(tr("El agente está esperando una respuesta; contéstale primero.")); }
+                        Err(e) if !matches!(e.code(), Some("agent_prompt_stalled" | "agent_prompt_unverifiable")) => { failure = Some(tr("Herdr rechazó la acción. Revisa el panel del agente.")); break; }
+                        _ => { failure = None; break; }
+                    }
+                }
+            }
+            if failure.is_none() { let _ = log.send(Inbox::Log(GuildEvent::new(trf("Tú → {}: {}", &[&project, &message]), "message"))); }
+            let _ = tx.send(failure);
+            wake();
+        });
+        rx
+    }
+
     /// Press keys in the agent's pane: "enter" accepts a permission prompt's
-    /// highlighted option, "esc" rejects it or interrupts the agent.
+    /// highlighted option, "esc" rejects it or interrupts the agent. Herdr
+    /// writes the keys of one call at once, so an Enter after arrows goes a
+    /// moment later: the menu has moved its highlight by then.
     pub fn press(&self, keys: &[String], agent: &Agent) -> Receiver<Option<String>> {
-        let mut args = Monitor::args(&["agent", "send-keys", &agent.id]);
-        args.extend(keys.iter().cloned());
-        self.act(vec![args])
+        let send = |keys: &[String]| { let mut args = Monitor::args(&["agent", "send-keys", &agent.id]); args.extend(keys.iter().cloned()); args };
+        match keys.split_last() {
+            Some((last, moves)) if last == "enter" && !moves.is_empty() => self.act_paced(vec![send(moves), send(&keys[keys.len() - 1..])], SUBMIT_PAUSE),
+            _ => self.act(vec![send(keys)]),
+        }
     }
 
     /// End the agent's session by typing /exit in its chat. A working or
@@ -581,7 +663,7 @@ impl Monitor {
     }
 
     /// The agent's terminal as it shows, colours included (ANSI): the
-    /// visible screen, or with `history` the last few hundred lines of its
+    /// visible screen, or with `history` the last thousand lines (Herdr's most) of its
     /// scrollback, to scroll through. Demo mode paints a plausible screen.
     pub fn screen(&self, agent: &Agent, history: bool) -> Receiver<String> {
         let (tx, rx) = channel();
@@ -593,7 +675,7 @@ impl Monitor {
             let text = if demo || agent.id.starts_with("pid:") {
                 format!("\x1b[38;2;215;119;87m●\x1b[0m \x1b[1m{}\x1b[0m\n  \x1b[2m⎿ Leyendo archivos del proyecto…\x1b[0m\n\n\x1b[38;2;136;136;136m────────────────────────────\x1b[0m\n❯ \x1b[2mTry \"fix the failing test\"\x1b[0m", agent.activity)
             } else {
-                let (source, lines) = if history { ("recent", "300") } else { ("visible", "80") };
+                let (source, lines) = if history { ("recent", "1000") } else { ("visible", "80") };
                 run_herdr(&["agent", "read", &agent.id, "--source", source, "--lines", lines, "--format", "ansi"], &session, Duration::from_secs(4))
                     .map(|d| String::from_utf8_lossy(&d).to_string())
                     .unwrap_or_default()
@@ -655,13 +737,21 @@ impl Monitor {
                         Ok(_) => {}
                         Err(e) if e.code() == Some("agent_not_ready") => waiting_pane = Some(pane.clone()),
                         Err(e) => {
+                            // What the shell shows says why, if anything does: read it before closing.
+                            let screen = pane_screen(&session, &pane);
                             // Nothing runs in the new workspace: close it instead of leaving an empty shell behind.
                             if let Some(workspace) = created_workspace(&created) {
                                 let _ = run_herdr(&["workspace", "close", &workspace], &session, Duration::from_secs(4));
                             }
+                            if let Some(blocker) = shell_blocker(&screen) { return Err(MonitorError::Message(blocker)); }
                             let why = e.text();
                             let base = trf("{} no arrancó. Revisa que esté instalado.", &[&kind]);
-                            return Err(MonitorError::Message(if why.is_empty() { base } else { format!("{base} ({why})") }));
+                            let last = screen.lines().rev().map(str::trim).find(|l| !l.is_empty()).map(|l| l.chars().take(60).collect::<String>());
+                            return Err(MonitorError::Message(match (e.code(), last) {
+                                (Some("timeout"), Some(last)) => trf("{} no arrancó. La terminal nueva quedó en: «{}»", &[&kind, &last]),
+                                _ if why.is_empty() => base,
+                                _ => format!("{base} ({why})"),
+                            }));
                         }
                     }
                     if waiting_pane.is_none() && !text.is_empty() {
@@ -773,6 +863,7 @@ impl Monitor {
             let rows = meaningful_lines(&text);
             let keep = if agent.status == "blocked" { 12 } else { lines };
             let start = rows.len().saturating_sub(keep);
+            let start = if agent.status == "blocked" { menu_head(&rows, start) } else { start };
             let _ = tx.send(rows[start..].to_vec());
             wake();
         });
@@ -780,13 +871,21 @@ impl Monitor {
     }
 }
 
+/// The visible text of a pane, or nothing if Herdr does not answer.
+fn pane_screen(session: &str, pane: &str) -> String {
+    run_herdr(&["pane", "read", pane, "--source", "visible", "--format", "text"], session, Duration::from_secs(3)).map(|out| String::from_utf8_lossy(&out).into_owned()).unwrap_or_default()
+}
+
 /// `herdr agent start` in a pane that was created a moment ago. The pane's
 /// shell takes a few hundred milliseconds to reach its prompt and Herdr
 /// answers `agent_pane_busy` ("not an available shell") until then, so that
-/// code is retried for up to ten seconds; any other answer is final.
+/// code is retried for up to ten seconds; any other answer is final. A shell
+/// that asks something first (see `shell_blocker`) is not typed into: the
+/// command would only answer its question.
 fn start_agent(session: &str, name: &str, kind: &str, pane: &str) -> Result<Vec<u8>, MonitorError> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
+        if let Some(blocker) = shell_blocker(&pane_screen(session, pane)) { return Err(MonitorError::Message(blocker)); }
         match run_herdr(&["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000"], session, Duration::from_secs(65)) {
             Err(e) if e.code() == Some("agent_pane_busy") && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(250)),
             other => return other,

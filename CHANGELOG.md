@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] - 2026-10-13
+
+### Added
+- An integrated terminal: `>_` (chat header, a room's right-click menu)
+  opens your login shell inside the app, in the agent's folder. Each folder
+  keeps its session while the app runs, even with its window closed; `exit`
+  ends it and **New session** starts another. **External terminal** in its
+  toolbar opens the system one, as before.
+- Shells an agent left running in the background bubble as cauldrons in its
+  room, even while it rests; hovering them unrolls a parchment under them,
+  "Brewing in the background", with what each does, for how long and its
+  last line. The chat lists them over the console: open one's output,
+  or stop it (after a yes). When one ends, it rings and notifies like a
+  finished agent, or like one needing help if it failed. Claude Code's shells
+  for now, found from the processes and its transcript.
+
+### Changed
+- A room's card shows its repo at the top; under what the agent is doing,
+  its branch on the left and its state on the right.
+- The state on a room's card changes as soon as the agent's does, while the
+  hero is still walking to its new room.
+- When an agent's terminal title only names its harness or shell (Kiro's
+  `kiro-cli`), the room shows the session's own title instead: Kiro's, from
+  its session in `~/.kiro/sessions/cli`, or Codex's last prompt. Kiro's
+  session is found by folder, since Herdr does not report it, so its hero
+  also follows its tools.
+- The full-screen console scrolls back through the agent's last 1000 lines
+  (Herdr's most), up from 300.
+- The `/` command lists follow Kiro 2.29 and Claude Code 2.1.
+
+### Fixed
+- A new agent in a long folder (or one with accents) failed as if its
+  harness were not installed: its Herdr name went past 32 characters.
+- When a new agent does not start because its shell asked something first,
+  the summon panel says so and shows the question.
+- Codex's menus can be answered from the chat, and messages reach it without
+  stray keys.
+- Kiro: a leftover draft was sent glued to the next message, and its grey
+  placeholder was taken for typed text.
+- Claude Code: **Accept** on "Do you trust this folder?" picked the
+  highlighted "No, exit"; it now picks the "Yes". The descriptions under
+  AskUserQuestion's options stay out of their text, and long lists such as
+  `/model` keep their first and last options.
+
 ## [2.1.0] - 2026-10-10
 
 ### Added

@@ -35,6 +35,9 @@ pub struct Agent {
     pub question_transcript: Option<String>,
     /// When a "limited" agent's usage limit resets (unix seconds), if known.
     pub limit_resets: Option<i64>,
+    /// Shells it left running in the background, and how its last ones ended.
+    pub shells: Vec<crate::shells::Shell>,
+    pub shell_results: Vec<crate::shells::ShellResult>,
 }
 
 impl Agent {
@@ -54,6 +57,8 @@ impl Agent {
             question: None,
             question_transcript: None,
             limit_resets: None,
+            shells: vec![],
+            shell_results: vec![],
         }
     }
 
@@ -360,6 +365,21 @@ pub fn enrich(agents: Vec<Agent>) -> Vec<Agent> {
             agent.branch = git_branch(&path);
             if agent.name == "claude" {
                 agent = agent.with_jobs(jobs.get(&path).map(Vec::as_slice).unwrap_or(&[]));
+            }
+            // Herdr does not report Kiro's session: the newest one Kiro
+            // keeps for this folder.
+            let kiro = (harness_for(&agent.name) == "kiro").then(|| kiro_session_for(&path)).flatten();
+            if agent.session.is_none() { agent.session = kiro.as_ref().map(|k| k.0.clone()); }
+            // A terminal title that only names the harness or the shell says
+            // nothing: the session's own title or the last prompt instead.
+            if generic_title(&agent.activity, harness_for(&agent.name)) {
+                let better = match harness_for(&agent.name) {
+                    "kiro" => kiro.map(|k| k.1).filter(|t| !t.is_empty()),
+                    "codex" => agent.session.as_deref().and_then(codex_transcript).and_then(|f| file_tail(&f, 131_072))
+                        .and_then(|t| crate::standalone::codex_view(&t, Duration::ZERO, false).prompt),
+                    _ => None,
+                };
+                if let Some(text) = better { agent.activity = text; }
             }
             let Some(session) = agent.session.clone() else { return agent };
             match harness_for(&agent.name) {
@@ -744,11 +764,15 @@ pub fn installed_kinds() -> Vec<&'static str> {
     if found.is_empty() { CREATABLE_KINDS.to_vec() } else { found }
 }
 
-/// A unique, readable Herdr agent name: kind, folder and a short suffix.
+/// A unique, readable Herdr agent name: kind, folder and a short suffix,
+/// within what Herdr takes (lowercase ASCII letters, digits, '-' and '_',
+/// 32 characters at most).
 pub fn agent_name(kind: &str, folder: &str) -> String {
-    let slug: String = folder.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
-    let slug = slug.split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-");
-    let slug: String = if slug.is_empty() { "agent".into() } else { slug.chars().take(24).collect() };
+    let slug: String = folder.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let room = 32usize.saturating_sub(kind.len() + 6);
+    let slug: String = slug.split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-").chars().take(room).collect();
+    let slug = slug.trim_end_matches('-');
+    let slug = if slug.is_empty() { "agent" } else { slug };
     let suffix: String = format!("{:04x}", (std::time::SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) ^ std::process::id() as u128) & 0xffff);
     format!("{kind}-{slug}-{suffix}")
 }
@@ -888,6 +912,20 @@ pub fn demo_agents(tick: usize) -> Vec<Agent> {
                 // Fixed for the whole run, so the countdown ticks down.
                 static DEMO_RESET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
                 agent.limit_resets = Some(*DEMO_RESET.get_or_init(|| unix_now() + 73 * 60 + 5));
+            }
+            if i == 4 {
+                // Done, but a shell it left in the background still brews.
+                static DEMO_SHELL: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+                let started = *DEMO_SHELL.get_or_init(|| unix_now() - 6 * 60 - 23);
+                agent.shells = vec![crate::shells::Shell {
+                    pid: 0,
+                    command: "cd pipeline && python3 fetch.py --limit 3000 > data/fetch.log 2>&1".into(),
+                    label: tr("Descargar y contar 3000 artículos"),
+                    started,
+                    task: None,
+                    last_line: Some(format!("{}/3000", 1200 + (tick * 7) % 1800)),
+                    output: None,
+                }];
             }
             agent.subagent_actions = helpers[i].iter().map(|s| s.to_string()).collect();
             agent.with_subagents(subagents[i])
@@ -1046,6 +1084,42 @@ pub fn codex_transcript(session: &str) -> Option<String> {
 }
 
 /// Kiro's session file: an absolute path as given, else ~/.kiro/sessions/cli/<session>.jsonl.
+/// A terminal title that tells nothing about the work: empty, the
+/// harness's own name ("kiro-cli", "codex"), a shell or a path.
+pub fn generic_title(title: &str, harness: &str) -> bool {
+    let t = title.trim().to_lowercase();
+    t.is_empty() || t == tr("Sin título de actividad").to_lowercase()
+        || (t.contains(harness) && t.chars().count() <= harness.len() + 5)
+        || ["zsh", "-zsh", "bash", "-bash", "fish", "sh"].contains(&t.as_str())
+        || t.starts_with('~') || t.starts_with('/')
+}
+
+/// Kiro's sessions as read: file → (modified, folder, title).
+static KIRO_SESSIONS: Mutex<Option<HashMap<PathBuf, (SystemTime, String, String)>>> = Mutex::new(None);
+
+/// The newest Kiro session for a folder: its ID and the title Kiro gave it,
+/// from ~/.kiro/sessions/cli/<id>.json (each file read again only when it
+/// changes).
+pub fn kiro_session_for(folder: &str) -> Option<(String, String)> {
+    let files = std::fs::read_dir(home_dir().join(".kiro/sessions/cli")).ok()?;
+    let mut guard = KIRO_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let known = guard.get_or_insert_with(HashMap::new);
+    let mut best: Option<(SystemTime, String, String)> = None;
+    for file in files.flatten().map(|f| f.path()).filter(|p| p.extension().is_some_and(|e| e == "json")) {
+        let Some(modified) = file_modified(&file.to_string_lossy()) else { continue };
+        if known.get(&file).map(|k| k.0) != Some(modified) {
+            let Some(row) = std::fs::read(&file).ok().and_then(|d| serde_json::from_slice::<Value>(&d).ok()) else { continue };
+            let read = |key| str_of(&row, key).unwrap_or("").to_string();
+            known.insert(file.clone(), (modified, read("cwd"), read("title")));
+        }
+        let (when, cwd, title) = &known[&file];
+        if cwd.trim_end_matches('/') != folder.trim_end_matches('/') || best.as_ref().is_some_and(|b| b.0 >= *when) { continue; }
+        let id = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        best = Some((*when, id, title.clone()));
+    }
+    best.map(|(_, id, title)| (id, title))
+}
+
 pub fn kiro_transcript(session: &str) -> Option<String> {
     if session.starts_with('/') { return Some(session.to_string()); }
     let path = home_dir().join(format!(".kiro/sessions/cli/{session}.jsonl"));
@@ -1107,16 +1181,17 @@ pub fn question_lines(message: &str, needs: Option<&str>) -> Vec<String> {
     lines.into_iter().filter(|l| !l.trim().is_empty()).collect()
 }
 
-/// Whether a trimmed line is a numbered option ("❯ 2. Opus", "3) No").
+/// Whether a trimmed line is a numbered option ("❯ 2. Opus", "› 1. Yes", "3) No").
 pub fn is_option(trimmed: &str) -> bool {
     option_prefix(trimmed).is_some()
 }
 
-/// `^(❯\s*)?\d+[.)]\s+`: the option number and where its text starts.
+/// `^([❯›]\s*)?\d+[.)]\s+`: the option number and where its text starts.
 fn option_prefix(trimmed: &str) -> Option<(bool, u32, usize)> {
-    let mut rest = trimmed;
-    let marked = rest.starts_with('❯');
-    if marked { rest = rest['❯'.len_utf8()..].trim_start(); }
+    let marked = after_marker(trimmed).is_some();
+    let rest = after_marker(trimmed).unwrap_or(trimmed);
+    // Claude Code marks a list that scrolls on its first and last option ("↓ 10. Opus 4.8").
+    let rest = rest.strip_prefix(['↓', '↑']).map(str::trim_start).unwrap_or(rest);
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() { return None; }
     let after = &rest[digits.len()..];
@@ -1145,11 +1220,36 @@ pub struct MenuOption {
     pub line: usize,
 }
 
+/// Why a fresh shell would not run the agent Herdr types into it: a question
+/// it asks first eats the command (oh-my-zsh's update prompt takes its first
+/// letter, and zsh then offers to correct the rest). The warning, with what
+/// to do, read from the pane's screen.
+pub fn shell_blocker(screen: &str) -> Option<String> {
+    if screen.contains("[oh-my-zsh] Would you like to update?") {
+        return Some(tr("oh-my-zsh pregunta si actualizarse y se come el comando. Corre omz update en una terminal (o pon zstyle ':omz:update' mode auto en ~/.zshrc) y vuelve a invocar."));
+    }
+    let correct = screen.lines().rev().find(|l| l.contains("zsh: correct '") && l.contains("[nyae]"))?;
+    let typed = correct.split('\'').nth(1).unwrap_or_default();
+    Some(trf("zsh preguntó si corregir «{}»: algo en la shell nueva se comió parte del comando. Abre una terminal y revisa qué pregunta al arrancar.", &[&typed]))
+}
+
 /// The hint under a menu driven by arrow keys ("Enter to confirm · Esc to
 /// cancel"; Kiro's "↑↓ to navigate · ↵ to select" and "esc to close · Enter
-/// to see more options").
+/// to see more options"; Codex's "enter select · esc back" and "Press enter
+/// to confirm or esc to cancel"), in any case.
 pub fn is_menu_footer(trimmed: &str) -> bool {
-    ["Enter to confirm", "Enter to select", "Esc to cancel", "Enter to continue", "↑↓ to navigate", "↵ to select", "Enter to see more options"].iter().any(|s| trimmed.contains(s))
+    let lower = trimmed.to_lowercase();
+    ["enter to confirm", "enter to select", "esc to cancel", "enter to continue", "↑↓ to navigate", "↵ to select", "enter to see more options", "enter select · esc"].iter().any(|s| lower.contains(s))
+}
+
+/// What a terminal points at its highlighted option with: ❯ (Claude Code,
+/// Kiro) or › (Codex, which also marks its prompt and past messages so).
+const MARKERS: [char; 2] = ['❯', '›'];
+
+/// The text after a leading highlight marker, if the line starts with one.
+fn after_marker(trimmed: &str) -> Option<&str> {
+    let first = trimmed.chars().next().filter(|c| MARKERS.contains(c))?;
+    Some(trimmed[first.len_utf8()..].trim_start())
 }
 
 impl MenuOptions {
@@ -1161,11 +1261,16 @@ impl MenuOptions {
 
     /// A menu whose options have no numbers ("❯ Yes, I trust this folder",
     /// "  No, exit"): the run of lines around the highlighted one whose text
-    /// starts in the same column, numbered here in order.
+    /// starts in the same column, numbered here in order. A › only counts
+    /// above a menu's footer: Codex marks its past messages with it too.
     fn unnumbered(lines: &[String]) -> MenuOptions {
         let mut menu = MenuOptions::default();
-        let footer = lines.iter().rposition(|l| is_menu_footer(l.trim())).unwrap_or(lines.len());
-        let Some(marked) = lines[..footer].iter().rposition(|l| { let t = l.trim_start(); t.starts_with('❯') && !t['❯'.len_utf8()..].trim().is_empty() }) else { return menu };
+        let footer_at = lines.iter().rposition(|l| is_menu_footer(l.trim()));
+        let footer = footer_at.unwrap_or(lines.len());
+        let Some(marked) = lines[..footer].iter().rposition(|l| {
+            let t = l.trim_start();
+            after_marker(t).is_some_and(|rest| !rest.trim().is_empty()) && (t.starts_with('❯') || footer_at.is_some())
+        }) else { return menu };
         let marker = lines[marked].chars().take_while(|c| c.is_whitespace()).count();
         let column = marker + 1 + lines[marked].chars().skip(marker + 1).take_while(|c| c.is_whitespace()).count();
         let text_at = |line: &String| -> Option<String> {
@@ -1173,7 +1278,7 @@ impl MenuOptions {
             let rest: String = line.chars().skip(column).collect();
             let head: String = line.chars().take(column).collect();
             let plain = lead == column;
-            let pointed = head.trim() == "❯" && lead == marker;
+            let pointed = after_marker(head.trim()).is_some_and(str::is_empty) && lead == marker;
             ((plain || pointed) && !rest.trim().is_empty() && !is_menu_footer(line.trim())).then(|| rest.trim_end().to_string())
         };
         let mut first = marked;
@@ -1190,6 +1295,7 @@ impl MenuOptions {
 
     fn numbered(lines: &[String]) -> MenuOptions {
         let mut menu = MenuOptions::default();
+        let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
         for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
             let Some((marked, number, consumed)) = option_prefix(trimmed) else { continue };
@@ -1200,12 +1306,42 @@ impl MenuOptions {
             }
             if marked { menu.highlighted = Some(menu.options.len()); }
             menu.options.push(MenuOption { number, text: trimmed[consumed..].to_string(), line: i });
+            // An option's text the terminal wrapped goes on, indented past its
+            // number: only when its next word would not have fit on the line
+            // (Claude Code's description under an option is a line of its own).
+            let indent = line.len() - line.trim_start().len();
+            let mut previous = line.chars().count();
+            for next in &lines[i + 1..] {
+                let lead = next.len() - next.trim_start().len();
+                if lead <= indent + 2 || option_prefix(next.trim()).is_some() || is_menu_footer(next.trim()) { break; }
+                let word = next.split_whitespace().next().map_or(0, |w| w.chars().count());
+                if previous + 1 + word <= width { break; }
+                let text = &mut menu.options.last_mut().unwrap().text;
+                text.push(' ');
+                text.push_str(next.trim());
+                previous = next.chars().count();
+            }
         }
         menu
     }
 
     pub fn is_menu(&self) -> bool {
         self.highlighted.is_some()
+    }
+
+    /// The option that turns the request down to say something instead
+    /// ("No, and tell Codex what to do differently"), if there is one.
+    pub fn tell_instead(&self) -> Option<usize> {
+        self.options.iter().position(|o| { let t = o.text.to_lowercase(); t.contains("tell") && (t.contains("differently") || t.contains("instead")) })
+    }
+
+    /// The option that says yes when the highlighted one says no (Claude
+    /// Code's folder trust starts on "No, exit"), so accepting accepts.
+    pub fn affirmative(&self) -> Option<usize> {
+        let says = |i: usize, words: &[&str]| self.options.get(i).is_some_and(|o| { let t = o.text.to_lowercase(); words.iter().any(|w| t == *w || t.starts_with(&format!("{w},")) || t.starts_with(&format!("{w} "))) });
+        let highlighted = self.highlighted?;
+        if !says(highlighted, &["no", "exit", "cancel"]) { return None; }
+        (0..self.options.len()).find(|&i| says(i, &["yes"]))
     }
 
     /// The keys that move the terminal's highlight to option `index` and pick it.
@@ -1215,6 +1351,15 @@ impl MenuOptions {
         keys.push("enter".into());
         keys
     }
+}
+
+/// Where a blocked agent's last lines start, moved back to the menu's first
+/// option when the cut would leave it out (a long list, as Claude Code's
+/// /model, with descriptions under each option).
+pub fn menu_head(rows: &[String], start: usize) -> usize {
+    let Some(first) = rows[start..].iter().find_map(|l| option_prefix(l.trim()).map(|(_, n, _)| n)) else { return start };
+    if first <= 1 { return start; }
+    (start.saturating_sub(40)..start).rev().find(|&i| option_prefix(rows[i].trim()).is_some_and(|(_, n, _)| n == 1)).unwrap_or(start)
 }
 
 /// The lines of an agent's terminal that say something, without Claude
@@ -1228,7 +1373,12 @@ pub fn meaningful_lines(text: &str) -> Vec<String> {
     // stays: it is above the menu's footer, unlike the input prompt.
     let rows: Vec<&str> = text.split('\n').collect();
     let menu_end = rows.iter().rposition(|l| is_menu_footer(l.trim()));
+    // Codex's prompt is the last › line below any menu (the ones above are
+    // past messages), with its model and folder on the line under it.
+    let codex_prompt = rows.iter().rposition(|l| l.trim().starts_with('›')).filter(|&i| menu_end.is_none_or(|end| i > end) && option_prefix(rows[i].trim()).is_none());
+    let codex_status = codex_prompt.and_then(|p| (p + 1..rows.len()).find(|&i| !rows[i].trim().is_empty())).filter(|&i| rows[i].contains(" · "));
     for (index, raw) in rows.iter().enumerate() {
+        if Some(index) == codex_prompt || Some(index) == codex_status { continue; }
         let line = raw.trim_end();
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.chars().all(|c| "─━═╌┄-".contains(c)) { skipping = false; continue; }
@@ -1237,7 +1387,7 @@ pub fn meaningful_lines(text: &str) -> Vec<String> {
         let option = option_prefix(trimmed).is_some();
         let status = ["✻", "✳", "✢", "✽", "✶", "※"].iter().any(|s| trimmed.starts_with(s));
         let footer = ["⏵", "▶▶", "►", "⏸"].iter().any(|s| trimmed.starts_with(s))
-            || ["? for shortcuts", "shift+tab to cycle", "esc to interrupt"].iter().any(|s| trimmed.contains(s));
+            || ["? for shortcuts", "shift+tab to cycle", "esc to interrupt", "← for agents"].iter().any(|s| trimmed.contains(s));
         if status { skipping = true; continue; }
         let in_menu = menu_end.map(|end| index < end).unwrap_or(false);
         if footer || (trimmed.starts_with('❯') && !option && !in_menu) { continue; }
