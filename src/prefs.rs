@@ -35,6 +35,8 @@ pub struct Prefs {
     /// Claude's HP live from Anthropic with Claude Code's OAuth token; off,
     /// only the last /usage Claude Code cached in ~/.claude.json.
     pub claude_usage_live: bool,
+    /// Full screen's guild HP shows each harness's bars; closed, one line.
+    pub guild_hp_open: bool,
     /// Folders starred in the summon panel, offered first.
     pub favorite_folders: Vec<String>,
     /// Optional choices for a repo's emblem, by its key (`owner/repo`, or the
@@ -67,6 +69,7 @@ impl Default for Prefs {
             console_scale: 1.0,
             kiro_plan: 0,
             claude_usage_live: false,
+            guild_hp_open: false,
             favorite_folders: vec![],
             projects: Default::default(),
             path: None,
@@ -103,5 +106,19 @@ impl Prefs {
         let Some(path) = &self.path else { return };
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
         if let Ok(text) = serde_json::to_string_pretty(self) { let _ = std::fs::write(path, text); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guild_hp_starts_closed_and_remembers() {
+        assert!(!Prefs::default().guild_hp_open);
+        let old: Prefs = serde_json::from_str(r#"{"sound_enabled": true}"#).unwrap();
+        assert!(!old.guild_hp_open, "settings from before keep it closed");
+        let open: Prefs = serde_json::from_str(&serde_json::to_string(&Prefs { guild_hp_open: true, ..Prefs::default() }).unwrap()).unwrap();
+        assert!(open.guild_hp_open);
     }
 }

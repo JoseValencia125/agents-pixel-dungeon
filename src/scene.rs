@@ -19,6 +19,8 @@ pub const ROW_H: f32 = 158.0 + HEADER + FOOTER; // room art 100 px at 1.5 pt/px 
 pub const ROW_W: f32 = 220.0; // room art 144 px at 1.5 pt/px + 4 pt frame
 pub const HERO: f32 = 32.0; // 16 px sprite at 2 pt/px
 pub const GAP: f32 = 6.0;
+pub const WINDOW_H: f32 = 96.0; // full screen's window on a working room: header, a strip of the room, its task
+pub const LINE_H: f32 = 30.0; // full screen's line for a room nobody needs to watch
 pub const TOP_PAD: f32 = 14.0; // room for the drag handle
 pub const BOTTOM_PAD: f32 = 6.0;
 
@@ -158,6 +160,32 @@ fn lerp_pos(a: Pos2, b: Pos2, k: f32) -> Pos2 {
     pos2(lerp(a.x, b.x, k), lerp(a.y, b.y, k))
 }
 
+/// How much of an agent the full-screen column shows. Only the chosen
+/// agent's room is whole (`Room`); the others that work show through a
+/// window on their room (`Window`), and the rest are a line of the guild's
+/// register (`Row`). Out of full screen every room is whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayMode { Room, Window, Row }
+
+impl DisplayMode {
+    pub fn height(self) -> f32 {
+        match self { DisplayMode::Room => ROW_H, DisplayMode::Window => WINDOW_H, DisplayMode::Row => LINE_H }
+    }
+}
+
+/// The mode depends on being chosen and on the state alone: a chosen agent
+/// stays a room whatever happens to it, and one that starts working opens
+/// a window without being chosen.
+pub fn display_mode(selected: bool, status: &str) -> DisplayMode {
+    if selected { DisplayMode::Room } else if status == "working" { DisplayMode::Window } else { DisplayMode::Row }
+}
+
+/// The room to open on entering full screen with none chosen: the first
+/// one working, else the most pressing.
+pub fn first_room(agents: &[Agent]) -> Option<String> {
+    agents.iter().find(|a| a.status == "working").or_else(|| agents.iter().min_by_key(|a| a.rank())).map(|a| a.id.clone())
+}
+
 /// The spare room: an empty frame with a "+" and "Summon an agent" under
 /// it. Lit while its panel is open or the pointer is over it.
 fn draw_summon_room(painter: &Painter, rect: Rect, active: bool, hovered: bool) {
@@ -169,6 +197,15 @@ fn draw_summon_room(painter: &Painter, rect: Rect, active: bool, hovered: bool) 
     let ink = if lit { Color32::from_gray(230) } else { Color32::from_gray(140) };
     painter.text(frame.center() - vec2(0.0, 14.0), Align2::CENTER_CENTER, "+", FontId::monospace(56.0), ink);
     painter.text(frame.center() + vec2(0.0, 34.0), Align2::CENTER_CENTER, tr("Invocar un agente"), FontId::monospace(13.0), ink);
+}
+
+/// The spare room as a line of the full-screen column.
+fn draw_summon_line(painter: &Painter, rect: Rect, hovered: bool) {
+    let frame = rect.shrink2(vec2(2.0, 1.0));
+    let ink = if hovered { Color32::from_gray(230) } else { Color32::from_gray(140) };
+    painter.rect_filled(frame, CornerRadius::same(4), Color32::from_rgba_unmultiplied(255, 255, 255, if hovered { 10 } else { 4 }));
+    painter.rect_stroke(frame, CornerRadius::same(4), Stroke::new(1.0_f32, if hovered { Color32::from_gray(190) } else { Color32::from_gray(90) }), egui::StrokeKind::Inside);
+    painter.text(frame.center(), Align2::CENTER_CENTER, format!("+  {}", tr("Invocar un agente")), FontId::monospace(12.0), ink);
 }
 
 /// The spare room while it holds the summon form: lit, in summoning green.
@@ -1214,6 +1251,101 @@ impl Room {
         }
     }
 
+    /// A working room seen through a window, in `rect` (`WINDOW_H` tall):
+    /// its repo's band, a strip of the room around the hero at full size
+    /// in a small frame, and its task on one line.
+    pub fn draw_window(&self, painter: &Painter, rect: Rect, assets: &Assets, hovered: bool) {
+        painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(18, 15, 23));
+        let band = Rect::from_min_size(rect.min, vec2(rect.width(), 22.0));
+        self.draw_band(painter, band, assets, 1.5, 12.0, true);
+        // The strip of the room: the room drawn as a whole, moved so the
+        // hero's height is in the middle, and clipped to the window.
+        let view = Rect::from_min_max(pos2(rect.min.x + 6.0, band.max.y + 5.0), pos2(rect.max.x - 6.0, rect.max.y - 22.0));
+        let f = Room::frame();
+        let hero_y = self.hero_view().0.y - 6.0;
+        let middle = hero_y.clamp(f.min.y + view.height() / 2.0, f.max.y - view.height() / 2.0);
+        let origin = pos2(view.center().x - f.center().x, view.center().y - middle);
+        self.draw(&painter.with_clip_rect(view.intersect(painter.clip_rect())), origin, assets, false);
+        // Its frame: dark stone with a lit inner edge, as the dungeon's windows.
+        painter.rect_stroke(view, CornerRadius::same(2), Stroke::new(2.0_f32, Color32::from_rgb(24, 20, 37)), egui::StrokeKind::Outside);
+        painter.rect_stroke(view.expand(2.0), CornerRadius::same(3), Stroke::new(1.0_f32, Color32::from_rgb(90, 84, 104)), egui::StrokeKind::Outside);
+        let task = fit_text(painter, &self.activity, FontId::monospace(11.0), rect.width() - 16.0);
+        painter.text(pos2(rect.min.x + 8.0, rect.max.y - 11.0), Align2::LEFT_CENTER, task, FontId::monospace(11.0), Color32::from_gray(225));
+        let edge = if hovered { Color32::from_rgb(110, 102, 124) } else { Color32::from_rgb(58, 52, 68) };
+        painter.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0_f32, edge), egui::StrokeKind::Inside);
+    }
+
+    /// A room nobody needs to watch, as a line of the guild's register in
+    /// `rect` (`LINE_H` tall): emblem, name, and its state in a word and a
+    /// light. No room is drawn. An agent needing you is red with a "!".
+    pub fn draw_row(&self, painter: &Painter, rect: Rect, assets: &Assets, hovered: bool) {
+        let shown = self.pending_style.unwrap_or(self.style);
+        let asking = shown.status == "blocked";
+        let fill = if asking { Color32::from_rgb(52, 18, 26) } else { blend(Color32::from_rgb(18, 15, 23), self.identity.primary_color(), 0.08) };
+        painter.rect_filled(rect, CornerRadius::same(4), fill);
+        self.draw_band(painter, rect, assets, 1.5, 12.0, false);
+        let edge = if asking { Color32::from_rgb(255, 69, 58) } else if hovered { Color32::from_rgb(110, 102, 124) } else { Color32::from_rgb(58, 52, 68) };
+        painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0_f32, edge), egui::StrokeKind::Inside);
+    }
+
+    /// The repo's band: emblem and name on the left, the state on the right
+    /// (`light_only`: its light and counts; else also its word, "!" first
+    /// when the agent needs you). The name gives way to the state.
+    fn draw_band(&self, painter: &Painter, band: Rect, assets: &Assets, px: f32, size: f32, light_only: bool) {
+        let identity = &self.identity;
+        let primary = identity.primary_color();
+        if light_only {
+            painter.rect_filled(band, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, blend(Color32::from_rgb(18, 15, 23), primary, 0.16));
+            painter.rect_filled(Rect::from_min_max(pos2(band.min.x, band.max.y - 2.0), band.max), CornerRadius::ZERO, primary);
+        }
+        draw_emblem(painter, identity, pos2(band.min.x + 6.0, band.center().y - 6.0 * px - if light_only { 1.0 } else { 0.0 }), px);
+        let shown = self.pending_style.unwrap_or(self.style);
+        let mid = pos2(band.max.x - 12.0, band.center().y - if light_only { 1.0 } else { 0.0 });
+        painter.circle_filled(mid, 3.5, shown.color);
+        painter.circle_stroke(mid, 3.5, Stroke::new(1.0_f32, Color32::from_black_alpha(140)));
+        let mut right = mid.x - 9.0;
+        let word_color = blend(shown.color, Color32::WHITE, 0.45);
+        let font = FontId::monospace(10.5);
+        if !light_only {
+            let mut word = tr(shown.title);
+            if shown.status == "blocked" { word = format!("! {word}"); }
+            let at = painter.text(pos2(right, mid.y), Align2::RIGHT_CENTER, &word, font.clone(), word_color);
+            painter.text(pos2(right + 0.6, mid.y), Align2::RIGHT_CENTER, &word, font.clone(), word_color);
+            right = at.min.x - 8.0;
+        }
+        // Counts that matter: subagents at work, and shells left brewing
+        // (a small cauldron and how many).
+        if self.subagents > 0 && self.subagents != usize::MAX {
+            right = painter.text(pos2(right, mid.y), Align2::RIGHT_CENTER, format!("+{}", self.subagents), font.clone(), word_color).min.x - 6.0;
+        }
+        if !self.shells.is_empty() {
+            let brew = Color32::from_rgb(150, 240, 110);
+            let at = painter.text(pos2(right, mid.y), Align2::RIGHT_CENTER, self.shells.len().to_string(), font.clone(), brew);
+            draw_sprite(painter, assets.prop("cauldron"), pos2(at.min.x - 8.0, mid.y), vec2(14.0, 10.5), false, 0.0, Color32::WHITE);
+            right = at.min.x - 20.0;
+        }
+        let name_x = band.min.x + 6.0 + 10.0 * px + 7.0;
+        let name = fit_text(painter, &identity.name, FontId::monospace(size), (right - name_x - 4.0).max(0.0));
+        let color = blend(primary, Color32::WHITE, 0.5);
+        painter.text(pos2(name_x, mid.y), Align2::LEFT_CENTER, &name, FontId::monospace(size), color);
+        painter.text(pos2(name_x + 0.6, mid.y), Align2::LEFT_CENTER, &name, FontId::monospace(size), color);
+    }
+
+    /// What a window or a line leaves out: the repo's name, the state and
+    /// the task in full.
+    pub fn compact_tip(&self) -> String {
+        let shown = self.pending_style.unwrap_or(self.style);
+        let mut tip = format!("{} · {}", self.identity.name, tr(shown.title));
+        if self.subagents > 0 && self.subagents != usize::MAX { tip += &format!(" +{}", self.subagents); }
+        if !self.activity.is_empty() { tip += &format!("\n{}", self.activity); }
+        if !self.branch.is_empty() { tip += &format!("\n{}", self.branch); }
+        if shown.status == "limited" {
+            if let Some(left) = self.limit_resets.map(|r| r - crate::herdr::unix_now()).filter(|l| *l > 0) { tip += &format!(" · {}", countdown(left)); }
+        }
+        if !self.shells.is_empty() { tip += &format!("\n{}: {}", tr("Cocinando en background"), self.shells.len()); }
+        tip
+    }
+
     /// The repo's full name and key, while the pointer is on its band.
     pub fn header_tip(&self, origin: Pos2, pointer: Pos2) -> Option<String> {
         if !Room::header().translate(origin.to_vec2()).contains(pointer) { return None; }
@@ -1460,6 +1592,9 @@ pub struct Scene {
     /// Full screen: rooms keep their places, so nobody asking scrolls the
     /// dungeon to the top (they are called over it instead).
     pub keep_order: bool,
+    /// Full screen's column: rooms by their display mode (one whole room,
+    /// windows, lines) instead of all whole.
+    pub compact: bool,
     /// The user's choices for some repos' emblems (settings' `projects`).
     pub overrides: BTreeMap<String, ProjectOverride>,
     /// The summon panel is open: the spare room holds its form.
@@ -1482,6 +1617,7 @@ impl Scene {
             empty_text: tr("Sin agentes en la sesión"),
             summon_tile: false,
             keep_order: false,
+            compact: false,
             overrides: BTreeMap::new(),
             summoning: false,
             summon_shown: false,
@@ -1536,9 +1672,46 @@ impl Scene {
     }
 
     pub fn content_height(&self, width: f32) -> f32 {
+        if self.compact { return self.layout(width).1; }
         let columns = columns_fitting(width);
         let lines = (self.slots() + columns - 1) / columns;
         TOP_PAD + lines as f32 * ROW_H + lines.saturating_sub(1) as f32 * GAP + BOTTOM_PAD
+    }
+
+    /// An agent's display mode: whole outside full screen.
+    pub fn mode(&self, id: &str) -> DisplayMode {
+        match (self.compact, self.rooms.get(id)) {
+            (true, Some(room)) => display_mode(self.selected.as_deref() == Some(id), &room.status),
+            _ => DisplayMode::Room,
+        }
+    }
+
+    /// Each slot's top-left corner and size (the rooms in order, then the
+    /// spare room), and the content's height: a grid of whole rooms, or
+    /// full screen's column of rooms by their mode.
+    fn layout(&self, width: f32) -> (Vec<Rect>, f32) {
+        let mut slots = vec![];
+        if self.compact {
+            let x = ((width - ROW_W) / 2.0).max(GAP);
+            let mut y = TOP_PAD;
+            for id in &self.order {
+                let h = self.mode(id).height();
+                slots.push(Rect::from_min_size(pos2(x, y), vec2(ROW_W, h)));
+                y += h + GAP;
+            }
+            if self.summon_tile {
+                let h = if self.summoning { ROW_H } else { LINE_H };
+                slots.push(Rect::from_min_size(pos2(x, y), vec2(ROW_W, h)));
+                y += h + GAP;
+            }
+            return (slots, y - GAP + BOTTOM_PAD);
+        }
+        let columns = columns_fitting(width);
+        let gap = GAP.max((width - columns as f32 * ROW_W) / (columns + 1) as f32);
+        for index in 0..self.slots() {
+            slots.push(Rect::from_min_size(pos2(gap + (index % columns) as f32 * (ROW_W + gap), TOP_PAD + (index / columns) as f32 * (ROW_H + GAP)), vec2(ROW_W, ROW_H)));
+        }
+        (slots, self.content_height(width))
     }
 
     /// Lay the rooms out in the given width and draw them inside a scroll
@@ -1549,9 +1722,7 @@ impl Scene {
         self.clock += dt;
         let mut response = SceneResponse { clicked: None, finish: None, terminal: None, summon: false, summon_rect: None };
         let width = ui.available_width();
-        let columns = columns_fitting(width);
-        let gap = GAP.max((width - columns as f32 * ROW_W) / (columns + 1) as f32);
-        let height = self.content_height(width);
+        let (slots, height) = self.layout(width);
         let scroll_request = self.scroll_request.take();
         let mut room_rects: Vec<Rect> = vec![];
         let output = egui::ScrollArea::vertical()
@@ -1571,11 +1742,12 @@ impl Scene {
                     ui.scroll_with_delta(vec2(0.0, -(page - GAP)));
                 }
                 let order = self.order.clone();
+                let modes: Vec<DisplayMode> = order.iter().map(|id| self.mode(id)).collect();
                 for (index, id) in order.iter().enumerate() {
+                    let slot = slots[index];
+                    let mode = modes[index];
                     let Some(room) = self.rooms.get_mut(id) else { continue };
-                    let col = index % columns;
-                    let line = index / columns;
-                    let target = pos2(gap + col as f32 * (ROW_W + gap), TOP_PAD + line as f32 * (ROW_H + GAP));
+                    let target = slot.min;
                     if room.pos != target {
                         room.move_from = room.shown.unwrap_or(target);
                         room.move_at = self.clock;
@@ -1585,16 +1757,27 @@ impl Scene {
                     let shown = if room.shown.is_none() { target } else { lerp_pos(room.move_from, target, k) };
                     room.shown = Some(shown);
                     room.advance(dt);
-                    let rect = Rect::from_min_size(pos2(content.min.x + shown.x, content.min.y + shown.y), vec2(ROW_W, ROW_H));
+                    let rect = Rect::from_min_size(pos2(content.min.x + shown.x, content.min.y + shown.y), slot.size());
                     if let Some(ScrollRequest::Reveal(wanted)) = &scroll_request {
                         if wanted == id { ui.scroll_to_rect(rect.expand(4.0), None); }
                     }
                     room_rects.push(rect);
                     let hit = ui.interact(rect, ui.id().with(id), egui::Sense::click());
-                    room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
+                    // Only what shows is drawn: a line draws no room at all.
+                    if ui.is_rect_visible(rect) {
+                        match mode {
+                            DisplayMode::Room => room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id)),
+                            DisplayMode::Window => room.draw_window(ui.painter(), rect, assets, hit.hovered()),
+                            DisplayMode::Row => room.draw_row(ui.painter(), rect, assets, hit.hovered()),
+                        }
+                    }
                     if hit.clicked() { response.clicked = Some(id.clone()); }
-                    if let Some((area, rows)) = hit.hover_pos().and_then(|p| room.shells_tip(rect.min, p)) { crate::ui::shells_note(ui.ctx(), area, &rows); }
-                    let hit = match hit.hover_pos().and_then(|p| room.header_tip(rect.min, p)) { Some(tip) => hit.on_hover_text(tip), None => hit };
+                    let hit = if mode == DisplayMode::Room {
+                        if let Some((area, rows)) = hit.hover_pos().and_then(|p| room.shells_tip(rect.min, p)) { crate::ui::shells_note(ui.ctx(), area, &rows); }
+                        match hit.hover_pos().and_then(|p| room.header_tip(rect.min, p)) { Some(tip) => hit.on_hover_text(tip), None => hit }
+                    } else {
+                        hit.on_hover_text(room.compact_tip()).on_hover_cursor(egui::CursorIcon::PointingHand)
+                    };
                     hit.context_menu(|ui| {
                         if ui.button(tr("Abrir una terminal en esta carpeta")).clicked() {
                             response.terminal = Some(id.clone());
@@ -1607,9 +1790,7 @@ impl Scene {
                     });
                 }
                 if self.summon_tile {
-                    let index = order.len();
-                    let at = pos2(gap + (index % columns) as f32 * (ROW_W + gap), TOP_PAD + (index / columns) as f32 * (ROW_H + GAP));
-                    let rect = Rect::from_min_size(content.min + at.to_vec2(), vec2(ROW_W, ROW_H));
+                    let rect = slots[order.len()].translate(content.min.to_vec2());
                     if self.summoning {
                         // The room holds the summon form, drawn over it by the app.
                         draw_summon_frame(ui.painter(), rect);
@@ -1617,7 +1798,7 @@ impl Scene {
                         if !self.summon_shown { ui.scroll_to_rect(rect.expand(4.0), None); }
                     } else {
                         let hit = ui.interact(rect, ui.id().with("summon-room"), egui::Sense::click());
-                        draw_summon_room(ui.painter(), rect, false, hit.hovered());
+                        if self.compact { draw_summon_line(ui.painter(), rect, hit.hovered()); } else { draw_summon_room(ui.painter(), rect, false, hit.hovered()); }
                         if hit.clicked() { response.summon = true; }
                     }
                     self.summon_shown = self.summoning;
@@ -1644,5 +1825,66 @@ impl Scene {
             }
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(id: &str, status: &str) -> Agent {
+        Agent::new(id, "claude", status, id, "Doing a long task that would never fit on one line of a window", &format!("/nonexistent/{id}"))
+    }
+
+    #[test]
+    fn modes() {
+        assert_eq!(display_mode(true, "working"), DisplayMode::Room);
+        assert_eq!(display_mode(true, "blocked"), DisplayMode::Room);
+        assert_eq!(display_mode(true, "done"), DisplayMode::Room);
+        assert_eq!(display_mode(false, "working"), DisplayMode::Window);
+        for status in ["blocked", "idle", "done", "limited", "unknown"] {
+            assert_eq!(display_mode(false, status), DisplayMode::Row, "{status}");
+        }
+        assert!(DisplayMode::Row.height() < DisplayMode::Window.height() && DisplayMode::Window.height() < DisplayMode::Room.height());
+    }
+
+    #[test]
+    fn states_change_modes_but_not_the_choice() {
+        let mut scene = Scene::new();
+        scene.compact = true;
+        scene.sync(&[agent("a", "working"), agent("b", "idle")]);
+        scene.set_selected(Some("a".into()));
+        assert_eq!((scene.mode("a"), scene.mode("b")), (DisplayMode::Room, DisplayMode::Row));
+        // The chosen one finishes while watched, the other starts working.
+        scene.sync(&[agent("a", "done"), agent("b", "working")]);
+        assert_eq!(scene.selected.as_deref(), Some("a"));
+        assert_eq!((scene.mode("a"), scene.mode("b")), (DisplayMode::Room, DisplayMode::Window));
+        // Choosing the other: the first goes back to its line.
+        scene.set_selected(Some("b".into()));
+        assert_eq!((scene.mode("a"), scene.mode("b")), (DisplayMode::Row, DisplayMode::Room));
+        // Out of full screen every room is whole.
+        scene.compact = false;
+        assert_eq!(scene.mode("a"), DisplayMode::Room);
+    }
+
+    #[test]
+    fn the_column_fits_many_more() {
+        let mut scene = Scene::new();
+        let agents: Vec<Agent> = (0..12).map(|i| agent(&format!("w{i}"), if i < 3 { "working" } else { "done" })).collect();
+        scene.sync(&agents);
+        scene.set_selected(Some("w0".into()));
+        let whole = scene.content_height(ROW_W);
+        scene.compact = true;
+        let column = scene.content_height(ROW_W);
+        let expected = TOP_PAD + ROW_H + 2.0 * WINDOW_H + 9.0 * LINE_H + 11.0 * GAP + BOTTOM_PAD;
+        assert!((column - expected).abs() < 0.5, "{column} vs {expected}");
+        assert!(column * 3.0 < whole, "{column} vs {whole}");
+    }
+
+    #[test]
+    fn first_room_on_entering_full_screen() {
+        assert_eq!(first_room(&[agent("a", "done"), agent("b", "working"), agent("c", "working")]).as_deref(), Some("b"));
+        assert_eq!(first_room(&[agent("a", "idle"), agent("b", "blocked")]).as_deref(), Some("b"));
+        assert_eq!(first_room(&[]), None);
     }
 }

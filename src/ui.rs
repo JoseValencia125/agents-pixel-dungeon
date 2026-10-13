@@ -1345,10 +1345,11 @@ pub fn resize_grip(ctx: &Context, visible: bool) -> bool {
 
 // ---- HP viewer (full screen)
 
-/// The HP viewer's height for these harnesses: a title and one row each,
-/// the one opened with a click taller by its options.
-pub fn usage_height(ctx: &egui::Context, usages: &[crate::usage::HarnessUsage]) -> f32 {
+/// The HP viewer's height for these harnesses: closed, one line; open, a
+/// title and one row each, the one opened with a click taller by its options.
+pub fn usage_height(ctx: &egui::Context, usages: &[crate::usage::HarnessUsage], open_panel: bool) -> f32 {
     if usages.is_empty() { return 0.0; }
+    if !open_panel { return USAGE_LINE; }
     let open = usage_open(ctx);
     26.0 + usages.iter().map(|u| 54.0 + if open.as_deref() == Some(u.harness) && has_options(u.harness) { 22.0 } else { 0.0 }).sum::<f32>()
 }
@@ -1390,15 +1391,50 @@ fn hp_bar(ui: &mut Ui, hp: f32, height: f32, segments: usize, fill: Color32) {
 pub struct UsagePick {
     pub kiro_plan: Option<u32>,
     pub claude_live: Option<bool>,
+    /// The title was clicked: open or close the panel.
+    pub toggle_open: bool,
 }
 
-pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate::usage::HarnessUsage], now: f64, claude_live: bool) -> UsagePick {
+/// The closed HP viewer's height: its line.
+const USAGE_LINE: f32 = 30.0;
+
+/// A harness's HP in a few characters, for the closed viewer: what is left
+/// in percent, Kiro's credits left, or KO.
+pub fn hp_short(usage: &crate::usage::HarnessUsage, unix: i64) -> (String, Option<f32>) {
+    let health = usage.meters.iter().find(|m| m.window != "5h");
+    let hp = health.map(|m| m.hp(unix));
+    let text = match (health, &usage.credits) {
+        (Some(_), Some((spent, Some(plan)))) => format!("{:.0}", (*plan as f64 - spent).max(0.0)),
+        (Some(m), _) if m.hp(unix) <= 0.0 => "KO".to_string(),
+        (Some(m), _) => format!("{:.0}%", m.hp(unix)),
+        (None, Some((spent, None))) => format!("{spent:.0} cr"),
+        _ => "—".to_string(),
+    };
+    (text, hp)
+}
+
+pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate::usage::HarnessUsage], now: f64, claude_live: bool, open_panel: bool) -> UsagePick {
     let mut picked = UsagePick::default();
     let unix = crate::herdr::unix_now();
     let mana_color = Color32::from_rgb(90, 150, 255);
     ui.spacing_mut().item_spacing = vec2(6.0, 3.0);
+    if !open_panel {
+        // Closed: one line, each hero with what it has left; a click opens it.
+        let (line, response) = ui.allocate_exact_size(vec2(ui.available_width(), USAGE_LINE), egui::Sense::click());
+        let painter = ui.painter();
+        let mut x = painter.text(egui::pos2(line.min.x, line.center().y), Align2::LEFT_CENTER, "▸ HP", FontId::monospace(fs(10.0)), if response.hovered() { Color32::WHITE } else { DIM }).max.x + 10.0;
+        for usage in usages {
+            let (text, hp) = hp_short(usage, unix);
+            crate::scene::draw_sprite(painter, assets.hero_frame(usage.harness, "idle", (now * 2.0) as usize), egui::pos2(x + 8.0, line.center().y), vec2(16.0, 16.0), false, 0.0, Color32::WHITE);
+            x = painter.text(egui::pos2(x + 18.0, line.center().y), Align2::LEFT_CENTER, &text, FontId::monospace(fs(10.0)), hp.map(hp_color).unwrap_or(DIM)).max.x + 10.0;
+        }
+        let tip = usages.iter().map(|u| format!("{} {}", u.harness, hp_short(u, unix).0)).collect::<Vec<_>>().join(" · ");
+        if response.on_hover_text(format!("{}\n{tip}", tr("HP de la guild (uso restante)"))).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { picked.toggle_open = true; }
+        return picked;
+    }
     ui.add_space(5.0);
-    ui.label(mono(&tr("HP de la guild (uso restante)"), 10.0).strong().color(DIM));
+    let title = ui.add(egui::Label::new(mono(&format!("▾ {}", tr("HP de la guild (uso restante)")), 10.0).strong().color(DIM)).sense(egui::Sense::click()));
+    if title.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { picked.toggle_open = true; }
     let open = usage_open(ui.ctx());
     let mut toggled: Option<&str> = None;
     for usage in usages {

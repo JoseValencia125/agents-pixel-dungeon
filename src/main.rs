@@ -216,6 +216,9 @@ struct App {
     /// Full screen's calls to action already answered: the state each agent
     /// was in when its chat was open. It is called again once that changes.
     calls_seen: std::collections::HashMap<String, String>,
+    /// Full screen opened a room for this visit already (only on entering,
+    /// so esc can still close it).
+    room_opened: bool,
 }
 
 /// The console's narrowest width in full screen; the rooms get whole
@@ -247,6 +250,7 @@ impl App {
             monitor,
             terminals: terminal::Terminals::default(),
             calls_seen: Default::default(),
+            room_opened: false,
             prefs,
             sounds: Sounds::new(),
             notifier: Notifier::new(),
@@ -739,6 +743,15 @@ impl eframe::App for App {
         self.tray.update(&self.menu_state());
         self.track_window(ctx, now);
 
+        // Full screen has one whole room: entering it with none chosen opens
+        // the first one at work (once, so esc can still close it).
+        if !self.fullscreen { self.room_opened = false; }
+        if self.fullscreen && !self.room_opened && !self.monitor.agents.is_empty() {
+            self.room_opened = true;
+            if self.monitor.selected.is_none() {
+                if let Some(id) = scene::first_room(&self.monitor.visible_agents()) { self.monitor.select(Some(id)); }
+            }
+        }
         // A panel opening at one column widens the widget while it is open.
         let was_open = self.chat.is_some() || self.key_panel.is_some();
         let opening = (self.monitor.selected.is_some() || self.monitor.composing) && !was_open;
@@ -767,6 +780,7 @@ impl eframe::App for App {
         // called on top instead.
         if self.fullscreen { visible_agents.sort_by(|a, b| herdr::natural_cmp(&a.id, &b.id)); }
         self.scene.keep_order = self.fullscreen;
+        self.scene.compact = self.fullscreen;
         self.scene.sync(&visible_agents);
         if let Some(agent) = self.monitor.selected.as_ref().and_then(|id| visible_agents.iter().find(|a| &a.id == id)) {
             self.calls_seen.insert(agent.id.clone(), agent.status.clone());
@@ -793,7 +807,7 @@ impl eframe::App for App {
         if let Some(rx) = &self.usage_rx {
             if let Ok(found) = rx.try_recv() { self.usages = found; self.usage_rx = None; }
         }
-        let usage_h = if fullscreen { ui::usage_height(ctx, &self.usages) } else { 0.0 };
+        let usage_h = if fullscreen { ui::usage_height(ctx, &self.usages, self.prefs.guild_hp_open) } else { 0.0 };
         egui::CentralPanel::default().frame(Frame::NONE).show(ctx, |ui| {
             let full = ui.max_rect();
             // The widget has rounded corners; full screen has the screen's.
@@ -854,7 +868,8 @@ impl eframe::App for App {
                 ui.painter().rect_filled(rect, CornerRadius::ZERO, ui::HUD_FILL);
                 ui.painter().hline(rect.x_range(), rect.min.y, egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 20)));
                 let inner = Rect::from_min_max(egui::pos2(rect.min.x + 10.0, rect.min.y), egui::pos2(rect.max.x - 10.0, rect.max.y));
-                let picked = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| { ui.set_clip_rect(rect); ui::usage_panel(ui, &self.assets, &self.usages, now, self.prefs.claude_usage_live) }).inner;
+                let picked = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| { ui.set_clip_rect(rect); ui::usage_panel(ui, &self.assets, &self.usages, now, self.prefs.claude_usage_live, self.prefs.guild_hp_open) }).inner;
+                if picked.toggle_open { self.prefs.guild_hp_open = !self.prefs.guild_hp_open; self.prefs.save(); }
                 if let Some(plan) = picked.kiro_plan { self.prefs.kiro_plan = plan; self.prefs.save(); self.next_usage = 0.0; }
                 if let Some(live) = picked.claude_live { self.prefs.claude_usage_live = live; self.prefs.save(); self.next_usage = 0.0; }
             }
