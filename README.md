@@ -10,6 +10,10 @@ Each coding agent is a hero in a dungeon room that changes with its real Herdr s
   <img src="docs/media/demo.gif" width="460" alt="The widget in demo mode: six agents working, asking for attention, trapped by the session limit, waiting and done">
 </p>
 
+<p align="center">
+  <img src="docs/media/fullscreen.gif" alt="Full screen in demo mode: the column of rooms with the guild's HP under it, an agent's permission question with its options, then the files another agent changed and one file's diff">
+</p>
+
 <p align="center"><a href="docs/media/demo.mp4">Watch the full demo video</a> · <a href="docs/media/widget.png">Full-size screenshot</a> · <a href="docs/GUIDE.md">Guide</a></p>
 
 ## Download
