@@ -212,6 +212,9 @@ struct App {
     usage_rx: Option<std::sync::mpsc::Receiver<Vec<usage::HarnessUsage>>>,
     next_usage: f64,
     terminals: terminal::Terminals,
+    /// Full screen's calls to action already answered: the state each agent
+    /// was in when its chat was open. It is called again once that changes.
+    calls_seen: std::collections::HashMap<String, String>,
 }
 
 /// The console's narrowest width in full screen; the rooms get whole
@@ -241,6 +244,7 @@ impl App {
         let mut app = App {
             monitor,
             terminals: terminal::Terminals::default(),
+            calls_seen: Default::default(),
             prefs,
             sounds: Sounds::new(),
             notifier: Notifier::new(),
@@ -756,8 +760,22 @@ impl eframe::App for App {
         self.key_panel = panel;
         self.scene.set_selected(self.monitor.selected.clone());
         self.scene.empty_text = if !self.monitor.agents.is_empty() { tr("Ningún agente coincide") } else if self.monitor.error.is_some() { tr("Esperando a Herdr…") } else { tr("Sin agentes en la sesión") };
-        let visible_agents = self.monitor.visible_agents();
+        let mut visible_agents = self.monitor.visible_agents();
+        // Full screen keeps each room in its place; who waits for you is
+        // called on top instead.
+        if self.fullscreen { visible_agents.sort_by(|a, b| herdr::natural_cmp(&a.id, &b.id)); }
+        self.scene.keep_order = self.fullscreen;
         self.scene.sync(&visible_agents);
+        if let Some(agent) = self.monitor.selected.as_ref().and_then(|id| visible_agents.iter().find(|a| &a.id == id)) {
+            self.calls_seen.insert(agent.id.clone(), agent.status.clone());
+        }
+        self.calls_seen.retain(|id, status| visible_agents.iter().any(|a| &a.id == id && &a.status == status));
+        let calls: Vec<herdr::Agent> = if self.fullscreen {
+            let mut waiting: Vec<herdr::Agent> = visible_agents.iter().filter(|a| matches!(a.status.as_str(), "blocked" | "done") && !self.calls_seen.contains_key(&a.id)).cloned().collect();
+            waiting.sort_by_key(|a| a.rank());
+            waiting
+        } else { Vec::new() };
+        let calls_h = ui::calls_height(calls.len());
 
         let hovering = ctx.input(|i| i.pointer.hover_pos()).is_some();
         let note = connection_note(self.monitor.error.as_deref(), self.monitor.updated, Instant::now(), 5.0);
@@ -785,7 +803,7 @@ impl eframe::App for App {
             // rooms take one column on the left and the console all the rest.
             let (scene_rect, hud_rect, panel_rect) = if fullscreen {
                 let split = full.min.x + scene::width_for(1);
-                let scene_rect = Rect::from_min_max(full.min, egui::pos2(split, full.max.y - hud_h - usage_h));
+                let scene_rect = Rect::from_min_max(egui::pos2(full.min.x, full.min.y + calls_h), egui::pos2(split, full.max.y - hud_h - usage_h));
                 let hud_rect = Rect::from_min_max(egui::pos2(full.min.x, full.max.y - hud_h), egui::pos2(split, full.max.y));
                 (scene_rect, hud_rect, Rect::from_min_max(egui::pos2(split, full.min.y), full.max))
             } else {
@@ -794,6 +812,13 @@ impl eframe::App for App {
                 let hud_rect = Rect::from_min_max(egui::pos2(full.min.x, scene_rect.max.y), egui::pos2(full.max.x, scene_rect.max.y + hud_h));
                 (scene_rect, hud_rect, Rect::from_min_max(egui::pos2(full.min.x, hud_rect.max.y), full.max))
             };
+            // Full screen: who waits for you, over the rooms.
+            if calls_h > 0.0 {
+                let rect = Rect::from_min_max(full.min, egui::pos2(scene_rect.max.x, scene_rect.min.y));
+                if let Some(id) = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| { ui.set_clip_rect(rect); ui::calls(ui, &calls) }).inner {
+                    self.monitor.select(Some(id));
+                }
+            }
             // The dungeon, with a spare room to summon an agent in full screen.
             self.scene.summon_tile = fullscreen;
             self.scene.summoning = self.monitor.composing;

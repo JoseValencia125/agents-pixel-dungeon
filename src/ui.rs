@@ -157,6 +157,57 @@ fn flat_button(ui: &mut Ui, text: RichText) -> egui::Response {
     ui.add(egui::Button::new(text).frame(false))
 }
 
+// ---- Calls to action
+
+/// Full screen keeps the rooms in their places, so the agents that wait
+/// for you (asking, or done) are called over them instead.
+const CALLS_SHOWN: usize = 4;
+
+pub fn calls_height(count: usize) -> f32 {
+    if count == 0 { return 0.0; }
+    let more = if count > CALLS_SHOWN { fs(16.0) } else { 0.0 };
+    fs(14.0) + 16.0 + count.min(CALLS_SHOWN) as f32 * (fs(12.0) + 12.0) + more
+}
+
+/// The agent picked from the list, to open.
+pub fn calls(ui: &mut Ui, agents: &[Agent]) -> Option<String> {
+    let mut picked = None;
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, HUD_FILL);
+    ui.painter().hline(rect.x_range(), rect.max.y - 0.5, egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 20)));
+    let inner = rect.shrink2(vec2(10.0, 6.0));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+        ui.label(mono(&tr("Te esperan"), 10.0).strong().color(alpha(Color32::WHITE, 0.55)));
+        for agent in agents.iter().take(CALLS_SHOWN) {
+            let color = crate::scene::agent_color(&agent.status);
+            let row = vec2(ui.available_width(), fs(12.0) + 10.0);
+            let (rect, response) = ui.allocate_exact_size(row, egui::Sense::click());
+            let fill = if response.hovered() { alpha(color, 0.22) } else { alpha(color, 0.12) };
+            ui.painter().rect(rect, CornerRadius::same(4), fill, egui::Stroke::new(1.0_f32, alpha(color, 0.55)), egui::StrokeKind::Inside);
+            ui.painter().circle_filled(egui::pos2(rect.min.x + 10.0, rect.center().y), 3.5, color);
+            let font = FontId::monospace(fs(11.0));
+            // The card's own word for the state, short enough to leave the folder whole.
+            let state = ui.painter().text(egui::pos2(rect.max.x - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, tr(if agent.status == "blocked" { "ATENCIÓN" } else { "LISTO" }), font.clone(), color);
+            let room = (state.min.x - rect.min.x - 30.0).max(0.0);
+            // The folder, cut with "…" where the state starts.
+            let ink = Color32::from_gray(225);
+            let mut text = agent.folder();
+            let mut name = ui.painter().layout_no_wrap(text.clone(), font.clone(), ink);
+            while name.size().x > room && text.pop().is_some() {
+                name = ui.painter().layout_no_wrap(format!("{}…", text.trim_end()), font.clone(), ink);
+            }
+            ui.painter().galley(egui::pos2(rect.min.x + 20.0, rect.center().y - name.size().y / 2.0), name, ink);
+            let response = response.on_hover_text(if agent.activity.is_empty() { tr("Abrir su chat") } else { agent.activity.clone() }).on_hover_cursor(egui::CursorIcon::PointingHand);
+            if response.clicked() { picked = Some(agent.id.clone()); }
+        }
+        if agents.len() > CALLS_SHOWN {
+            ui.label(mono(&trf("y {} más", &[&(agents.len() - CALLS_SHOWN).to_string()]), 10.0).color(alpha(Color32::WHITE, 0.5)));
+        }
+    });
+    picked
+}
+
 // ---- HUD
 
 #[derive(Default)]

@@ -1388,6 +1388,9 @@ pub struct Scene {
     pub empty_text: String,
     /// A spare room after the last one, with a "+" to summon an agent.
     pub summon_tile: bool,
+    /// Full screen: rooms keep their places, so nobody asking scrolls the
+    /// dungeon to the top (they are called over it instead).
+    pub keep_order: bool,
     /// The summon panel is open: the spare room holds its form.
     pub summoning: bool,
     summon_shown: bool,
@@ -1407,6 +1410,7 @@ impl Scene {
             reduced_motion: false,
             empty_text: tr("Sin agentes en la sesión"),
             summon_tile: false,
+            keep_order: false,
             summoning: false,
             summon_shown: false,
             seeds: 7,
@@ -1422,7 +1426,8 @@ impl Scene {
         }
     }
 
-    /// Show these agents (already sorted, attention first). Someone new
+    /// Show these agents (already sorted: attention first, or in place in
+    /// full screen). Someone new
     /// needing attention takes the first room: scroll up to it.
     pub fn sync(&mut self, agents: &[Agent]) {
         let ids: HashSet<&str> = agents.iter().map(|a| a.id.as_str()).collect();
@@ -1431,7 +1436,7 @@ impl Scene {
         let newly_asking = asking.difference(&self.asking_before).next().is_some();
         self.asking_before = asking;
         self.order = agents.iter().map(|a| a.id.clone()).collect();
-        if newly_asking && self.selected.is_none() { self.scroll_request = Some(ScrollRequest::Top); }
+        if newly_asking && self.selected.is_none() && !self.keep_order { self.scroll_request = Some(ScrollRequest::Top); }
         for agent in agents {
             match self.rooms.get_mut(&agent.id) {
                 Some(room) => room.update(agent, !self.reduced_motion),
