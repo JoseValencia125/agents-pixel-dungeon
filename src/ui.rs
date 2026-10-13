@@ -682,9 +682,8 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                     // their column is open), the pull request in its state's colour.
                     ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
                     ui.spacing_mut().button_padding = vec2(8.0, 4.0);
-                    if button(ui, ">_ Terminal", Color32::from_rgb(254, 174, 52)).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
-                        action.terminal = true;
-                    }
+                    // Right to left, so they read Terminal, Diff, PR.
+                    if let Some(pull) = &state.pull { pull_chip(ui, pull); }
                     let open = changes_open(ui.ctx());
                     let cyan = Color32::from_rgb(44, 232, 245);
                     let files = egui::Button::new(mono("± Diff", 11.0).color(if open { Color32::from_rgb(10, 30, 34) } else { cyan }))
@@ -693,7 +692,9 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("changes-open"), !open));
                         state.next_changes = 0.0;
                     }
-                    if let Some(pull) = &state.pull { pull_chip(ui, pull); }
+                    if button(ui, ">_ Terminal", Color32::from_rgb(254, 174, 52)).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
+                        action.terminal = true;
+                    }
                     return;
                 }
                 if flat_button(ui, mono("x", 13.0).color(Color32::WHITE)).on_hover_text(tr("Cerrar")).clicked() { action.close = true; }
