@@ -13,7 +13,8 @@ the large one: the gate room recoloured, a cot, a potion rack.
 Usage: export art/dungeon_rooms.aseprite's layers as one PNG per frame
 (frames 1-5: working, blocked, done, idle, unknown) named room_{n}.png,
 props_{n}.png and glow_{n}.png (n from 0), and frame 1's front layer as
-front.png, all into LAYERS_DIR; then
+front.png, all into LAYERS_DIR; draw the waiting room's inn walls over its
+`room` layer with `python3 scripts/room_idle.py LAYERS_DIR/room_3.png`; then
     python3 scripts/room_sizes.py LAYERS_DIR OUT_DIR
 OUT_DIR gets room_{state}_{size}.png (and room_working_{size}_front.png),
 which go in Resources/Sprites/rooms, and room_moves.rs, which goes in src/.
