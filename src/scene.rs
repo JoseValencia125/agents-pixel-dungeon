@@ -959,7 +959,8 @@ impl Room {
                     let p = rt % 4.2;
                     let turning = p > 3.9;
                     if turning { pos.y -= 1.0; }
-                    book = Some((if turning { "book_open_flipped" } else { "book_open" }, vec2(18.0, 12.0), pos2(0.0, 5.0)));
+                    // Held out before it, toward the window.
+                    book = Some((if turning { "book_open_flipped" } else { "book_open" }, vec2(14.0, 9.0), pos2(-11.0, 2.0)));
                 }
                 _ => {}
             }
@@ -1190,20 +1191,21 @@ impl Room {
             let sleeper = assets.sleeper(self.harness);
             draw_sprite(&clipped, sleeper, hero_at, sleeper.px * 2.0, false, -(std::f32::consts::FRAC_PI_2 + wobble), Color32::WHITE);
         } else {
-            // In the chamber the hero reads in an armchair by the fire: the
-            // chair's back stands behind it, its arms and seat go over its
-            // legs once it has sat down.
+            // In the inn's room the hero reads in an armchair seen from its
+            // side, in profile, facing the window: the chair's back stands
+            // behind the hero's back, its seat, arm and legs go over the
+            // hero's legs once it has sat down.
             let seat = at(Room::rp(style.spot));
             let seated = style.status == "idle" && !self.in_transition && self.runner.is_none();
             if style.status == "idle" {
-                let back = assets.prop("chair_back");
-                draw_sprite(&clipped, back, pos2(seat.x, seat.y - 10.0), back.px * 2.0, false, 0.0, Color32::WHITE);
+                let back = assets.prop("chair_side_back");
+                draw_sprite(&clipped, back, pos2(seat.x + 9.0, seat.y - 1.0), back.px * 2.0, false, 0.0, Color32::WHITE);
             }
             let sprite = assets.hero_frame(self.harness, kind, index);
-            draw_sprite(&clipped, sprite, hero_at, vec2(HERO, HERO), self.facing < 0.0, 0.0, Color32::WHITE);
+            draw_sprite(&clipped, sprite, hero_at, vec2(HERO, HERO), if seated { true } else { self.facing < 0.0 }, 0.0, Color32::WHITE);
             if seated {
-                let front = assets.prop("chair_front");
-                draw_sprite(&clipped, front, pos2(seat.x, seat.y + 8.0), front.px * 2.0, false, 0.0, Color32::WHITE);
+                let front = assets.prop("chair_side_front");
+                draw_sprite(&clipped, front, pos2(seat.x + 1.0, seat.y + 10.0), front.px * 2.0, false, 0.0, Color32::WHITE);
             }
             if let Some((name, size, offset)) = book {
                 let prop = assets.prop(name);
