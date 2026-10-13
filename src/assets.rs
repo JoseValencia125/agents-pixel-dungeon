@@ -23,7 +23,7 @@ pub struct Assets {
     props: HashMap<&'static str, TextureHandle>,
 }
 
-pub const ROOM_FILES: [(&str, &[u8]); 7] = [
+pub const ROOM_FILES: [(&str, &[u8]); 21] = [
     ("room_working", include_bytes!("../Resources/Sprites/rooms/room_working.png")),
     ("room_working_front", include_bytes!("../Resources/Sprites/rooms/room_working_front.png")),
     ("room_blocked", include_bytes!("../Resources/Sprites/rooms/room_blocked.png")),
@@ -32,6 +32,21 @@ pub const ROOM_FILES: [(&str, &[u8]); 7] = [
     ("room_idle", include_bytes!("../Resources/Sprites/rooms/room_idle.png")),
     ("room_done", include_bytes!("../Resources/Sprites/rooms/room_done.png")),
     ("room_unknown", include_bytes!("../Resources/Sprites/rooms/room_unknown.png")),
+    // Every room 64 and 40 pixels tall, for full screen's column (scripts/room_sizes.py).
+    ("room_working_medium", include_bytes!("../Resources/Sprites/rooms/room_working_medium.png")),
+    ("room_working_medium_front", include_bytes!("../Resources/Sprites/rooms/room_working_medium_front.png")),
+    ("room_blocked_medium", include_bytes!("../Resources/Sprites/rooms/room_blocked_medium.png")),
+    ("room_limited_medium", include_bytes!("../Resources/Sprites/rooms/room_limited_medium.png")),
+    ("room_idle_medium", include_bytes!("../Resources/Sprites/rooms/room_idle_medium.png")),
+    ("room_done_medium", include_bytes!("../Resources/Sprites/rooms/room_done_medium.png")),
+    ("room_unknown_medium", include_bytes!("../Resources/Sprites/rooms/room_unknown_medium.png")),
+    ("room_working_small", include_bytes!("../Resources/Sprites/rooms/room_working_small.png")),
+    ("room_working_small_front", include_bytes!("../Resources/Sprites/rooms/room_working_small_front.png")),
+    ("room_blocked_small", include_bytes!("../Resources/Sprites/rooms/room_blocked_small.png")),
+    ("room_limited_small", include_bytes!("../Resources/Sprites/rooms/room_limited_small.png")),
+    ("room_idle_small", include_bytes!("../Resources/Sprites/rooms/room_idle_small.png")),
+    ("room_done_small", include_bytes!("../Resources/Sprites/rooms/room_done_small.png")),
+    ("room_unknown_small", include_bytes!("../Resources/Sprites/rooms/room_unknown_small.png")),
 ];
 
 pub const HEROES_PNG: &[u8] = include_bytes!("../Resources/Sprites/heroes/heroes.png");

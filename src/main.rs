@@ -13,6 +13,7 @@ mod identity;
 mod l10n;
 mod monitor;
 mod prefs;
+mod room_moves;
 mod scene;
 mod selftest;
 mod shells;
@@ -256,7 +257,7 @@ impl App {
             notifier: Notifier::new(),
             scene,
             assets: Assets::new(&cc.egui_ctx),
-            tray: Tray::new(&MenuState { sounds: true, sound_help: true, sound_done: true, notify: true, notify_help: true, notify_done: false, on_top: true, fullscreen: false, login: false, sessions: vec![], session: String::new(), demo: false, attention: 0, open_at_start: false, text_scale: 1.0, console_scale: 1.0 }, wake),
+            tray: Tray::new(&MenuState { sounds: true, sound_help: true, sound_done: true, notify: true, notify_help: true, notify_done: false, on_top: true, fullscreen: false, login: false, sessions: vec![], session: String::new(), demo: false, attention: 0, open_at_start: false, text_scale: 1.0, console_scale: 1.0, room_size: String::new() }, wake),
             chat: None,
             compose: ComposeState::default(),
             hud: HudState::default(),
@@ -314,6 +315,7 @@ impl App {
             open_at_start: self.prefs.open_herdr_at_start,
             text_scale: self.prefs.text_scale,
             console_scale: self.prefs.console_scale,
+            room_size: self.prefs.room_size.clone(),
         }
     }
 
@@ -603,6 +605,7 @@ impl App {
             TrayAction::ConsoleBigger => self.step_console_scale(1),
             TrayAction::ConsoleSmaller => self.step_console_scale(-1),
             TrayAction::ConsoleNormal => self.set_console_scale(1.0),
+            TrayAction::RoomSize(size) => { self.prefs.room_size = size.to_string(); self.prefs.save(); }
             TrayAction::About => {
                 rfd::MessageDialog::new().set_title(tr("Acerca de Agents Pixel Dungeon")).set_description(format!("Agents Pixel Dungeon {}\n{}", env!("CARGO_PKG_VERSION"), tr("Creado por Nacho Valencia.\nCódigo y pixel art originales · MIT.\n\nProyecto independiente, sin afiliación con Herdr, Inc."))).show();
             }
@@ -781,6 +784,7 @@ impl eframe::App for App {
         if self.fullscreen { visible_agents.sort_by(|a, b| herdr::natural_cmp(&a.id, &b.id)); }
         self.scene.keep_order = self.fullscreen;
         self.scene.compact = self.fullscreen;
+        self.scene.room_size = scene::RoomSize::from_key(&self.prefs.room_size);
         self.scene.sync(&visible_agents);
         if let Some(agent) = self.monitor.selected.as_ref().and_then(|id| visible_agents.iter().find(|a| &a.id == id)) {
             self.calls_seen.insert(agent.id.clone(), agent.status.clone());

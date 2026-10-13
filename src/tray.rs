@@ -36,6 +36,8 @@ pub enum TrayAction {
     ConsoleBigger,
     ConsoleSmaller,
     ConsoleNormal,
+    /// How tall full screen draws its rooms: "large", "medium", "small".
+    RoomSize(&'static str),
     About,
     Quit,
 }
@@ -59,6 +61,7 @@ pub struct MenuState {
     pub open_at_start: bool,
     pub text_scale: f32,
     pub console_scale: f32,
+    pub room_size: String,
 }
 
 /// Menu bar icon: a pixel knight's great helm (T visor, breathing holes,
@@ -178,9 +181,17 @@ fn build_menu(state: &MenuState) -> (Menu, HashMap<MenuId, TrayAction>) {
     add(&console_smaller, TrayAction::ConsoleSmaller);
     add(&console_normal, TrayAction::ConsoleNormal);
 
+    // Full screen's rooms, at one of three sizes.
+    let rooms = Submenu::new(tr("Tamaño de las salas"), true);
+    for size in crate::scene::RoomSize::ALL {
+        let entry = check(&tr(size.label()), true, state.room_size == size.key());
+        let _ = rooms.append(&entry);
+        add(&entry, TrayAction::RoomSize(size.key()));
+    }
+
     let about = item(&tr("Acerca de Agents Pixel Dungeon"));
     let quit = item(&tr("Salir"));
-    let _ = menu.append_items(&[&sounds, &notify, &text, &console, &PredefinedMenuItem::separator(), &sessions, &open_herdr, &open_at_start, &PredefinedMenuItem::separator(), &about, &quit]);
+    let _ = menu.append_items(&[&sounds, &notify, &text, &console, &rooms, &PredefinedMenuItem::separator(), &sessions, &open_herdr, &open_at_start, &PredefinedMenuItem::separator(), &about, &quit]);
     add(&about, TrayAction::About);
     add(&quit, TrayAction::Quit);
     (menu, actions)

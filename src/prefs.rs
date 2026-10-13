@@ -35,6 +35,8 @@ pub struct Prefs {
     /// Claude's HP live from Anthropic with Claude Code's OAuth token; off,
     /// only the last /usage Claude Code cached in ~/.claude.json.
     pub claude_usage_live: bool,
+    /// How tall full screen draws its rooms: "large", "medium" or "small".
+    pub room_size: String,
     /// Full screen's guild HP shows each harness's bars; closed, one line.
     pub guild_hp_open: bool,
     /// Folders starred in the summon panel, offered first.
@@ -70,6 +72,7 @@ impl Default for Prefs {
             kiro_plan: 0,
             claude_usage_live: false,
             guild_hp_open: false,
+            room_size: "medium".into(),
             favorite_folders: vec![],
             projects: Default::default(),
             path: None,
