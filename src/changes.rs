@@ -194,8 +194,12 @@ pub fn pull_request(cwd: &str) -> Option<PullRequest> {
 /// The changed files against `base`, and the name of what they are
 /// compared with (an upstream, main), read on a thread.
 pub fn fetch_changes(cwd: String, base: DiffBase) -> Receiver<Result<(Vec<FileChange>, Option<String>), String>> {
-    let cwd = crate::herdr::expand_home(&cwd);
     let (tx, rx) = channel();
+    if is_demo(&cwd) {
+        let _ = tx.send(Ok((DEMO_FILES.iter().map(|(status, path, added, removed, _)| FileChange { status: *status, path: path.to_string(), added: Some(*added), removed: Some(*removed) }).collect(), (base == DiffBase::Main).then(|| "main".to_string()))));
+        return rx;
+    }
+    let cwd = crate::herdr::expand_home(&cwd);
     std::thread::spawn(move || {
         let named = base_commit(&cwd, base).ok().flatten().map(|(_, name)| name);
         let _ = tx.send(changed_files(&cwd, base).map(|files| (files, named)));
@@ -204,18 +208,136 @@ pub fn fetch_changes(cwd: String, base: DiffBase) -> Receiver<Result<(Vec<FileCh
 }
 
 pub fn fetch_diff(cwd: String, change: FileChange, base: DiffBase) -> Receiver<Vec<String>> {
-    let cwd = crate::herdr::expand_home(&cwd);
     let (tx, rx) = channel();
+    if is_demo(&cwd) {
+        let lines = DEMO_FILES.iter().find(|f| f.1 == change.path).map(|f| f.4).unwrap_or_default();
+        let _ = tx.send(lines.lines().map(str::to_string).collect());
+        return rx;
+    }
+    let cwd = crate::herdr::expand_home(&cwd);
     std::thread::spawn(move || { let _ = tx.send(file_diff(&cwd, &change, base, 4000)); });
     rx
 }
 
 pub fn fetch_pull_request(cwd: String) -> Receiver<Option<PullRequest>> {
-    let cwd = crate::herdr::expand_home(&cwd);
     let (tx, rx) = channel();
+    if is_demo(&cwd) {
+        let _ = tx.send(Some(PullRequest { number: 42, title: "Settings page with a theme toggle".into(), url: "https://github.com/guild/website/pull/42".into(), state: "OPEN".into(), draft: false }));
+        return rx;
+    }
+    let cwd = crate::herdr::expand_home(&cwd);
     std::thread::spawn(move || { let _ = tx.send(pull_request(&cwd)); });
     rx
 }
+
+/// The demo's agents work in folders that do not exist: they show these
+/// changes, the same for every one of them.
+fn is_demo(cwd: &str) -> bool {
+    cwd.starts_with("~/demo/")
+}
+
+/// Status, path, lines added and removed, and the file's diff.
+const DEMO_FILES: [(char, &str, u32, u32, &str); 5] = [
+    ('M', "src/pages/Settings.tsx", 38, 9, "@@ -1,9 +1,14 @@
+ import { useState } from \"react\";
+-import { Page } from \"../components/Page\";
++import { Page, Section } from \"../components/Page\";
++import { ThemeToggle } from \"../components/ThemeToggle\";
++import { saveSettings } from \"../api/user\";
+ 
+ export function Settings() {
+-  const [name, setName] = useState(\"\");
++  const [name, setName] = useState(user.name);
++  const [theme, setTheme] = useState(user.theme);
++  const [saving, setSaving] = useState(false);
+ 
+   return (
+     <Page title=\"Settings\">
+@@ -24,6 +29,18 @@ export function Settings() {
+         <input value={name} onChange={(e) => setName(e.target.value)} />
+       </label>
++      <Section title=\"Appearance\">
++        <ThemeToggle value={theme} onChange={setTheme} />
++      </Section>
++      <button
++        disabled={saving}
++        onClick={async () => {
++          setSaving(true);
++          await saveSettings({ name, theme });
++          setSaving(false);
++        }}
++      >
++        {saving ? \"Saving…\" : \"Save\"}
++      </button>
+     </Page>
+   );
+ }"),
+    ('A', "src/components/ThemeToggle.tsx", 27, 0, "@@ -0,0 +1,27 @@
++type Theme = \"light\" | \"dark\" | \"system\";
++
++export function ThemeToggle({ value, onChange }: {
++  value: Theme;
++  onChange: (theme: Theme) => void;
++}) {
++  return (
++    <div role=\"radiogroup\" className=\"theme-toggle\">
++      {([\"light\", \"dark\", \"system\"] as Theme[]).map((theme) => (
++        <button
++          key={theme}
++          role=\"radio\"
++          aria-checked={value === theme}
++          onClick={() => onChange(theme)}
++        >
++          {theme}
++        </button>
++      ))}
++    </div>
++  );
++}"),
+    ('M', "src/api/user.ts", 11, 2, "@@ -8,8 +8,17 @@ export async function getUser() {
+   return res.json();
+ }
+ 
+-export async function saveName(name: string) {
+-  await fetch(\"/api/user\", { method: \"PATCH\", body: JSON.stringify({ name }) });
++export async function saveSettings(settings: { name: string; theme: string }) {
++  const res = await fetch(\"/api/user\", {
++    method: \"PATCH\",
++    headers: { \"Content-Type\": \"application/json\" },
++    body: JSON.stringify(settings),
++  });
++  if (!res.ok) {
++    throw new Error(`Saving settings failed: ${res.status}`);
++  }
+ }"),
+    ('M', "src/styles/settings.css", 14, 3, "@@ -12,7 +12,18 @@
+ .settings label {
+   display: block;
+-  margin-bottom: 8px;
++  margin-bottom: 12px;
+ }
++
++.theme-toggle {
++  display: inline-flex;
++  gap: 4px;
++  padding: 4px;
++  border-radius: 8px;
++}
++
++.theme-toggle [aria-checked=\"true\"] {
++  background: var(--accent);
++}"),
+    ('?', "tests/settings.spec.ts", 19, 0, "@@ -0,0 +1,19 @@
++import { test, expect } from \"@playwright/test\";
++
++test(\"saves the theme\", async ({ page }) => {
++  await page.goto(\"/settings\");
++  await page.getByRole(\"radio\", { name: \"dark\" }).click();
++  await page.getByRole(\"button\", { name: \"Save\" }).click();
++  await page.reload();
++  await expect(page.getByRole(\"radio\", { name: \"dark\" })).toBeChecked();
++});"),
+];
 
 #[cfg(test)]
 mod tests {

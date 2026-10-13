@@ -847,7 +847,8 @@ impl eframe::App for App {
         let fullscreen = self.fullscreen;
         // The HP viewer's data, every 30 s while in full screen.
         if fullscreen && now >= self.next_usage && self.usage_rx.is_none() {
-            self.usage_rx = Some(usage::fetch(herdr::home_dir(), self.prefs.kiro_plan, self.prefs.claude_usage_live));
+            // The demo shows made-up meters, never the user's own.
+            if self.monitor.demo { self.usages = usage::demo(chrono::Local::now().timestamp()); } else { self.usage_rx = Some(usage::fetch(herdr::home_dir(), self.prefs.kiro_plan, self.prefs.claude_usage_live)); }
             self.next_usage = now + 30.0;
         }
         if let Some(rx) = &self.usage_rx {
