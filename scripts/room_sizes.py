@@ -13,8 +13,9 @@ the large one: the gate room recoloured, a cot, a potion rack.
 Usage: export art/dungeon_rooms.aseprite's layers as one PNG per frame
 (frames 1-5: working, blocked, done, idle, unknown) named room_{n}.png,
 props_{n}.png and glow_{n}.png (n from 0), and frame 1's front layer as
-front.png, all into LAYERS_DIR; draw the waiting room's inn walls over its
-`room` layer with `python3 scripts/room_idle.py LAYERS_DIR/room_3.png`; then
+front.png, all into LAYERS_DIR; draw the waiting room (an inn's bedroom,
+not in the Aseprite file) over frame 4's layers with
+`python3 scripts/room_idle.py ROOM.png LAYERS_DIR/room_3.png LAYERS_DIR/props_3.png`; then
     python3 scripts/room_sizes.py LAYERS_DIR OUT_DIR
 OUT_DIR gets room_{state}_{size}.png (and room_working_{size}_front.png),
 which go in Resources/Sprites/rooms, and room_moves.rs, which goes in src/.
@@ -189,27 +190,26 @@ def done(r):
 
 
 def idle(r):
+    """The inn's bedroom: window, hearth and coat rack on the back wall; the
+    canopy bed on the right; barrel and table on the left; the round rug."""
     if r.size == 'medium':
-        r.put((0, 0, 118, 32), (0, 0), code=False)
-        r.put((30, 30, 37, 38), (30, 30), code=False)
-        r.put((118, 22, 134, 46), (118, 12))
-        r.put((112, 59, 130, 77), (112, 38))
-        r.put((10, 46, 24, 55), (10, 34))
-        r.put((12, 74, 24, 85), (12, 45))
-        r.move((80, 34, 96, 46), 0, -4)        # the armchair by the fire
-        r.put((41, 46, 108, 68), (41, 31))     # rug, nightstand and bed
-        r.put((41, 79, 108, 82), (41, 53))     # the rug's bottom border
+        r.put((0, 0, 144, 28), (0, 0), code=False)
+        r.put((32, 28, 42, 42), (32, 28), code=False)     # the coat rack's foot
+        r.move((88, 30, 102, 52), 0, -4)                   # the armchair by the window
+        r.squeeze((103, 20, 135, 68), 16, 8, 20)           # canopy bed, shorter
+        r.put((108, 70, 130, 81), (108, 45))               # trunk
+        r.put((11, 51, 22, 65), (11, 35))                  # barrel
+        r.put((24, 49, 39, 67), (24, 33))                  # table, mug and candle
+        r.squeeze((46, 60, 100, 82), 11, 9, 36)            # rug
     else:
-        r.cut((40, 0, 104, 32))
-        r.put((36, 9, 39, 15), (36, 7))
-        r.put((98, 9, 101, 15), (98, 7))
-        r.put((18, 5, 30, 16), (18, 4))
-        r.put((104, 8, 118, 19), (104, 6))
-        r.put((118, 22, 134, 46), (118, 12))
-        r.move((80, 34, 96, 46), 0, -20)
-        r.put((52, 52, 93, 66), (44, 22))      # the bed alone
-        r.put((10, 46, 24, 55), (10, 24))
-        r.put((12, 74, 24, 85), (26, 25))
+        r.put((49, 6, 88, 17), (49, 5))                    # window, without its lower panes
+        r.put((49, 21, 88, 26), (49, 16))
+        r.put((9, 8, 32, 14), (9, 6))                      # hearth, shorter
+        r.put((9, 18, 32, 28), (9, 12))
+        r.move((88, 30, 102, 52), 0, -20)
+        r.squeeze((103, 20, 135, 68), 16, 10, 10)
+        r.put((11, 51, 22, 65), (11, 22))
+        r.put((24, 49, 39, 59), (24, 25))
 
 
 def unknown(r):
@@ -288,9 +288,7 @@ def limited(size):
             d.rectangle([mx - 1, my - 3, mx + 1, my + 3], fill=RED)
             d.rectangle([mx - 3, my - 1, mx + 3, my + 1], fill=RED)
     # The cot: the idle room's bed in white on a steel frame.
-    bed = load('room_3.png')
-    bed.alpha_composite(load('props_3.png'))
-    bed = bed.crop((52, 52, 93, 66))
+    bed = Image.open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'art', 'idle_bed.png')).convert('RGBA')
     bp = bed.load()
     steel = {(115, 62, 57): (90, 105, 136), (184, 111, 80): (139, 155, 180), (62, 39, 49): (58, 68, 102), (194, 133, 105): (192, 203, 220)}
     for y in range(bed.height):

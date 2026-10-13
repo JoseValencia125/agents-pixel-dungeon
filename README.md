@@ -23,7 +23,7 @@ Binaries for macOS (`.app`) and Linux (x86_64) are on the [Releases](https://git
 | `working` | <img src="docs/media/room_working.png" width="216" alt=""> | Workshop: desk, bookshelves, forge, alchemy table | Works at the station of its last tool: reads, forges, brews, summons, plans or types |
 | `blocked` | <img src="docs/media/room_blocked.png" width="216" alt=""> | Sealed door, braziers, a rug | Jumps on the rug under a pulsing red "!" |
 | session limit | <img src="docs/media/room_limited.png" width="216" alt=""> | Infirmary with a cot under the red cross | Exhausted, asleep on the cot under a breathing blanket, with the time left to recover until the reset |
-| `idle` | <img src="docs/media/room_idle.png" width="216" alt=""> | Chamber at night, by the fireplace | Reads in an armchair by the fire, turning a page now and then |
+| `idle` | <img src="docs/media/room_idle.png" width="216" alt=""> | An inn's bedroom at night: a canopy bed, a corner hearth, the moon through the window | Reads in an armchair by the window, in the moonlight, turning a page now and then |
 | `done` | <img src="docs/media/room_done.png" width="216" alt=""> | Treasure chamber | Jumps for joy under a green tick, confetti flying |
 | unknown | <img src="docs/media/room_unknown.png" width="216" alt=""> | Ruins with a portal | Wanders, looking around |
 

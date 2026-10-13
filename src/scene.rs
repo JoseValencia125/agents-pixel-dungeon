@@ -69,11 +69,16 @@ pub const STYLES: [RoomStyle; 6] = [
                 route: &[pos2(72.0, 80.0), pos2(52.0, 72.0)] },
     RoomStyle { status: "working", title: "TRABAJANDO", background: "room_working", color: Color32::from_rgb(255, 159, 10), bubble: None, spot: pos2(72.0, 34.0), roam: 0.0, lying: false,
                 route: &[pos2(72.0, 80.0), pos2(36.0, 74.0), pos2(36.0, 36.0)] },
-    RoomStyle { status: "idle", title: "EN ESPERA", background: "room_idle", color: Color32::from_rgb(152, 152, 157), bubble: None, spot: pos2(88.0, 40.0), roam: 0.0, lying: false,
-                route: &[pos2(72.0, 80.0), pos2(98.0, 74.0), pos2(98.0, 42.0)] },
+    RoomStyle { status: "idle", title: "EN ESPERA", background: "room_idle", color: Color32::from_rgb(152, 152, 157), bubble: None, spot: pos2(95.0, 40.0), roam: 0.0, lying: false,
+                route: &[pos2(72.0, 80.0), pos2(95.0, 74.0), pos2(95.0, 44.0)] },
     RoomStyle { status: "done", title: "LISTO", background: "room_done", color: Color32::from_rgb(48, 209, 88), bubble: None, spot: pos2(72.0, 66.0), roam: 0.0, lying: false, route: &[] },
     RoomStyle { status: "unknown", title: "SIN ESTADO", background: "room_unknown", color: Color32::from_rgb(152, 152, 157), bubble: Some("…"), spot: pos2(72.0, 62.0), roam: 24.0, lying: false, route: &[] },
 ];
+
+/// The waiting room's window, whose moonlight the reading hero sits in, and
+/// its hearth in the corner.
+const WINDOW: Pos2 = pos2(84.0, 30.0);
+const HEARTH: Pos2 = pos2(20.0, 22.0);
 
 /// The doorway in the bottom wall that every room shares, and a point just
 /// outside it (clipped away) where the hero leaves and arrives.
@@ -1078,11 +1083,11 @@ impl Room {
                         spawned.push(Particle { kind: ParticleKind::Z, origin: Room::rp(self.style.spot), delta: Vec2::ZERO, life: 2.8, age: 0.0 });
                     }
                     EmitterKind::Embers => {
-                        let hearth = Room::rp(pos2(70.0, 22.0));
+                        let hearth = Room::rp(HEARTH);
                         let color = self.rng.pick(&[GOLD, ORANGE]);
                         let dx = self.rng.range(-4.0, 4.0);
                         let dy = -self.rng.range(8.0, 14.0);
-                        spawned.push(Particle { kind: ParticleKind::Bit { color, size: 2.0 }, origin: pos2(hearth.x + self.rng.range(-14.0, 14.0), hearth.y), delta: vec2(dx, dy), life: 0.9, age: 0.0 });
+                        spawned.push(Particle { kind: ParticleKind::Bit { color, size: 2.0 }, origin: pos2(hearth.x + self.rng.range(-7.0, 7.0), hearth.y), delta: vec2(dx, dy), life: 0.9, age: 0.0 });
                     }
                 }
             }
@@ -1247,15 +1252,17 @@ impl Room {
         if self.party_visible {
             for mini in self.party.iter().filter(|m| m.front) { self.draw_mini(&clipped, mini, origin, assets, mini_tint); }
         }
-        // Night in the chamber: only the fireplace lights the room.
+        // Night in the inn's room: the moon through the window lights the
+        // reader; the hearth in the corner glows and flickers.
         if style.status == "idle" && !self.in_transition {
-            let hearth = at(Room::rp(pos2(70.0, 22.0)));
+            let window = at(Room::rp(WINDOW));
             let reach = f.width() * 2.0;
             let e = t % 4.0;
             let s = if e < 1.8 { lerp(0.97, 1.05, e / 1.8) } else { lerp(1.05, 0.97, (e - 1.8) / 2.2) };
-            draw_sprite(&clipped, assets.prop("darkness"), hearth, vec2(reach * s, reach * s), false, 0.0, Color32::WHITE);
-            let fire = 0.15 + 0.05 * (t * 2.3 + self.rng.0 as f32 % 7.0).sin() * (t * 0.7).cos();
-            draw_sprite(&clipped, glow, pos2(hearth.x + 6.0, hearth.y + 8.0), vec2(120.0, 84.0), false, 0.0, with_alpha(Color32::from_rgb(255, 140, 51), fire));
+            draw_sprite(&clipped, assets.prop("darkness"), window, vec2(reach * s, reach * s), false, 0.0, Color32::WHITE);
+            let hearth = at(Room::rp(HEARTH));
+            let fire = 0.2 + 0.06 * (t * 2.3 + self.rng.0 as f32 % 7.0).sin() * (t * 0.7).cos();
+            draw_sprite(&clipped, glow, pos2(hearth.x, hearth.y + 4.0), vec2(64.0, 48.0), false, 0.0, with_alpha(Color32::from_rgb(255, 140, 51), fire));
         }
         // Speech bubble, bobbing over the hero's head.
         let bubble_text = if let Some(runner) = &self.runner {

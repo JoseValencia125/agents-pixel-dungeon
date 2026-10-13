@@ -2,7 +2,7 @@
 
 All bundled artwork is original and made for Agents Pixel Dungeon:
 
-- `Sprites/rooms`: `room_working` (plus its `room_working_front` foreground layer), `room_blocked`, `room_done`, `room_idle` and `room_unknown`; `room_idle`'s walls and floor, an inn's timber and boards, are drawn by `scripts/room_idle.py` over the furniture of `art/dungeon_rooms.aseprite`; each of them also 64 and 40 pixels tall (`room_<state>_medium`, `room_<state>_small`, and the workshop's `_front` layers), composed from the large rooms' layers by `scripts/room_sizes.py`, which also writes `src/room_moves.rs`.
+- `Sprites/rooms`: `room_working` (plus its `room_working_front` foreground layer), `room_blocked`, `room_done`, `room_idle` and `room_unknown`; `room_idle`, an inn's bedroom at night, is drawn whole by `scripts/room_idle.py` (the old waiting room's bed, made up as the infirmary's cot, is kept in `art/idle_bed.png`); each of them also 64 and 40 pixels tall (`room_<state>_medium`, `room_<state>_small`, and the workshop's `_front` layers), composed from the large rooms' layers by `scripts/room_sizes.py`, which also writes `src/room_moves.rs`.
 - `Icon/`: the app icon, a crystal orb showing a terminal prompt, on a wooden table by a burgundy dungeon wall, drawn by `scripts/icon.py`; the menu bar's orb is drawn in `src/tray.rs`.
 - `Sprites/heroes`: one classic hero per harness, coloured after each tool's branding without reproducing logos.
 
