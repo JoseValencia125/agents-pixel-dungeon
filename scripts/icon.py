@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Draw the app icon: a crystal orb on a golden stand showing a terminal
-prompt (a bright green chevron and underscore), on a burgundy dungeon
+prompt (an amber chevron and underscore), on a burgundy dungeon
 wall that fills the whole square (macOS rounds its corners), as pixel
 art scaled up with no smoothing. The orb is the agent's
 scrying glass; the >_ says it is a coding agent in a terminal. Writes
@@ -8,18 +8,20 @@ Resources/Icon/icon.png (1024 px) and the sizes an .iconset needs. Pure
 Python, no PIL."""
 import os, struct, zlib
 
-# Endesga-32 colours, as in the sprites.
+# Endesga-32 colours, as in the sprites, warm to go with the burgundy:
+# a brass ring like the golden stand, a dark plum glass, and the prompt in
+# an amber terminal's colour.
 BG = (0x5e, 0x1c, 0x30)            # burgundy wall
 BG_LIGHT = (0x7a, 0x2a, 0x40)      # its bricks' lit edges
 INK = (0x18, 0x14, 0x25)
-SCREEN = (0x1a, 0x20, 0x28)        # greenish-black orb interior
+SCREEN = (0x24, 0x14, 0x22)        # dark plum orb interior
 GOLD = (0xfe, 0xe7, 0x61)
 GOLD_DARK = (0xc0, 0x96, 0x38)
-PORTAL = (0x78, 0x6e, 0xdc)        # orb ring
-PORTAL_LIGHT = (0xb4, 0xa0, 0xfa)
-TERM = (0x63, 0xe6, 0x8f)          # terminal green
-TERM_DARK = (0x3b, 0xa6, 0x66)
-WHITE = (0xec, 0xf0, 0xf8)
+PORTAL = (0xc2, 0x85, 0x69)        # brass ring
+PORTAL_LIGHT = (0xe8, 0xb7, 0x96)
+TERM = (0xfe, 0xae, 0x34)          # amber prompt
+TERM_DARK = (0xf7, 0x76, 0x22)
+WHITE = (0xf8, 0xe8, 0xd0)         # cream glint
 
 SIZE = 44  # canvas in art pixels
 
