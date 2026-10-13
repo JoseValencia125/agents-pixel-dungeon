@@ -1,4 +1,4 @@
-//! The status item: a pixel knight's helm in the menu bar (macOS) or the
+//! The status item: the app's crystal orb in the menu bar (macOS) or the
 //! system tray (Linux). A left click toggles the widget; the menu has the
 //! sounds, notifications, sessions, window options and quit.
 
@@ -64,31 +64,33 @@ pub struct MenuState {
     pub room_size: String,
 }
 
-/// Menu bar icon: a pixel knight's great helm (T visor, breathing holes,
-/// gorget), one square per pixel, black on clear so macOS tints it as a
+/// Menu bar icon: the app's crystal orb with its >_ prompt cut out, on its
+/// stand, one square per pixel, black on clear so macOS tints it as a
 /// template for light and dark bars.
-pub const HELM: [&str; 14] = [
+pub const ORB: [&str; 16] = [
     "......####......",
     "....########....",
     "...##########...",
+    "..##..########..",
+    "..###..#######..",
+    ".#####..#######.",
+    ".#####..#######.",
+    ".####..########.",
+    ".###..###....##.",
     "..############..",
-    "..##........##..",
-    "..##........##..",
-    "..#####..#####..",
-    "..#####..#####..",
-    "..#####..#####..",
     "..############..",
-    "..##.#.##.#.##..",
     "...##########...",
-    "..############..",
-    ".##############.",
+    "....########....",
+    "......####......",
+    ".....######.....",
+    "...##########...",
 ];
 
-pub fn helm_rgba(scale: usize, color: [u8; 3]) -> (Vec<u8>, u32, u32) {
+pub fn orb_rgba(scale: usize, color: [u8; 3]) -> (Vec<u8>, u32, u32) {
     let w = 16 * scale;
-    let h = HELM.len() * scale;
+    let h = ORB.len() * scale;
     let mut rgba = vec![0u8; w * h * 4];
-    for (y, row) in HELM.iter().enumerate() {
+    for (y, row) in ORB.iter().enumerate() {
         for (x, pixel) in row.chars().enumerate() {
             if pixel != '#' { continue; }
             for dy in 0..scale {
@@ -268,13 +270,13 @@ impl Tray {
                     let _ = icon.set_tooltip(Some(tooltip));
                 }
                 None => {
-                    let (rgba, w, h) = helm_rgba(1, [0, 0, 0]);
+                    let (rgba, w, h) = orb_rgba(1, [0, 0, 0]);
                     let built = TrayIconBuilder::new()
                         .with_menu(Box::new(menu))
                         .with_menu_on_left_click(false)
                         .with_icon_as_template(true)
                         .with_tooltip(tooltip)
-                        .with_icon(Icon::from_rgba(rgba, w, h).expect("helm icon"))
+                        .with_icon(Icon::from_rgba(rgba, w, h).expect("orb icon"))
                         .build();
                     self.icon = built.ok();
                 }
@@ -310,11 +312,11 @@ fn linux_host(shared: Arc<Mutex<HashMap<MenuId, TrayAction>>>) -> Sender<MenuSta
                         match &icon {
                             Some(existing) => { existing.set_menu(Some(Box::new(menu))); let _ = existing.set_tooltip(Some(tooltip)); }
                             None => {
-                                let (rgba, w, h) = helm_rgba(2, [230, 230, 230]);
+                                let (rgba, w, h) = orb_rgba(2, [230, 230, 230]);
                                 icon = TrayIconBuilder::new()
                                     .with_menu(Box::new(menu))
                                     .with_tooltip(tooltip)
-                                    .with_icon(Icon::from_rgba(rgba, w, h).expect("helm icon"))
+                                    .with_icon(Icon::from_rgba(rgba, w, h).expect("orb icon"))
                                     .build()
                                     .ok();
                             }

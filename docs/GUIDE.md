@@ -84,7 +84,7 @@ Under the rooms, full screen shows the guild's HP (usage left), closed to one li
 
 ## The status item and its menu
 
-Close or minimize the window to keep monitoring from the menu bar (macOS) or the tray (Linux), where a pixel knight's helm marks the app; its tooltip counts the agents needing attention. A left click shows or hides the window; the menu has:
+Close or minimize the window to keep monitoring from the menu bar (macOS) or the tray (Linux), where the app's pixel crystal orb marks it; its tooltip counts the agents needing attention. A left click shows or hides the window; the menu has:
 
 - **Show / hide**, **Move back to the corner**, **Always on top** (on by default), **Full screen**, **Open at login** (a LaunchAgent on macOS, an autostart entry on Linux).
 - **Console text size**: the agent's terminal at its own size, apart from the panels' text (also **A+** / **A-** in the chat header, or ⌘⇧+ / ⌘⇧- / ⌘⇧0).

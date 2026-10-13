@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Draw the app icon: a crystal orb on a golden stand showing a terminal
-prompt (a bright green chevron and underscore), on a dark dungeon-stone
-tile, as pixel art scaled up with no smoothing. The orb is the agent's
+prompt (a bright green chevron and underscore), on a burgundy dungeon
+wall that fills the whole square (macOS rounds its corners), as pixel
+art scaled up with no smoothing. The orb is the agent's
 scrying glass; the >_ says it is a coding agent in a terminal. Writes
 Resources/Icon/icon.png (1024 px) and the sizes an .iconset needs. Pure
 Python, no PIL."""
 import os, struct, zlib
 
 # Endesga-32 colours, as in the sprites.
-BG = (0x3a, 0x44, 0x66)
-BG_EDGE = (0x26, 0x2b, 0x44)
-BG_LIGHT = (0x5a, 0x69, 0x88)
+BG = (0x5e, 0x1c, 0x30)            # burgundy wall
+BG_LIGHT = (0x7a, 0x2a, 0x40)      # its bricks' lit edges
 INK = (0x18, 0x14, 0x25)
 SCREEN = (0x1a, 0x20, 0x28)        # greenish-black orb interior
 GOLD = (0xfe, 0xe7, 0x61)
@@ -25,18 +25,11 @@ SIZE = 44  # canvas in art pixels
 
 def pixels():
     px = {}
-    r = 8  # corner radius of the tile
     for y in range(SIZE):
         for x in range(SIZE):
-            # Rounded square tile.
-            cx = min(max(x, r), SIZE - 1 - r)
-            cy = min(max(y, r), SIZE - 1 - r)
-            if (x - cx) ** 2 + (y - cy) ** 2 > r * r:
-                continue
-            edge = x < 2 or y < 2 or x >= SIZE - 2 or y >= SIZE - 2 or (x - cx) ** 2 + (y - cy) ** 2 > (r - 2) ** 2
-            # Faint bricks.
+            # The whole square: macOS masks it to its rounded shape.
             brick = ((y // 6) % 2 == 0 and x % 12 == 0) or ((y // 6) % 2 == 1 and (x + 6) % 12 == 0) or y % 6 == 0
-            px[(x, y)] = BG_EDGE if edge else (BG_LIGHT if brick and (x + y) % 3 == 0 else BG)
+            px[(x, y)] = BG_LIGHT if brick and (x + y) % 3 == 0 else BG
 
     def inside(x, y):
         return (x, y) in px
@@ -97,13 +90,13 @@ def pixels():
     return px
 
 def png(path, size, px):
-    scale = size // SIZE
-    pad = (size - SIZE * scale) // 2
+    # Nearest pixel of the art for each pixel of the image, so the wall
+    # reaches every edge at any size.
     rows = []
     for y in range(size):
         row = bytearray([0])
         for x in range(size):
-            p = px.get(((x - pad) // scale, (y - pad) // scale)) if pad <= x < pad + SIZE * scale and pad <= y < pad + SIZE * scale else None
+            p = px.get((x * SIZE // size, y * SIZE // size))
             row += bytes(p) + b"\xff" if p else b"\x00\x00\x00\x00"
         rows.append(bytes(row))
     raw = b"".join(rows)
