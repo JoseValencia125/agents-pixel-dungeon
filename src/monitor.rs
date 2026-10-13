@@ -673,7 +673,7 @@ impl Monitor {
         let wake = self.wake.clone();
         std::thread::spawn(move || {
             let text = if demo || agent.id.starts_with("pid:") {
-                format!("\x1b[38;2;215;119;87m●\x1b[0m \x1b[1m{}\x1b[0m\n  \x1b[2m⎿ Leyendo archivos del proyecto…\x1b[0m\n\n\x1b[38;2;136;136;136m────────────────────────────\x1b[0m\n❯ \x1b[2mTry \"fix the failing test\"\x1b[0m", agent.activity)
+                format!("\x1b[38;2;215;119;87m●\x1b[0m \x1b[1m{}\x1b[0m\n  \x1b[2m⎿ {}\x1b[0m\n\n\x1b[38;2;136;136;136m────────────────────────────\x1b[0m\n❯ \x1b[2mTry \"fix the failing test\"\x1b[0m", agent.activity, tr("Leyendo archivos del proyecto…"))
             } else {
                 let (source, lines) = if history { ("recent", "1000") } else { ("visible", "80") };
                 run_herdr(&["agent", "read", &agent.id, "--source", source, "--lines", lines, "--format", "ansi"], &session, Duration::from_secs(4))

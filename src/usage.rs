@@ -48,6 +48,16 @@ pub fn fetch(home: PathBuf, kiro_plan: u32, claude_live: bool) -> Receiver<Vec<H
     rx
 }
 
+/// The demo's meters: made up, with resets counted from `now`.
+pub fn demo(now: i64) -> Vec<HarnessUsage> {
+    let meter = |window, used, hours: i64| Meter { window, used, resets: Some(now + hours * 3600 + 14 * 60) };
+    vec![
+        HarnessUsage { harness: "claude", meters: vec![meter("5h", 38.0, 2), meter("sem", 61.0, 75)], credits: None },
+        HarnessUsage { harness: "codex", meters: vec![meter("5h", 72.0, 1), meter("sem", 44.0, 102)], credits: None },
+        HarnessUsage { harness: "kiro", meters: vec![meter("mes", 58.0, 430)], credits: Some((580.0, Some(1000))) },
+    ]
+}
+
 // ---- Claude Code
 
 /// Claude's usage: with `live`, asked to Anthropic with Claude Code's token
