@@ -1,4 +1,4 @@
-<p align="center"><img src="Resources/Icon/icon_256.png" width="128" alt="Agents Pixel Dungeon icon: a crystal orb showing a terminal prompt on a burgundy dungeon wall"></p>
+<p align="center"><img src="Resources/Icon/icon_256.png" width="128" alt="Agents Pixel Dungeon icon: a crystal orb showing a terminal prompt, on a wooden table by a burgundy dungeon wall"></p>
 
 # Agents Pixel Dungeon
 
