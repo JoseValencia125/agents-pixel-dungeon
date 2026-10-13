@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.2.0...v2.3.0) (2026-10-13)
+
+
+### Added
+
+* demo data for the diff, PR and HP, and a full screen GIF in the README ([eb2be35](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/eb2be35eb1fbfc1186248868134f6daa17c60b2a))
+* drag the bar under the rooms to size the chat ([36a39c1](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/36a39c107f7704e697bf5d53ceb366682288978c))
+* keep the size you drag the widget to, and drag the bar to size the chat ([#7](https://github.com/JoseValencia125/agents-pixel-dungeon/issues/7), [#8](https://github.com/JoseValencia125/agents-pixel-dungeon/issues/8)) ([6b996ee](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/6b996ee284c32dd5d8b00026cad2637c7865f18d))
+* the demo shows a diff, a pull request and the guild's HP ([5aae935](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/5aae935ffde247470a328d79d0d3ddf4a96d71a2))
+
+
+### Fixed
+
+* keep the window size the user drags to ([019a169](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/019a1696eb841fc391bacc062983dcb5a887397b))
+
 ## [2.2.0](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.1.2...v2.2.0) (2026-10-13)
 
 
