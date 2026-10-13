@@ -12,6 +12,8 @@ The app is written in Rust and links MIT/Apache-2.0 crates (egui/eframe, tray-ic
 
 ## Inspiration
 
+The integrated terminal uses [egui_term](https://github.com/Harzu/egui_term) (MIT), backed by alacritty_terminal (Apache-2.0).
+
 Inspired by [Claude Dungeon / claude-pixel-agent-web](https://github.com/thousandsky2024/claude-pixel-agent-web) by thousandsky2024, which first pictured coding agents as dungeon heroes. No code or artwork from that project is included.
 
 ## Herdr

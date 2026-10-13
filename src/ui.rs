@@ -336,6 +336,7 @@ impl ChatState {
 
 pub struct ChatAction {
     pub close: bool,
+    pub terminal: bool,
     /// The console's text size: +1 bigger, -1 smaller.
     pub console_step: i8,
 }
@@ -346,7 +347,7 @@ pub struct ChatAction {
 /// twice a second; `wide` (full screen) sizes the font so its lines stay
 /// whole. A question keeps the plain lines, whose options are clicked.
 pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatState, now: f64, wide: bool) -> ChatAction {
-    let mut action = ChatAction { close: false, console_step: 0 };
+    let mut action = ChatAction { close: false, terminal: false, console_step: 0 };
     // Files dropped on the window go to the message as paths.
     let dropped = dropped_paths(ui);
     if !dropped.is_empty() { add_paths(&mut state.draft, &dropped); state.focus = true; }
@@ -453,7 +454,7 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
                     state.run(monitor.focus(agent));
                 }
                 if flat_button(ui, mono(">_", 11.0).strong().color(Color32::from_gray(200))).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
-                    crate::herdr::open_terminal(&agent.cwd);
+                    action.terminal = true;
                 }
                 // The console's own text size.
                 if flat_button(ui, mono("A+", 11.0).color(Color32::from_gray(200))).on_hover_text(format!("{} (⌘⇧+)", tr("Consola más grande"))).clicked() { action.console_step = 1; }

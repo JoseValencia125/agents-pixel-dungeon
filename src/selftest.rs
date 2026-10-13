@@ -314,6 +314,9 @@ pub fn run() {
     assert!(listed == vec![HerdrSession { name: "default".into(), running: true }, HerdrSession { name: "work".into(), running: false }] && decode_sessions(b"nope").is_empty());
     let named = agent_name("codex", "Mi Proyecto_2");
     assert!(named.starts_with("codex-mi-proyecto-2-") && named.len() == 24, "Agent name: {named}");
+    let long = agent_name("claude", "saludtech-android-app");
+    let accented = agent_name("opencode", "Diseño Ñandú");
+    assert!(long.len() <= 32 && long.starts_with("claude-saludtech-android-") && accented.starts_with("opencode-dise-o-and-"), "Agent names: {long} {accented}");
     assert!(root_pane(br#"{"result":{"root_pane":{"pane_id":"w3:p1"},"tab":{}}}"#).as_deref() == Some("w3:p1") && root_pane(b"{}").is_none());
     let screen = crate::ansi::parse("\x1b[0m\x1b[1m\x1b[38;5;2mok\x1b[0m plain\r\n\x1b[38;2;215;119;87m●\x1b[0m\x1b[48;2;1;2;3m x\x1b[0m\n\n");
     assert!(screen.len() == 2 && crate::ansi::plain(&screen) == ["ok plain", "● x"], "ANSI lines: {:?}", crate::ansi::plain(&screen));

@@ -12,6 +12,11 @@ pub const LANGUAGES: [&str; 5] = ["es", "en", "fr", "it", "pt"];
 pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock::new(|| {
     let rows: &[(&str, [&str; 4])] = &[
         // Room titles
+        ("Ocultar terminal", ["Hide terminal", "Masquer le terminal", "Nascondi terminale", "Ocultar terminal"]),
+        ("Terminal externa", ["External terminal", "Terminal externe", "Terminale esterno", "Terminal externo"]),
+        ("Nueva sesión", ["New session", "Nouvelle session", "Nuova sessione", "Nova sessão"]),
+        ("Sesión terminada", ["Session ended", "Session terminée", "Sessione terminata", "Sessão encerrada"]),
+        ("Cerrar la ventana conserva la sesión. Usa exit para terminarla.", ["Closing the window keeps the session. Use exit to end it.", "Fermer la fenêtre conserve la session. Utilisez exit pour la terminer.", "Chiudere la finestra conserva la sessione. Usa exit per terminarla.", "Fechar a janela mantém a sessão. Use exit para encerrá-la."]),
         ("TRABAJANDO", ["WORKING", "AU TRAVAIL", "AL LAVORO", "TRABALHANDO"]),
         ("ATENCIÓN", ["ATTENTION", "ATTENTION", "ATTENZIONE", "ATENÇÃO"]),
         ("EN ESPERA", ["WAITING", "EN ATTENTE", "IN ATTESA", "EM ESPERA"]),

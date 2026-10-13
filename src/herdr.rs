@@ -764,11 +764,15 @@ pub fn installed_kinds() -> Vec<&'static str> {
     if found.is_empty() { CREATABLE_KINDS.to_vec() } else { found }
 }
 
-/// A unique, readable Herdr agent name: kind, folder and a short suffix.
+/// A unique, readable Herdr agent name: kind, folder and a short suffix,
+/// within what Herdr takes (lowercase ASCII letters, digits, '-' and '_',
+/// 32 characters at most).
 pub fn agent_name(kind: &str, folder: &str) -> String {
-    let slug: String = folder.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
-    let slug = slug.split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-");
-    let slug: String = if slug.is_empty() { "agent".into() } else { slug.chars().take(24).collect() };
+    let slug: String = folder.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let room = 32usize.saturating_sub(kind.len() + 6);
+    let slug: String = slug.split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-").chars().take(room).collect();
+    let slug = slug.trim_end_matches('-');
+    let slug = if slug.is_empty() { "agent" } else { slug };
     let suffix: String = format!("{:04x}", (std::time::SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) ^ std::process::id() as u128) & 0xffff);
     format!("{kind}-{slug}-{suffix}")
 }

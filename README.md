@@ -31,6 +31,12 @@ When the state changes the hero walks out through the door, the room changes beh
 
 The session limit is not a Herdr state: the dungeon reads it from Claude Code's own files when an agent or one of its background sessions hits its usage limit ("You've hit your session limit · resets 2:20pm"), and shows it until the limit resets.
 
+## Integrated terminal
+
+Click `>_` in an agent's chat, or choose the terminal action from its room's context menu, to open an integrated shell in that agent's folder. Each folder has its own session, with terminal colours, scrolling, selection, paste and interactive commands. Closing the terminal window keeps its session alive while the app runs; open it again from the same folder to continue. Run `exit` to end the shell, then choose **New session** to start again. Quitting the app closes its terminals. **External terminal** remains available in the terminal toolbar.
+
+This shell is independent from the agent's chat and runs your login shell (`$SHELL`, with `/bin/bash` as fallback).
+
 ## Heroes
 
 | Harness | Hero | |
