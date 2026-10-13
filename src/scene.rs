@@ -69,16 +69,16 @@ pub const STYLES: [RoomStyle; 6] = [
                 route: &[pos2(72.0, 80.0), pos2(52.0, 72.0)] },
     RoomStyle { status: "working", title: "TRABAJANDO", background: "room_working", color: Color32::from_rgb(255, 159, 10), bubble: None, spot: pos2(72.0, 34.0), roam: 0.0, lying: false,
                 route: &[pos2(72.0, 80.0), pos2(36.0, 74.0), pos2(36.0, 36.0)] },
-    RoomStyle { status: "idle", title: "EN ESPERA", background: "room_idle", color: Color32::from_rgb(152, 152, 157), bubble: None, spot: pos2(95.0, 40.0), roam: 0.0, lying: false,
-                route: &[pos2(72.0, 80.0), pos2(95.0, 74.0), pos2(95.0, 44.0)] },
+    RoomStyle { status: "idle", title: "EN ESPERA", background: "room_idle", color: Color32::from_rgb(152, 152, 157), bubble: None, spot: pos2(106.0, 40.0), roam: 0.0, lying: false,
+                route: &[pos2(72.0, 80.0), pos2(90.0, 74.0), pos2(90.0, 46.0)] },
     RoomStyle { status: "done", title: "LISTO", background: "room_done", color: Color32::from_rgb(48, 209, 88), bubble: None, spot: pos2(72.0, 66.0), roam: 0.0, lying: false, route: &[] },
     RoomStyle { status: "unknown", title: "SIN ESTADO", background: "room_unknown", color: Color32::from_rgb(152, 152, 157), bubble: Some("…"), spot: pos2(72.0, 62.0), roam: 24.0, lying: false, route: &[] },
 ];
 
 /// The waiting room's window, whose moonlight the reading hero sits in, and
-/// its hearth in the corner.
-const WINDOW: Pos2 = pos2(84.0, 30.0);
-const HEARTH: Pos2 = pos2(20.0, 22.0);
+/// the hearth at its back.
+const WINDOW: Pos2 = pos2(92.0, 30.0);
+const HEARTH: Pos2 = pos2(106.0, 22.0);
 
 /// The doorway in the bottom wall that every room shares, and a point just
 /// outside it (clipped away) where the hero leaves and arrives.

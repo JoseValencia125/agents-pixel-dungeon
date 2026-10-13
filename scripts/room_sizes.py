@@ -191,25 +191,23 @@ def done(r):
 
 def idle(r):
     """The inn's bedroom: window, hearth and coat rack on the back wall; the
-    canopy bed on the right; barrel and table on the left; the round rug."""
+    canopy bed on the left; barrel and table bottom right; the round rug."""
     if r.size == 'medium':
         r.put((0, 0, 144, 28), (0, 0), code=False)
-        r.put((32, 28, 42, 42), (32, 28), code=False)     # the coat rack's foot
-        r.move((88, 30, 102, 52), 0, -4)                   # the armchair by the window
-        r.squeeze((103, 20, 135, 68), 16, 8, 20)           # canopy bed, shorter
-        r.put((108, 70, 130, 81), (108, 45))               # trunk
-        r.put((11, 51, 22, 65), (11, 35))                  # barrel
-        r.put((24, 49, 39, 67), (24, 33))                  # table, mug and candle
+        r.put((122, 28, 134, 42), (122, 28), code=False)  # the coat rack's foot
+        r.move((98, 30, 114, 52), 0, -4)                   # the armchair before the hearth
+        r.squeeze((9, 20, 42, 68), 16, 8, 20)              # canopy bed, shorter
+        r.put((14, 70, 37, 81), (14, 45))                  # trunk
+        r.put((118, 62, 129, 76), (118, 42))               # barrel
         r.squeeze((46, 60, 100, 82), 11, 9, 36)            # rug
     else:
         r.put((49, 6, 88, 17), (49, 5))                    # window, without its lower panes
         r.put((49, 21, 88, 26), (49, 16))
-        r.put((9, 8, 32, 14), (9, 6))                      # hearth, shorter
-        r.put((9, 18, 32, 28), (9, 12))
-        r.move((88, 30, 102, 52), 0, -20)
-        r.squeeze((103, 20, 135, 68), 16, 10, 10)
-        r.put((11, 51, 22, 65), (11, 22))
-        r.put((24, 49, 39, 59), (24, 25))
+        r.put((95, 8, 118, 14), (95, 6))                   # hearth, shorter
+        r.put((95, 18, 118, 28), (95, 12))
+        r.move((98, 30, 114, 52), 0, -20)
+        r.squeeze((9, 20, 42, 68), 16, 10, 10)
+        r.put((118, 62, 129, 76), (118, 22))
 
 
 def unknown(r):

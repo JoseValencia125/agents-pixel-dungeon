@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Draw the waiting room: an inn's bedroom at night. Plaster walls between
 dark timber, a window with the moon whose light falls across the board
-floor, a small hearth in the corner, a canopy bed with a patchwork quilt
-and a trunk at its foot, a coat rack, a barrel and a little table with a
-mug and a candle, and a round rug. The hero reads in an armchair by the
-window (the code draws the armchair, at the room style's spot).
+floor, a small hearth by it, a canopy bed with a patchwork quilt and a
+trunk at its foot, a coat rack, a barrel and a little table with a mug
+and a candle, and a round rug. The hero reads in an armchair before the
+hearth, by the window (the code draws the armchair, at the room style's
+spot).
 
 The walls, floor and frame keep the other rooms' places (the door, the
 back wall's height), so the hero walks in and out the same way.
@@ -48,8 +49,10 @@ class Layer:
     def __init__(self):
         self.im = Image.new('RGBA', (W, H))
         self.px = self.im.load()
+        self.at = (0, 0)  # where the piece being drawn is moved to
 
     def put(self, x, y, c, a=255):
+        x, y = x + self.at[0], y + self.at[1]
         if 0 <= x < W and 0 <= y < H:
             self.px[x, y] = tuple(c) + (a,)
 
@@ -60,6 +63,7 @@ class Layer:
 
     def get(self, x, y):
         return self.px[x, y][:3]
+
 
 
 def mix(a, b, k):
@@ -155,7 +159,8 @@ def furniture():
                 p.put(x, y, CURTAIN_DARK if (x - x0) % 2 == 0 else CURTAIN)
         for x in range(x0, x1 + 1):
             p.put(x, 14, GOLD)                  # the tie
-    # ---- Hearth in the corner: stone, a small fire.
+    # ---- Hearth right of the window, behind the reader: stone, a small fire.
+    p.at = (86, 0)
     p.box(10, 9, 30, 27, STONE)
     p.box(10, 9, 30, 9, STONE_LIT)
     p.box(9, 8, 31, 10, BEAM)                   # mantel
@@ -169,7 +174,9 @@ def furniture():
     for x in range(10, 31, 5):
         p.put(x, 18, STONE_LIT)
         p.put(x + 2, 23, STONE_LIT)
-    # ---- Coat rack: a pole, a hook bar, a hooded cloak and a hat on top.
+    # ---- Coat rack in the right corner: a pole, a hook bar, a hooded cloak
+    # and a hat on top.
+    p.at = (91, 0)
     p.box(36, 12, 37, 40, BEAM)
     p.box(33, 40, 40, 41, DARK)
     p.box(32, 15, 41, 15, DARK)
@@ -185,7 +192,8 @@ def furniture():
     p.box(32, 13, 41, 14, DARK)                 # the hat's brim
     p.box(34, 9, 39, 12, BEAM)                  # its crown
     p.box(34, 12, 39, 12, GOLD)                 # and band
-    # ---- Canopy bed on the right: posts, drape, headboard, pillow, quilt.
+    # ---- Canopy bed on the left: posts, drape, headboard, pillow, quilt.
+    p.at = (-94, 0)
     for x0 in (103, 133):
         p.box(x0, 20, x0 + 1, 67, DARK)
     p.box(103, 20, 134, 23, CURTAIN)
@@ -205,6 +213,7 @@ def furniture():
     p.box(105, 63, 132, 67, BEAM)
     p.box(105, 63, 132, 63, WOOD)
     # ---- Trunk at the bed's foot.
+    p.at = (-94, 0)
     p.box(108, 70, 129, 80, BEAM)
     p.box(108, 70, 129, 72, WOOD)
     p.box(108, 73, 129, 73, DARK)
@@ -212,13 +221,15 @@ def furniture():
     for x in (112, 125):
         p.box(x, 70, x, 80, METAL)
     p.box(118, 74, 119, 76, GOLD)
-    # ---- Barrel, and a little table with a mug and a candle.
+    # ---- Barrel, and a little table with a mug and a candle, bottom right.
+    p.at = (107, 11)
     p.box(11, 52, 21, 64, BEAM)
     p.box(12, 51, 20, 51, WOOD)
     for x in (13, 16, 19):
         p.box(x, 52, x, 64, DARK)
     for y in (54, 61):
         p.box(11, y, 21, y, METAL)
+    p.at = (77, 11)
     p.box(24, 56, 38, 58, WOOD)                 # the table's top
     p.box(24, 58, 38, 58, BEAM)
     p.box(26, 59, 27, 66, DARK)
@@ -230,6 +241,7 @@ def furniture():
     p.put(34, 50, FIRE[1])
     p.put(35, 49, FIRE[2])
     # ---- Round rug.
+    p.at = (0, 0)
     for y in range(60, 82):
         for x in range(46, 100):
             d = ((x - 73) / 26) ** 2 + ((y - 71) / 10.5) ** 2
