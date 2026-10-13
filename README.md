@@ -60,6 +60,7 @@ Original pixel art drawn in Aseprite (sources in `art/`), coloured after each to
 - **Subagents** as small heroes at the station of their own tool (Claude Code).
 - **Filters, search and an activity log**; the window resizes to whole rooms, scrolls, and remembers where you left it.
 - **Full screen** (⌃⌘F, F11 on Linux): its own space, one column of rooms on the left, the live console (colours and all) in the rest.
+- **See an agent's diff** in full screen: **± Diff** in its chat lists the files changed in its folder (uncommitted, unpushed, or against main as in a pull request) with lines added and removed; click one for its diff. A **PR #N** chip opens the branch's pull request.
 - **Event-driven**: Herdr's socket events the moment they happen, snapshots only to reconcile.
 - Spanish, English, French, Italian and Portuguese.
 
