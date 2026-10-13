@@ -9,7 +9,7 @@ use crate::l10n::{tr, trf};
 use crate::monitor::{GuildEvent, Monitor};
 use crate::prefs::Prefs;
 use crate::scene::agent_color;
-use egui::{pos2, vec2, Align2, Color32, Context, CornerRadius, FontId, Frame, Key, Margin, RichText, Stroke, Ui, Vec2};
+use egui::{pos2, vec2, Align2, Color32, Context, CornerRadius, FontId, Frame, Key, Margin, Rect, RichText, Stroke, Ui, Vec2};
 use std::sync::mpsc::Receiver;
 
 pub const HUD_HEIGHT: f32 = 28.0;
@@ -348,11 +348,22 @@ pub struct ChatState {
     /// second), and the one asked to stop (waiting for a yes).
     shell_open: Option<(u32, f64, Vec<String>)>,
     shell_stop: Option<u32>,
+    /// Full screen's column of changed files (re-read every 3 s while open),
+    /// the file whose diff shows, and the branch's pull request (every minute).
+    changes: Option<Result<Vec<crate::changes::FileChange>, String>>,
+    changes_rx: Option<Receiver<Result<Vec<crate::changes::FileChange>, String>>>,
+    next_changes: f64,
+    diff_path: Option<String>,
+    diff: Vec<String>,
+    diff_rx: Option<Receiver<Vec<String>>>,
+    pull: Option<crate::changes::PullRequest>,
+    pull_rx: Option<Receiver<Option<crate::changes::PullRequest>>>,
+    next_pull: f64,
 }
 
 impl ChatState {
     pub fn new(agent_id: &str) -> ChatState {
-        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false, shell_open: None, shell_stop: None }
+        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false, shell_open: None, shell_stop: None, changes: None, changes_rx: None, next_changes: 0.0, diff_path: None, diff: vec![], diff_rx: None, pull: None, pull_rx: None, next_pull: 0.0 }
     }
 
     pub fn with_draft(mut self, draft: String) -> ChatState {
@@ -401,7 +412,131 @@ pub struct ChatAction {
 /// The terminal is shown as it is, colours and spinners included, refreshed
 /// twice a second; `wide` (full screen) sizes the font so its lines stay
 /// whole. A question keeps the plain lines, whose options are clicked.
+/// Whether full screen shows the column of changed files (kept while the
+/// app runs, for every agent).
+fn changes_open(ctx: &Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::new("changes-open"))).unwrap_or(false)
+}
+
 pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatState, now: f64, wide: bool) -> ChatAction {
+    poll_changes(ui.ctx(), agent, state, now, wide && changes_open(ui.ctx()));
+    if !(wide && changes_open(ui.ctx())) { return chat_body(ui, monitor, agent, state, now, wide); }
+    // The changed files take the console's right side.
+    let full = ui.max_rect();
+    let side = (full.width() * 0.36).clamp(260.0, 560.0);
+    let left = Rect::from_min_max(full.min, pos2(full.max.x - side - 12.0, full.max.y));
+    let right = Rect::from_min_max(pos2(full.max.x - side, full.min.y), full.max);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(right), |ui| changes_column(ui, agent, state));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(left), |ui| chat_body(ui, monitor, agent, state, now, wide)).inner
+}
+
+/// Keep the pull request (every minute, while the chat is open) and, with
+/// the column open, the changed files and the open diff (every 3 s) fresh.
+fn poll_changes(ctx: &Context, agent: &Agent, state: &mut ChatState, now: f64, column: bool) {
+    let in_repo = agent.branch.is_some();
+    if in_repo && now >= state.next_pull && state.pull_rx.is_none() {
+        state.pull_rx = Some(crate::changes::fetch_pull_request(agent.cwd.clone()));
+        state.next_pull = now + 60.0;
+    }
+    if let Some(rx) = &state.pull_rx {
+        if let Ok(pull) = rx.try_recv() { state.pull = pull; state.pull_rx = None; ctx.request_repaint(); }
+    }
+    if column && now >= state.next_changes && state.changes_rx.is_none() {
+        state.changes_rx = Some(crate::changes::fetch_changes(agent.cwd.clone()));
+        state.next_changes = now + 3.0;
+        let picked = state.diff_path.as_ref().and_then(|p| state.changes.as_ref()?.as_ref().ok()?.iter().find(|f| &f.path == p)).cloned();
+        if let (Some(change), None) = (picked, &state.diff_rx) { state.diff_rx = Some(crate::changes::fetch_diff(agent.cwd.clone(), change)); }
+    }
+    if let Some(rx) = &state.changes_rx {
+        if let Ok(changes) = rx.try_recv() { state.changes = Some(changes); state.changes_rx = None; ctx.request_repaint(); }
+    }
+    if let Some(rx) = &state.diff_rx {
+        if let Ok(diff) = rx.try_recv() { state.diff = diff; state.diff_rx = None; ctx.request_repaint(); }
+    }
+}
+
+/// The list's height in the column: its rows, up to 42% of the column (60
+/// pt at least, when there are that many).
+pub(crate) fn changes_list_height(column: f32, files: usize) -> f32 {
+    (21.0 * files as f32 + 4.0).min((column * 0.42).max(60.0))
+}
+
+/// The column of changed files: each with its status, path and lines added
+/// and removed; a click shows its diff under the list.
+fn changes_column(ui: &mut Ui, agent: &Agent, state: &mut ChatState) {
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(rect, CornerRadius::same(5), alpha(Color32::BLACK, 0.45));
+    let inner = rect.shrink(8.0);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+        ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+        let files = match &state.changes { Some(Ok(files)) => Some(files.clone()), _ => None };
+        // Its title: how many files and lines, and × to close it.
+        ui.horizontal(|ui| {
+            let title = match (&state.changes, &files) {
+                (_, Some(files)) => trf("{} archivos cambiados", &[&files.len().to_string()]),
+                (Some(Err(_)), _) => tr("No es un repositorio git"),
+                _ => tr("Leyendo cambios…"),
+            };
+            ui.label(mono(&title, 11.0).strong().color(if files.is_some() { Color32::WHITE } else { DIM }));
+            if let (Some(branch), Some(_)) = (&agent.branch, &files) { ui.label(mono(branch, 10.0).color(DIM)); }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if flat_button(ui, mono("×", 14.0).color(Color32::WHITE)).on_hover_text(tr("Cerrar los archivos cambiados")).clicked() {
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("changes-open"), false));
+                }
+                if let Some(files) = &files {
+                    let (added, removed) = files.iter().fold((0, 0), |(a, r), f| (a + f.added.unwrap_or(0), r + f.removed.unwrap_or(0)));
+                    ui.add_space(4.0);
+                    ui.label(mono(&format!("−{removed}"), 10.0).color(Color32::from_rgb(255, 105, 97)));
+                    ui.label(mono(&format!("+{added}"), 10.0).color(Color32::from_rgb(99, 199, 77)));
+                }
+            });
+        });
+        let Some(files) = files else { return };
+        if files.is_empty() { ui.label(mono(&tr("Sin cambios"), 11.0).color(DIM)); return; }
+        let list_h = changes_list_height(ui.available_height(), files.len());
+        egui::ScrollArea::vertical().id_salt("changed-files").max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 1.0);
+            for file in &files {
+                let picked = state.diff_path.as_deref() == Some(file.path.as_str());
+                let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), egui::Sense::click());
+                if picked || response.hovered() { ui.painter().rect_filled(row, CornerRadius::same(3), alpha(Color32::WHITE, if picked { 0.1 } else { 0.05 })); }
+                let color = match file.status { 'A' => Color32::from_rgb(99, 199, 77), 'D' => Color32::from_rgb(255, 105, 97), '?' => Color32::from_rgb(44, 232, 245), 'R' => Color32::from_rgb(181, 80, 136), 'U' => Color32::from_rgb(255, 69, 58), _ => Color32::from_rgb(254, 174, 52) };
+                let font = FontId::monospace(fs(11.0));
+                let painter = ui.painter();
+                // As editors show them: U untracked, ! in conflict.
+                let letter = match file.status { '?' => 'U', 'U' => '!', other => other };
+                painter.text(pos2(row.min.x + 6.0, row.center().y), Align2::LEFT_CENTER, letter.to_string(), font.clone(), color);
+                let counts = match (file.added, file.removed) { (Some(a), Some(r)) => format!("+{a} −{r}"), _ => "bin".to_string() };
+                let counts_rect = painter.text(pos2(row.max.x - 6.0, row.center().y), Align2::RIGHT_CENTER, &counts, FontId::monospace(fs(10.0)), DIM);
+                // The file's name in white, its folder dimmed before it, cut from the left.
+                let room = counts_rect.min.x - row.min.x - 30.0;
+                let (dir, name) = file.path.rsplit_once('/').map(|(d, n)| (format!("{d}/"), n.to_string())).unwrap_or((String::new(), file.path.clone()));
+                let name_w = painter.layout_no_wrap(name.clone(), font.clone(), Color32::WHITE).size().x;
+                let mut dir_shown = dir.clone();
+                while !dir_shown.is_empty() && painter.layout_no_wrap(format!("…{dir_shown}"), font.clone(), DIM).size().x + name_w > room { dir_shown.remove(0); }
+                let dir_text = if dir_shown.len() < dir.len() { format!("…{dir_shown}") } else { dir_shown };
+                let at = painter.text(pos2(row.min.x + 22.0, row.center().y), Align2::LEFT_CENTER, &dir_text, font.clone(), DIM);
+                painter.text(pos2(at.max.x, row.center().y), Align2::LEFT_CENTER, &name, font, Color32::WHITE);
+                if response.on_hover_text(&file.path).clicked() {
+                    state.diff_path = if picked { None } else { Some(file.path.clone()) };
+                    state.diff.clear();
+                    if !picked { state.diff_rx = Some(crate::changes::fetch_diff(agent.cwd.clone(), file.clone())); }
+                }
+            }
+        });
+        ui.separator();
+        if state.diff_path.is_none() { ui.label(mono(&tr("Elige un archivo para ver su diff"), 11.0).color(DIM)); return; }
+        egui::ScrollArea::both().id_salt(("diff", state.diff_path.clone())).auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            for line in &state.diff {
+                let color = if line.starts_with("@@") { Color32::from_rgb(44, 232, 245) } else if line.starts_with('+') { Color32::from_rgb(120, 220, 110) } else if line.starts_with('-') { Color32::from_rgb(255, 120, 110) } else { Color32::from_gray(190) };
+                ui.add(egui::Label::new(mono(line, 11.0).color(color)).extend());
+            }
+        });
+    });
+}
+
+fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatState, now: f64, wide: bool) -> ChatAction {
     let mut action = ChatAction { close: false, terminal: false, console_step: 0 };
     // Files dropped on the window go to the message as paths.
     let dropped = dropped_paths(ui);
@@ -504,6 +639,29 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
             }
             ui.label(mono(&format!("{} · {}", agent.project, status), 11.0).color(DIM));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if wide {
+                    // Full screen has room for words: each button says what it does.
+                    let button = |ui: &mut Ui, text: &str, color: Color32| {
+                        ui.add(egui::Button::new(mono(text, 11.0).color(color)).fill(alpha(color, 0.08)).stroke(Stroke::new(1.0_f32, alpha(color, 0.35))).corner_radius(CornerRadius::same(4)))
+                    };
+                    // The terminal in amber, the changed files in cyan (lit while
+                    // their column is open), the pull request in its state's colour.
+                    ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+                    ui.spacing_mut().button_padding = vec2(8.0, 4.0);
+                    if button(ui, ">_ Terminal", Color32::from_rgb(254, 174, 52)).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
+                        action.terminal = true;
+                    }
+                    let open = changes_open(ui.ctx());
+                    let cyan = Color32::from_rgb(44, 232, 245);
+                    let files = egui::Button::new(mono("± Diff", 11.0).color(if open { Color32::from_rgb(10, 30, 34) } else { cyan }))
+                        .fill(if open { cyan } else { alpha(cyan, 0.08) }).stroke(Stroke::new(1.0_f32, alpha(cyan, 0.6))).corner_radius(CornerRadius::same(4));
+                    if ui.add(files).on_hover_text(tr("Los archivos que cambiaron en su carpeta y su diff, a la derecha")).clicked() {
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("changes-open"), !open));
+                        state.next_changes = 0.0;
+                    }
+                    if let Some(pull) = &state.pull { pull_chip(ui, pull); }
+                    return;
+                }
                 if flat_button(ui, mono("x", 13.0).color(Color32::WHITE)).on_hover_text(tr("Cerrar")).clicked() { action.close = true; }
                 if !standalone && flat_button(ui, mono("↗", 13.0).color(Color32::WHITE)).on_hover_text(tr("Enfocar este agente en Herdr")).clicked() && !sending {
                     state.run(monitor.focus(agent));
@@ -514,6 +672,7 @@ pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut Cha
                 // The console's own text size.
                 if flat_button(ui, mono("A+", 11.0).color(Color32::from_gray(200))).on_hover_text(format!("{} (⌘⇧+)", tr("Consola más grande"))).clicked() { action.console_step = 1; }
                 if flat_button(ui, mono("A-", 11.0).color(Color32::from_gray(200))).on_hover_text(format!("{} (⌘⇧-)", tr("Consola más pequeña"))).clicked() { action.console_step = -1; }
+                if let Some(pull) = &state.pull { pull_chip(ui, pull); }
             });
         });
         let asking = agent.status == "blocked" && !state.lines.is_empty();
@@ -784,6 +943,22 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
             }
         }
     });
+}
+
+/// The branch's pull request, in the chat's header: its number in its
+/// state's colour (green open, purple merged, grey closed or draft); a
+/// click opens it in the browser.
+fn pull_chip(ui: &mut Ui, pull: &crate::changes::PullRequest) {
+    let (color, word) = match (pull.state.as_str(), pull.draft) {
+        ("MERGED", _) => (Color32::from_rgb(181, 120, 230), tr("mergeado")),
+        ("CLOSED", _) => (Color32::from_gray(150), tr("cerrado")),
+        (_, true) => (Color32::from_gray(170), tr("borrador")),
+        _ => (Color32::from_rgb(99, 199, 77), tr("abierto")),
+    };
+    let chip = egui::Button::new(mono(&format!("PR #{}", pull.number), 10.5).strong().color(color)).fill(alpha(color, 0.12)).stroke(Stroke::new(1.0_f32, alpha(color, 0.6))).corner_radius(CornerRadius::same(4));
+    if ui.add(chip).on_hover_text(format!("{} ({word})\n{}", pull.title, tr("Abrir el PR en el navegador"))).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        crate::herdr::open_target(&pull.url);
+    }
 }
 
 /// The harness's "/" commands matching what is typed, with what each does.
@@ -1529,4 +1704,90 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
         ui.ctx().data_mut(|d| match next { Some(h) => d.insert_temp(egui::Id::new("hp-open"), h), None => d.remove::<String>(egui::Id::new("hp-open")) });
     }
     picked
+}
+
+// ---- Emblem editor
+
+/// A repo's emblem being edited (a right click on it): its name, colours,
+/// charge, partition and shield.
+pub struct EmblemEditor {
+    pub key: String,
+    /// The repo's own name, the one the name field falls back to.
+    pub repo_name: String,
+    pub name: String,
+    pub emblem: crate::identity::Identity,
+    /// Colours other repos' emblems use, marked in the palette.
+    pub taken: Vec<usize>,
+}
+
+pub enum EditorOutcome {
+    Open,
+    Cancel,
+    Save,
+    /// Back to the emblem worked out from the repo.
+    Auto,
+}
+
+pub fn emblem_editor(ctx: &Context, editor: &mut EmblemEditor) -> EditorOutcome {
+    use crate::identity::{metal_apart, Pattern, Shape, Symbol, COLOURS};
+    let mut outcome = EditorOutcome::Open;
+    let modal = egui::Modal::new(egui::Id::new("emblem-editor")).frame(Frame::popup(&ctx.style()).inner_margin(Margin::same(16))).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(60.0, 72.0), egui::Sense::hover());
+            crate::scene::draw_emblem(ui.painter(), &editor.emblem, rect.min, 6.0);
+            ui.vertical(|ui| {
+                ui.label(mono(&tr("Escudo del repo"), 13.0).strong().color(Color32::WHITE));
+                ui.label(mono(&editor.key, 10.0).color(DIM));
+                ui.add(egui::TextEdit::singleline(&mut editor.name).hint_text(editor.repo_name.clone()).font(FontId::monospace(fs(12.0))).desired_width(300.0));
+            });
+        });
+        // A row of choices, each drawn as the emblem with it.
+        let section = |ui: &mut Ui, title: &str| { ui.add_space(2.0); ui.label(mono(title, 10.0).strong().color(DIM)); };
+        section(ui, &tr("Color"));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            for (i, (name, colour)) in COLOURS.iter().enumerate() {
+                let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());
+                ui.painter().rect_filled(rect.shrink(3.0), CornerRadius::same(4), *colour);
+                if editor.emblem.primary == i { ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(2.0_f32, Color32::WHITE), egui::StrokeKind::Inside); }
+                let used = editor.taken.contains(&i) && editor.emblem.primary != i;
+                if used { ui.painter().circle_filled(rect.right_top() + vec2(-5.0, 5.0), 3.0, Color32::from_rgb(24, 20, 37)); }
+                let tip = if used { format!("{name} · {}", tr("lo usa otro repo")) } else { name.to_string() };
+                if response.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    editor.emblem.primary = i;
+                    editor.emblem.secondary = metal_apart(i, editor.emblem.secondary);
+                }
+            }
+        });
+        let mut choice = |ui: &mut Ui, title: &str, count: usize, build: &dyn Fn(&mut crate::identity::Identity, usize), picked: &dyn Fn(&crate::identity::Identity) -> usize| {
+            section(ui, title);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for i in 0..count {
+                    let mut option = editor.emblem.clone();
+                    build(&mut option, i);
+                    let (rect, response) = ui.allocate_exact_size(vec2(30.0, 34.0), egui::Sense::click());
+                    if picked(&editor.emblem) == i { ui.painter().rect_filled(rect, CornerRadius::same(4), alpha(Color32::WHITE, 0.15)); }
+                    if response.hovered() { ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0_f32, alpha(Color32::WHITE, 0.4)), egui::StrokeKind::Inside); }
+                    crate::scene::draw_emblem(ui.painter(), &option, rect.min + vec2(5.0, 5.0), 2.0);
+                    if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { editor.emblem = option; }
+                }
+            });
+        };
+        choice(ui, &tr("Símbolo"), Symbol::ALL.len(), &|e, i| e.symbol = Symbol::ALL[i], &|e| Symbol::ALL.iter().position(|s| *s == e.symbol).unwrap_or(0));
+        choice(ui, &tr("Partición"), Pattern::ALL.len(), &|e, i| e.pattern = Pattern::ALL[i], &|e| Pattern::ALL.iter().position(|p| *p == e.pattern).unwrap_or(0));
+        choice(ui, &tr("Forma"), Shape::ALL.len(), &|e, i| e.shape = Shape::ALL[i], &|e| Shape::ALL.iter().position(|p| *p == e.shape).unwrap_or(0));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button(mono(&tr("Automático"), 11.0)).on_hover_text(tr("Volver al escudo que sale del repo, con un color libre")).clicked() { outcome = EditorOutcome::Auto; }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(mono(&tr("Guardar"), 11.0).strong()).clicked() { outcome = EditorOutcome::Save; }
+                if ui.button(mono(&tr("Cancelar"), 11.0)).clicked() { outcome = EditorOutcome::Cancel; }
+            });
+        });
+    });
+    if modal.should_close() && matches!(outcome, EditorOutcome::Open) { outcome = EditorOutcome::Cancel; }
+    outcome
 }

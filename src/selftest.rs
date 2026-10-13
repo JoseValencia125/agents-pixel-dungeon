@@ -312,6 +312,18 @@ pub fn run() {
     assert!(columns_fitting(10.0) == 1 && width_for(2) == 458.0);
     let listed = decode_sessions(br#"{"sessions":[{"default":true,"name":"default","running":true},{"name":"work","running":false}]}"#);
     assert!(listed == vec![HerdrSession { name: "default".into(), running: true }, HerdrSession { name: "work".into(), running: false }] && decode_sessions(b"nope").is_empty());
+    // An agent's folder is kept as ~/…: the repo behind it is still read.
+    let here = std::env::current_dir().unwrap();
+    if let Ok(inside) = here.strip_prefix(home_dir()) {
+        if here.join(".git").exists() {
+            let meta = crate::identity::read_meta(&format!("~/{}", inside.display()));
+            assert!(meta.kind != crate::identity::Kind::Unknown || meta.owner.is_some(), "Repo behind ~/…: {meta:?}");
+        }
+    }
+    for (column, files) in [(500.0, 1), (500.0, 2), (100.0, 40), (900.0, 40)] {
+        let h = crate::ui::changes_list_height(column, files);
+        assert!(h > 0.0 && h <= 21.0 * files as f32 + 4.0, "changes list height {h} for {files} files in {column}");
+    }
     let named = agent_name("codex", "Mi Proyecto_2");
     assert!(named.starts_with("codex-mi-proyecto-2-") && named.len() == 24, "Agent name: {named}");
     let long = agent_name("claude", "saludtech-android-app");

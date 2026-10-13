@@ -117,7 +117,8 @@ impl Symbol {
 }
 
 /// The shield's outline, 10×12 pixels ('#' inside the shield).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Shape { Heater, Round, Kite, Tower, Swallowtail, Oval }
 
 impl Shape {
@@ -137,7 +138,8 @@ impl Shape {
 
 /// How the field is divided between the two tinctures. None crosses the
 /// charge (columns 2–7, rows 2–7), so it always stands on the first colour.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Pattern { Plain, Bordure, Base, Chief, Flanks, Barry }
 
 impl Pattern {
@@ -212,6 +214,81 @@ impl Identity {
     }
 }
 
+/// A repo's emblem as the settings keep it (`emblems`, by key), so it stays
+/// the same even when the repo's files or this code change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedEmblem {
+    pub color: String,
+    pub metal: String,
+    pub symbol: Symbol,
+    pub pattern: Pattern,
+    pub shape: Shape,
+    pub kind: Kind,
+}
+
+/// A colour for a repo that no other kept emblem has (`taken`), starting
+/// from `wanted` and going round the palette from a place of its own; with
+/// every colour taken, the least used one.
+pub fn free_colour(key: &str, wanted: usize, taken: &[usize]) -> usize {
+    if !taken.contains(&wanted) { return wanted; }
+    let start = (draw(stable_hash(key), 6) % COLOURS.len() as u64) as usize;
+    let order: Vec<usize> = (0..COLOURS.len()).map(|i| (start + i) % COLOURS.len()).collect();
+    order.iter().copied().find(|c| !taken.contains(c))
+        .unwrap_or_else(|| order.iter().copied().min_by_key(|c| taken.iter().filter(|t| *t == c).count()).unwrap_or(wanted))
+}
+
+/// The second tincture for `primary`: `metal` when it stands apart enough,
+/// else the first one that does.
+pub fn metal_apart(primary: usize, metal: usize) -> usize {
+    let light = lightness(COLOURS[primary].1);
+    if (lightness(METALS[metal].1) - light).abs() > 0.3 { return metal; }
+    (0..METALS.len()).find(|&i| (lightness(METALS[i].1) - light).abs() > 0.3).unwrap_or(metal)
+}
+
+/// Give kept emblems sharing a colour each a colour of its own (the first
+/// by key keeps it). True when one changed.
+pub fn spread_colours(kept: &mut std::collections::BTreeMap<String, SavedEmblem>) -> bool {
+    let mut taken: Vec<usize> = vec![];
+    let mut changed = false;
+    for (key, emblem) in kept.iter_mut() {
+        let Some(colour) = COLOURS.iter().position(|(n, _)| *n == emblem.color) else { continue };
+        let free = free_colour(key, colour, &taken);
+        if free != colour {
+            emblem.color = COLOURS[free].0.into();
+            if let Some(metal) = METALS.iter().position(|(n, _)| *n == emblem.metal) { emblem.metal = METALS[metal_apart(free, metal)].0.into(); }
+            changed = true;
+        }
+        taken.push(free);
+    }
+    changed
+}
+
+impl SavedEmblem {
+    /// The colours kept emblems use, as `COLOURS` indices.
+    pub fn colours_of<'a>(kept: impl Iterator<Item = &'a SavedEmblem>) -> Vec<usize> {
+        kept.filter_map(|e| COLOURS.iter().position(|(n, _)| *n == e.color)).collect()
+    }
+
+    pub fn of(emblem: &Identity) -> SavedEmblem {
+        SavedEmblem { color: COLOURS[emblem.primary].0.into(), metal: METALS[emblem.secondary].0.into(), symbol: emblem.symbol, pattern: emblem.pattern, shape: emblem.shape, kind: emblem.kind }
+    }
+
+    /// The emblem back, for the repo `meta` describes (None if its colours
+    /// are no longer in the palettes).
+    pub fn restore(&self, meta: &ProjectMeta) -> Option<Identity> {
+        Some(Identity {
+            key: meta.key.clone(),
+            name: meta.name.clone(),
+            kind: self.kind,
+            primary: COLOURS.iter().position(|(n, _)| *n == self.color)?,
+            secondary: METALS.iter().position(|(n, _)| *n == self.metal)?,
+            symbol: self.symbol,
+            pattern: self.pattern,
+            shape: self.shape,
+        })
+    }
+}
+
 /// A user's choice for one repo, from the settings (`projects` in
 /// settings.json, keyed by the repo's `key`): every field optional.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,11 +347,14 @@ pub fn identity(meta: &ProjectMeta) -> Identity {
     }
 }
 
-/// The emblem with the user's choices on top.
-pub fn apply_override(meta: &ProjectMeta, choice: Option<&ProjectOverride>) -> Identity {
-    let Some(choice) = choice else { return identity(meta) };
-    let kind = choice.kind.unwrap_or(meta.kind);
-    let mut emblem = identity(&ProjectMeta { kind, ..meta.clone() });
+/// An emblem (the one kept, or worked out) with the user's choices on top;
+/// choosing a kind works the emblem out again for it.
+pub fn apply_override(meta: &ProjectMeta, base: Identity, choice: Option<&ProjectOverride>) -> Identity {
+    let Some(choice) = choice else { return base };
+    let mut emblem = match choice.kind {
+        Some(kind) if kind != base.kind => identity(&ProjectMeta { kind, ..meta.clone() }),
+        _ => base,
+    };
     if let Some(name) = choice.name.as_ref().filter(|n| !n.trim().is_empty()) { emblem.name = name.trim().to_string(); }
     if let Some(primary) = choice.color.as_ref().and_then(|c| COLOURS.iter().position(|(n, _)| n.eq_ignore_ascii_case(c.trim()))) {
         emblem.primary = primary;
@@ -292,6 +372,9 @@ pub fn apply_override(meta: &ProjectMeta, choice: Option<&ProjectOverride>) -> I
 /// The project behind a folder: its repo root's remote and files. Reads a
 /// few small files, no process.
 pub fn read_meta(cwd: &str) -> ProjectMeta {
+    // Agents' folders come abbreviated for display (~/…).
+    let expanded = crate::herdr::expand_home(cwd);
+    let cwd = expanded.as_str();
     let path = Path::new(cwd);
     let root = repo_root(path);
     let folder = |p: &Path| p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
@@ -444,13 +527,54 @@ mod tests {
     fn override_wins() {
         let m = meta("someone/verbrawl", Kind::Game);
         let choice = ProjectOverride { name: Some("Verbrawl".into()), color: Some("Yellow".into()), symbol: Some(Symbol::Quill), kind: None };
-        let e = apply_override(&m, Some(&choice));
+        let e = apply_override(&m, identity(&m), Some(&choice));
         assert_eq!((e.name.as_str(), COLOURS[e.primary].0, e.symbol), ("Verbrawl", "yellow", Symbol::Quill));
         assert!((lightness(e.primary_color()) - lightness(e.secondary_color())).abs() > 0.3);
-        assert_eq!(apply_override(&m, None), identity(&m));
+        assert_eq!(apply_override(&m, identity(&m), None), identity(&m));
         let parsed: ProjectOverride = serde_json::from_str(r#"{"symbol":"gear","kind":"python"}"#).unwrap();
-        let e = apply_override(&m, Some(&parsed));
+        let e = apply_override(&m, identity(&m), Some(&parsed));
         assert_eq!((e.symbol, e.kind), (Symbol::Gear, Kind::Python));
+    }
+
+    #[test]
+    fn kept_emblems_stay() {
+        let m = meta("someone/app", Kind::Web);
+        let kept = SavedEmblem::of(&identity(&m));
+        let json = serde_json::to_string(&kept).unwrap();
+        let back: SavedEmblem = serde_json::from_str(&json).unwrap();
+        // The repo later looks like another kind: the kept emblem wins.
+        let now = ProjectMeta { kind: Kind::Python, ..m.clone() };
+        assert_eq!(back.restore(&now).unwrap(), identity(&m));
+        let gone = SavedEmblem { color: "mauve".into(), ..kept };
+        assert_eq!(gone.restore(&m), None);
+    }
+
+    #[test]
+    fn colours_stay_apart() {
+        let mut kept = std::collections::BTreeMap::new();
+        for i in 0..12 {
+            let m = meta(&format!("o/r{i}"), Kind::Unknown);
+            let e = identity(&m);
+            let taken = SavedEmblem::colours_of(kept.values());
+            let mut saved = SavedEmblem::of(&e);
+            let free = free_colour(&m.key, e.primary, &taken);
+            saved.color = COLOURS[free].0.into();
+            saved.metal = METALS[metal_apart(free, e.secondary)].0.into();
+            kept.insert(m.key.clone(), saved);
+        }
+        let colours: HashSet<String> = kept.values().map(|e| e.color.clone()).collect();
+        assert_eq!(colours.len(), 12, "twelve repos, twelve colours");
+        // Two kept with the same colour: the second by key moves.
+        let mut twins = std::collections::BTreeMap::new();
+        let base = SavedEmblem::of(&identity(&meta("a/one", Kind::Unknown)));
+        twins.insert("a/one".to_string(), SavedEmblem { color: "blue".into(), metal: "gold".into(), ..base.clone() });
+        twins.insert("b/two".to_string(), SavedEmblem { color: "blue".into(), metal: "gold".into(), ..base });
+        assert!(spread_colours(&mut twins));
+        assert_eq!(twins["a/one"].color, "blue");
+        assert_ne!(twins["b/two"].color, "blue");
+        let two = twins["b/two"].restore(&meta("b/two", Kind::Unknown)).unwrap();
+        assert!((lightness(two.primary_color()) - lightness(two.secondary_color())).abs() > 0.3);
+        assert!(!spread_colours(&mut twins));
     }
 
     #[test]

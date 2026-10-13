@@ -45,6 +45,9 @@ pub struct Prefs {
     /// folder's name): `{"someone/app": {"name": "App", "color": "yellow",
     /// "symbol": "quill", "kind": "game"}}`. Every repo gets one without it.
     pub projects: std::collections::BTreeMap<String, crate::identity::ProjectOverride>,
+    /// Each repo's emblem as it was first worked out, by key, so it does not
+    /// change between launches.
+    pub emblems: std::collections::BTreeMap<String, crate::identity::SavedEmblem>,
     #[serde(skip)]
     pub path: Option<PathBuf>,
 }
@@ -75,6 +78,7 @@ impl Default for Prefs {
             room_size: "medium".into(),
             favorite_folders: vec![],
             projects: Default::default(),
+            emblems: Default::default(),
             path: None,
         }
     }

@@ -5,6 +5,7 @@
 
 mod alerts;
 mod ansi;
+mod changes;
 mod assets;
 mod commands;
 mod events;
@@ -220,6 +221,9 @@ struct App {
     /// Full screen opened a room for this visit already (only on entering,
     /// so esc can still close it).
     room_opened: bool,
+    /// A repo's emblem being edited, and whether it is the demo's (edited
+    /// on screen only, never kept).
+    emblem_editor: Option<(ui::EmblemEditor, bool)>,
 }
 
 /// The console's narrowest width in full screen; the rooms get whole
@@ -237,6 +241,10 @@ impl App {
         let mut scene = Scene::new();
         scene.reduced_motion = reduce_motion();
         scene.overrides = prefs.projects.clone();
+        let mut prefs = prefs;
+        // Repos that came to share a colour each get their own, once.
+        if crate::identity::spread_colours(&mut prefs.emblems) { prefs.save(); }
+        scene.emblems = prefs.emblems.clone();
         let login = login_item();
         let login_enabled = login.as_ref().map(|l| l.is_enabled().unwrap_or(false)).unwrap_or(false);
         let mut visuals = egui::Visuals::dark();
@@ -252,6 +260,7 @@ impl App {
             terminals: terminal::Terminals::default(),
             calls_seen: Default::default(),
             room_opened: false,
+            emblem_editor: None,
             prefs,
             sounds: Sounds::new(),
             notifier: Notifier::new(),
@@ -786,6 +795,11 @@ impl eframe::App for App {
         self.scene.compact = self.fullscreen;
         self.scene.room_size = scene::RoomSize::from_key(&self.prefs.room_size);
         self.scene.sync(&visible_agents);
+        if self.scene.emblems_added {
+            self.scene.emblems_added = false;
+            self.prefs.emblems = self.scene.emblems.clone();
+            self.prefs.save();
+        }
         if let Some(agent) = self.monitor.selected.as_ref().and_then(|id| visible_agents.iter().find(|a| &a.id == id)) {
             self.calls_seen.insert(agent.id.clone(), agent.status.clone());
         }
@@ -856,6 +870,11 @@ impl eframe::App for App {
             }
             if let Some(id) = response.finish { self.confirm_finish(&id); }
             if let Some(id) = response.terminal { self.open_terminal_for(ctx, Some(&id)); }
+            if let Some((emblem, repo_name, demo)) = response.edit_emblem.and_then(|id| self.scene.emblem_of(&id)) {
+                let taken = identity::SavedEmblem::colours_of(self.scene.emblems.iter().filter(|(k, _)| **k != emblem.key).map(|(_, e)| e));
+                let name = if emblem.name == repo_name { String::new() } else { emblem.name.clone() };
+                self.emblem_editor = Some((ui::EmblemEditor { key: emblem.key.clone(), repo_name, name, emblem, taken }, demo));
+            }
             if response.summon { let on = !self.monitor.composing; self.monitor.set_composing(on); }
             // Full screen summons in the spare room itself.
             if let (Some((rect, view)), true) = (response.summon_rect, fullscreen && self.monitor.composing) {
@@ -923,6 +942,7 @@ impl eframe::App for App {
         });
 
         self.terminals.show(ctx);
+        self.edit_emblem(ctx);
 
         // Overlays.
         let standalone = self.monitor.standalone() && matches!(self.monitor.herdr, HerdrState::Missing | HerdrState::Down);
@@ -952,6 +972,54 @@ impl eframe::App for App {
         if self.monitor.filter.raw() != self.prefs.filter { self.prefs.filter = self.monitor.filter.raw().into(); self.prefs.save(); }
         if needs_fit { self.fit_size(ctx, false); }
         ctx.request_repaint_after(Duration::from_millis(if self.visible { 33 } else { 500 }));
+    }
+}
+
+impl App {
+    /// The emblem editor, while open: Save keeps the emblem (and the name,
+    /// when it is not the repo's own) in the settings; Automatic forgets them,
+    /// so the repo's emblem is worked out again with a free colour.
+    fn edit_emblem(&mut self, ctx: &egui::Context) {
+        let Some((editor, demo)) = &mut self.emblem_editor else { return };
+        let demo = *demo;
+        match ui::emblem_editor(ctx, editor) {
+            ui::EditorOutcome::Open => return,
+            ui::EditorOutcome::Cancel => {}
+            ui::EditorOutcome::Save => {
+                let key = editor.key.clone();
+                let name = editor.name.trim().to_string();
+                let saved = identity::SavedEmblem::of(&editor.emblem);
+                let mut choice = self.prefs.projects.get(&key).cloned().unwrap_or_default();
+                // What the editor shows now wins over a colour or charge set by hand.
+                choice.color = None;
+                choice.symbol = None;
+                choice.kind = None;
+                choice.name = (!name.is_empty() && name != editor.repo_name).then_some(name);
+                if demo {
+                    self.scene.emblems.insert(key.clone(), saved);
+                    self.scene.overrides.insert(key, choice);
+                } else {
+                    self.prefs.emblems.insert(key.clone(), saved);
+                    if choice == identity::ProjectOverride::default() { self.prefs.projects.remove(&key); } else { self.prefs.projects.insert(key, choice); }
+                    self.prefs.save();
+                    self.scene.emblems = self.prefs.emblems.clone();
+                    self.scene.overrides = self.prefs.projects.clone();
+                }
+                self.scene.reload_emblems();
+            }
+            ui::EditorOutcome::Auto => {
+                let key = editor.key.clone();
+                self.scene.emblems.remove(&key);
+                self.scene.overrides.remove(&key);
+                if !demo {
+                    self.prefs.emblems.remove(&key);
+                    self.prefs.projects.remove(&key);
+                    self.prefs.save();
+                }
+                self.scene.reload_emblems();
+            }
+        }
+        self.emblem_editor = None;
     }
 }
 

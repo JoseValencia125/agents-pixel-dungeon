@@ -424,6 +424,9 @@ pub struct Room {
     /// when the folder or the user's choice for it changes).
     cwd: String,
     identity: Identity,
+    /// The repo's own name and whether it is the demo's (never kept).
+    repo_name: String,
+    demo: bool,
     /// How tall it is drawn; the animation always runs in the large room's
     /// coordinates, and drawing moves each point to this size's art.
     pub size: RoomSize,
@@ -475,6 +478,8 @@ impl Room {
             cwd: String::new(),
             identity: crate::identity::identity(&ProjectMeta { key: String::new(), owner: None, name: String::new(), kind: crate::identity::Kind::Unknown }),
             size: RoomSize::Large,
+            repo_name: String::new(),
+            demo: false,
             branch: String::new(),
             shells: vec![],
             action: None,
@@ -1274,7 +1279,7 @@ impl Room {
         let primary = identity.primary_color();
         painter.rect_filled(header, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, blend(Color32::from_rgb(18, 15, 23), primary, 0.16));
         painter.rect_filled(Rect::from_min_max(pos2(header.min.x, header.max.y - 2.0), header.max), CornerRadius::ZERO, primary);
-        draw_emblem(painter, identity, pos2(header.min.x + 7.0, header.center().y - 12.0 - 1.0), 2.0);
+        draw_emblem(painter, identity, self.emblem_rect(origin).min, 2.0);
         let name_room = header.width() - 40.0;
         let name_color = blend(primary, Color32::WHITE, 0.5);
         let name = fit_text(painter, &identity.name, FontId::monospace(13.0), name_room);
@@ -1313,6 +1318,12 @@ impl Room {
         if selected {
             painter.rect_stroke(cell.expand(2.0), CornerRadius::same(7), Stroke::new(2.0_f32, Color32::from_rgb(217, 242, 166)), egui::StrokeKind::Outside);
         }
+    }
+
+    /// Where the repo's emblem is drawn on its band.
+    fn emblem_rect(&self, origin: Pos2) -> Rect {
+        let header = self.header().translate(origin.to_vec2());
+        Rect::from_min_size(pos2(header.min.x + 7.0, header.center().y - 13.0), vec2(20.0, 24.0))
     }
 
     /// The repo's full name and key, while the pointer is on its band.
@@ -1541,6 +1552,8 @@ pub struct SceneResponse {
     /// While summoning in the spare room: its rect, for the form drawn in
     /// it, and the part of the scene in view.
     pub summon_rect: Option<(Rect, Rect)>,
+    /// A room's emblem was right-clicked: edit it.
+    pub edit_emblem: Option<String>,
 }
 
 enum ScrollRequest {
@@ -1568,6 +1581,10 @@ pub struct Scene {
     pub room_size: RoomSize,
     /// The user's choices for some repos' emblems (settings' `projects`).
     pub overrides: BTreeMap<String, ProjectOverride>,
+    /// Every repo's emblem as first worked out (settings' `emblems`), and
+    /// whether a new one was added, for the app to save.
+    pub emblems: BTreeMap<String, crate::identity::SavedEmblem>,
+    pub emblems_added: bool,
     /// The summon panel is open: the spare room holds its form.
     pub summoning: bool,
     summon_shown: bool,
@@ -1591,12 +1608,25 @@ impl Scene {
             compact: false,
             room_size: RoomSize::Medium,
             overrides: BTreeMap::new(),
+            emblems: BTreeMap::new(),
+            emblems_added: false,
             summoning: false,
             summon_shown: false,
             seeds: 7,
             clock: 0.0,
             last_time: None,
         }
+    }
+
+    /// What the emblem editor needs of an agent's room: its emblem, the
+    /// repo's own name, and whether it is the demo's.
+    pub fn emblem_of(&self, id: &str) -> Option<(Identity, String, bool)> {
+        self.rooms.get(id).map(|room| (room.identity.clone(), room.repo_name.clone(), room.demo))
+    }
+
+    /// Work every room's emblem out again (after the settings changed).
+    pub fn reload_emblems(&mut self) {
+        for room in self.rooms.values_mut() { room.cwd.clear(); }
     }
 
     /// An agent's repo emblem, once its room is up.
@@ -1622,6 +1652,7 @@ impl Scene {
         self.asking_before = asking;
         self.order = agents.iter().map(|a| a.id.clone()).collect();
         if newly_asking && self.selected.is_none() && !self.keep_order { self.scroll_request = Some(ScrollRequest::Top); }
+        let mut shown: Vec<usize> = vec![];
         for agent in agents {
             let room = match self.rooms.get_mut(&agent.id) {
                 Some(room) => { room.update(agent, !self.reduced_motion); room }
@@ -1633,9 +1664,30 @@ impl Scene {
             // The emblem, read from the folder once (a few small files).
             if room.cwd != agent.cwd || room.identity.key.is_empty() {
                 room.cwd = agent.cwd.clone();
-                let meta = crate::herdr::demo_meta(agent).unwrap_or_else(|| crate::identity::read_meta(&agent.cwd));
-                room.identity = crate::identity::apply_override(&meta, self.overrides.get(&meta.key));
+                let demo = crate::herdr::demo_meta(agent);
+                let meta = demo.clone().unwrap_or_else(|| crate::identity::read_meta(&agent.cwd));
+                // The emblem kept for this repo, else worked out and kept
+                // (the demo's are never kept).
+                let base = match self.emblems.get(&meta.key).and_then(|kept| kept.restore(&meta)) {
+                    Some(kept) => kept,
+                    None => {
+                        // A colour no other repo has (the demo's: no other room).
+                        let mut fresh = crate::identity::identity(&meta);
+                        let taken = if demo.is_none() { crate::identity::SavedEmblem::colours_of(self.emblems.values()) } else { shown.clone() };
+                        fresh.primary = crate::identity::free_colour(&meta.key, fresh.primary, &taken);
+                        fresh.secondary = crate::identity::metal_apart(fresh.primary, fresh.secondary);
+                        if demo.is_none() {
+                            self.emblems.insert(meta.key.clone(), crate::identity::SavedEmblem::of(&fresh));
+                            self.emblems_added = true;
+                        }
+                        fresh
+                    }
+                };
+                room.identity = crate::identity::apply_override(&meta, base, self.overrides.get(&meta.key));
+                room.repo_name = meta.name.clone();
+                room.demo = demo.is_some();
             }
+            shown.push(room.identity.primary);
         }
     }
 
@@ -1690,7 +1742,7 @@ impl Scene {
         let dt = match self.last_time { Some(last) if !self.reduced_motion => ((now - last) as f32).clamp(0.0, 0.1), _ => 0.0 };
         self.last_time = Some(now);
         self.clock += dt;
-        let mut response = SceneResponse { clicked: None, finish: None, terminal: None, summon: false, summon_rect: None };
+        let mut response = SceneResponse { clicked: None, finish: None, terminal: None, summon: false, summon_rect: None, edit_emblem: None };
         let width = ui.available_width();
         let (slots, height) = self.layout(width);
         let scroll_request = self.scroll_request.take();
@@ -1740,7 +1792,11 @@ impl Scene {
                     if hit.clicked() { response.clicked = Some(id.clone()); }
                     if let Some((area, rows)) = hit.hover_pos().and_then(|p| room.shells_tip(rect.min, p)) { crate::ui::shells_note(ui.ctx(), area, &rows); }
                     let hit = match hit.hover_pos().and_then(|p| room.header_tip(rect.min, p)) { Some(tip) => hit.on_hover_text(tip), None => hit };
-                    hit.context_menu(|ui| {
+                    // A right click on the emblem edits it; elsewhere it opens the room's menu.
+                    let on_emblem = hit.hover_pos().is_some_and(|p| room.emblem_rect(rect.min).expand(2.0).contains(p));
+                    if on_emblem && hit.secondary_clicked() { response.edit_emblem = Some(id.clone()); }
+                    let hit = if on_emblem { hit.on_hover_text(tr("Clic derecho: editar el escudo")) } else { hit };
+                    if !on_emblem { hit.context_menu(|ui| {
                         if ui.button(tr("Abrir una terminal en esta carpeta")).clicked() {
                             response.terminal = Some(id.clone());
                             ui.close_menu();
@@ -1749,7 +1805,11 @@ impl Scene {
                             response.finish = Some(id.clone());
                             ui.close_menu();
                         }
-                    });
+                        if ui.button(tr("Editar el escudo…")).clicked() {
+                            response.edit_emblem = Some(id.clone());
+                            ui.close_menu();
+                        }
+                    }); }
                 }
                 if self.summon_tile {
                     let rect = slots[order.len()].translate(content.min.to_vec2());
@@ -1846,6 +1906,22 @@ mod tests {
             let cot = style_for("limited").spot;
             assert_eq!(size.remap("limited", pos2(70.0, 53.0)).y - size.remap("limited", cot).y, 53.0 - cot.y, "{size:?}");
         }
+    }
+
+    #[test]
+    fn kept_emblems_are_used_and_new_ones_kept() {
+        use crate::identity::{SavedEmblem, Symbol};
+        let mut scene = Scene::new();
+        let kept = SavedEmblem { color: "pink".into(), metal: "ink".into(), symbol: Symbol::Moon, pattern: crate::identity::Pattern::Chief, shape: crate::identity::Shape::Kite, kind: crate::identity::Kind::Unknown };
+        scene.emblems.insert("kept".into(), kept.clone());
+        scene.sync(&[agent("kept", "idle"), agent("fresh", "idle")]);
+        let id = scene.identity("kept").unwrap();
+        assert_eq!((id.symbol, crate::identity::COLOURS[id.primary].0), (Symbol::Moon, "pink"));
+        assert!(scene.emblems_added && scene.emblems.contains_key("fresh"));
+        // The demo's rooms are never kept.
+        let mut demo = Scene::new();
+        demo.sync(&crate::herdr::demo_agents(0));
+        assert!(!demo.emblems_added && demo.emblems.is_empty());
     }
 
     #[test]
