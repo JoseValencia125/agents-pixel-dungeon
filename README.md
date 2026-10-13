@@ -1,8 +1,8 @@
-<p align="center"><img src="Resources/Icon/icon_256.png" width="128" alt="Herdr Pixel Dungeon icon: a knight's helm on a dungeon tile"></p>
+<p align="center"><img src="Resources/Icon/icon_256.png" width="128" alt="Agents Pixel Dungeon icon: a crystal orb showing a terminal prompt, on a wooden table by a burgundy dungeon wall"></p>
 
-# Herdr Pixel Dungeon
+# Agents Pixel Dungeon
 
-**A native pixel-art guild for your live [Herdr](https://herdr.dev) agents, for macOS and Linux.**
+**A native pixel-art guild for your live [Herdr](https://herdr.dev) agents, for macOS and Linux.** Made by [Diabolo Studio](https://diabolostudio.com/).
 
 Each coding agent is a hero in a dungeon room that changes with its real Herdr status: working at the forge, asking for your attention, exhausted on an infirmary cot until its usage limit resets, reading while it waits, done. Click a room to answer the agent, accept or decline its permission prompts, or summon a new one. Rust, `egui`, a status item in the menu bar or tray, no browser or server.
 
@@ -14,7 +14,7 @@ Each coding agent is a hero in a dungeon room that changes with its real Herdr s
 
 ## Download
 
-Binaries for macOS (`.app`) and Linux (x86_64) are on the [Releases](https://github.com/JoseValencia125/herdr-pixel-dungeon/releases) page. The macOS app is ad-hoc signed, not notarized: the first time, right-click it and choose Open.
+Binaries for macOS (`.app`) and Linux (x86_64) are on the [Releases](https://github.com/JoseValencia125/agents-pixel-dungeon/releases) page. The macOS app is ad-hoc signed, not notarized: the first time, right-click it and choose Open.
 
 ## States and rooms
 
@@ -23,7 +23,7 @@ Binaries for macOS (`.app`) and Linux (x86_64) are on the [Releases](https://git
 | `working` | <img src="docs/media/room_working.png" width="216" alt=""> | Workshop: desk, bookshelves, forge, alchemy table | Works at the station of its last tool: reads, forges, brews, summons, plans or types |
 | `blocked` | <img src="docs/media/room_blocked.png" width="216" alt=""> | Sealed door, braziers, a rug | Jumps on the rug under a pulsing red "!" |
 | session limit | <img src="docs/media/room_limited.png" width="216" alt=""> | Infirmary with a cot under the red cross | Exhausted, asleep on the cot under a breathing blanket, with the time left to recover until the reset |
-| `idle` | <img src="docs/media/room_idle.png" width="216" alt=""> | Chamber at night, by the fireplace | Reads in an armchair by the fire, turning a page now and then |
+| `idle` | <img src="docs/media/room_idle.png" width="216" alt=""> | An inn's bedroom at night: a canopy bed, a hearth, the moon through the window | Reads in an armchair with the fire at its back, by the window, turning a page now and then |
 | `done` | <img src="docs/media/room_done.png" width="216" alt=""> | Treasure chamber | Jumps for joy under a green tick, confetti flying |
 | unknown | <img src="docs/media/room_unknown.png" width="216" alt=""> | Ruins with a portal | Wanders, looking around |
 
@@ -70,19 +70,19 @@ The [guide](docs/GUIDE.md) has the details: how states are read, background jobs
 Requires [Rust](https://rustup.rs) (stable) and [Herdr](https://herdr.dev). Tested with Herdr 0.9.x.
 
 ```sh
-git clone https://github.com/JoseValencia125/herdr-pixel-dungeon.git
-cd herdr-pixel-dungeon
+git clone https://github.com/JoseValencia125/agents-pixel-dungeon.git
+cd agents-pixel-dungeon
 ./scripts/build.sh
 ```
 
-- **macOS**: `open 'build/Herdr Pixel Dungeon.app'` (optionally copy it to `~/Applications`).
-- **Linux** (X11 or Wayland): `./build/herdr-pixel-dungeon`. Needs GTK 3, libayatana-appindicator, xdo and ALSA — on Debian/Ubuntu `sudo apt install libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libasound2-dev`. `build/` also has a `.desktop` entry and icon.
+- **macOS**: `open 'build/Agents Pixel Dungeon.app'` (optionally copy it to `~/Applications`).
+- **Linux** (X11 or Wayland): `./build/agents-pixel-dungeon`. Needs GTK 3, libayatana-appindicator, xdo and ALSA — on Debian/Ubuntu `sudo apt install libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libasound2-dev`. `build/` also has a `.desktop` entry and icon.
 
 `cargo test` and `--self-test` run the checks; `--demo` shows fictional agents without Herdr.
 
 ## Support the Guild 🧪⚔️
 
-Herdr Pixel Dungeon is free and open source, built alongside other experiments in AI agents, developer tooling and pixel-art interfaces. If it brightens your terminal, you can buy the guild a potion on [GitHub Sponsors](https://github.com/sponsors/JoseValencia125).
+Agents Pixel Dungeon is free and open source, built alongside other experiments in AI agents, developer tooling and pixel-art interfaces. If it brightens your terminal, you can buy the guild a potion on [GitHub Sponsors](https://github.com/sponsors/JoseValencia125).
 
 <p align="center"><a href="https://github.com/sponsors/JoseValencia125"><img src="https://img.shields.io/badge/Sponsor-Buy%20the%20guild%20a%20potion-db61a2?logo=githubsponsors&logoColor=white" alt="Sponsor Nacho Valencia on GitHub"></a></p>
 
@@ -97,8 +97,8 @@ Thank you for supporting independent open-source development. ⚔️
 
 ## Credits and licenses
 
-Created by **Nacho Valencia**: code and all pixel art. MIT, see [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
+Created by **[Diabolo Studio](https://diabolostudio.com/)** (Nacho Valencia): code and all pixel art. MIT, see [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
 
 Inspired by **[Claude Dungeon](https://github.com/thousandsky2024/claude-pixel-agent-web)** by [thousandsky2024](https://github.com/thousandsky2024), which first pictured coding agents as dungeon heroes. No code or artwork from it is included.
 
-[Herdr](https://github.com/herdrdev/herdr) is by the Herdr contributors and is installed separately. Herdr Pixel Dungeon is an independent, community-made project: it is not affiliated with, endorsed by or sponsored by Herdr, Inc. "Herdr" is used only to describe what the app connects to; Herdr and other names are trademarks of their respective owners.
+[Herdr](https://github.com/herdrdev/herdr) is by the Herdr contributors and is installed separately. Agents Pixel Dungeon is an independent, community-made project: it is not affiliated with, endorsed by or sponsored by Herdr, Inc. "Herdr" is used only to describe what the app connects to; Herdr and other names are trademarks of their respective owners.

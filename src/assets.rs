@@ -23,7 +23,7 @@ pub struct Assets {
     props: HashMap<&'static str, TextureHandle>,
 }
 
-pub const ROOM_FILES: [(&str, &[u8]); 7] = [
+pub const ROOM_FILES: [(&str, &[u8]); 21] = [
     ("room_working", include_bytes!("../Resources/Sprites/rooms/room_working.png")),
     ("room_working_front", include_bytes!("../Resources/Sprites/rooms/room_working_front.png")),
     ("room_blocked", include_bytes!("../Resources/Sprites/rooms/room_blocked.png")),
@@ -32,6 +32,21 @@ pub const ROOM_FILES: [(&str, &[u8]); 7] = [
     ("room_idle", include_bytes!("../Resources/Sprites/rooms/room_idle.png")),
     ("room_done", include_bytes!("../Resources/Sprites/rooms/room_done.png")),
     ("room_unknown", include_bytes!("../Resources/Sprites/rooms/room_unknown.png")),
+    // Every room 64 and 40 pixels tall, for full screen's column (scripts/room_sizes.py).
+    ("room_working_medium", include_bytes!("../Resources/Sprites/rooms/room_working_medium.png")),
+    ("room_working_medium_front", include_bytes!("../Resources/Sprites/rooms/room_working_medium_front.png")),
+    ("room_blocked_medium", include_bytes!("../Resources/Sprites/rooms/room_blocked_medium.png")),
+    ("room_limited_medium", include_bytes!("../Resources/Sprites/rooms/room_limited_medium.png")),
+    ("room_idle_medium", include_bytes!("../Resources/Sprites/rooms/room_idle_medium.png")),
+    ("room_done_medium", include_bytes!("../Resources/Sprites/rooms/room_done_medium.png")),
+    ("room_unknown_medium", include_bytes!("../Resources/Sprites/rooms/room_unknown_medium.png")),
+    ("room_working_small", include_bytes!("../Resources/Sprites/rooms/room_working_small.png")),
+    ("room_working_small_front", include_bytes!("../Resources/Sprites/rooms/room_working_small_front.png")),
+    ("room_blocked_small", include_bytes!("../Resources/Sprites/rooms/room_blocked_small.png")),
+    ("room_limited_small", include_bytes!("../Resources/Sprites/rooms/room_limited_small.png")),
+    ("room_idle_small", include_bytes!("../Resources/Sprites/rooms/room_idle_small.png")),
+    ("room_done_small", include_bytes!("../Resources/Sprites/rooms/room_done_small.png")),
+    ("room_unknown_small", include_bytes!("../Resources/Sprites/rooms/room_unknown_small.png")),
 ];
 
 pub const HEROES_PNG: &[u8] = include_bytes!("../Resources/Sprites/heroes/heroes.png");
@@ -128,11 +143,12 @@ impl Assets {
         prop("z", pixel_image(&["kkkkkk.", "kwwwwk.", "kkkwkk.", ".kwkk..", "kwkkkk.", "kwwwwk.", "kkkkkk."], &[('k', INK), ('w', rgb(0.92, 0.95, 1.0))]), nearest);
         prop("hourglass", pixel_image(&["fffffff", ".fYYYf.", "..fYf..", "...f...", "..fYf..", ".fYYYf.", "fffffff"],
             &[('f', rgb(0.85, 0.62, 0.33)), ('Y', rgb(0.996, 0.906, 0.38))]), nearest);
-        // The chamber's armchair: its back goes behind the reader, its arms
-        // and the seat's front over the reader's legs.
+        // The waiting room's armchair, its colours.
         let chair_colors = [('k', INK), ('w', rgb(0.635, 0.376, 0.235)), ('d', rgb(0.408, 0.22, 0.141)), ('r', rgb(0.769, 0.204, 0.235)), ('p', rgb(0.886, 0.33, 0.337)), ('s', rgb(0.545, 0.118, 0.157))];
-        prop("chair_back", pixel_image(&["..kkkkkkkkkkkkkk..", ".krrrrrrrrrrrrrrk.", ".krppprrrrrrrrrrk.", ".krprrrrrrrrrrrrk.", ".krrrrrrrrrrrrrrk.", ".krrrrrrrrrrrrrrk.", ".krrrrrrrrrrrrrrk.", ".ksrrrrrrrrrrrrsk.", "kkkkkkkkkkkkkkkkkk", "kwwksssssssssskwwk"], &chair_colors), nearest);
-        prop("chair_front", pixel_image(&["kwwk..........kwwk", "kwdk..........kdwk", "kwdk..........kdwk", "kwdk..........kdwk", "kwdk..........kdwk", "kkkkkkkkkkkkkkkkkk", "kdrrrrrrrrrrrrrrdk", "kkkkkkkkkkkkkkkkkk"], &chair_colors), nearest);
+        // Seen from its side, for a reader in profile: its back behind the
+        // reader's back, its seat, arm and legs over the reader's legs.
+        prop("chair_side_back", pixel_image(&["..kkkk", ".krrrk", ".krprk", ".krprk", ".krrrk", ".krrrk", ".krrrk", ".krrrk", ".krrrk", ".ksrrk", "kkkkkk", "kwwddk"], &chair_colors), nearest);
+        prop("chair_side_front", pixel_image(&["kkkkkkkkkkkk.", "kwwwwwwwwwwwk", "kkkkkkkkkkkkk", "krrrrrrrrrrrk", "krprrrrrrrrrk", "ksssssssssssk", "kkkkkkkkkkkkk", ".kwk.....kwk.", ".kdk.....kdk."], &chair_colors), nearest);
         // A background shell: an iron cauldron of green brew on little legs.
         prop("cauldron", pixel_image(&["..kkkkkkkk..", ".kGGgGGGgGk.", "kkkkkkkkkkkk", "kIiIIIIIIIdk", "kIiIIIIIIIdk", "kIIIIIIIIIdk", ".kIIIIIIIdk.", "..kkkkkkkk..", "..k......k.."],
             &[('k', INK), ('G', rgb(0.55, 0.92, 0.36)), ('g', rgb(0.3, 0.7, 0.25)), ('I', rgb(0.33, 0.33, 0.4)), ('i', rgb(0.55, 0.56, 0.64)), ('d', rgb(0.2, 0.2, 0.26))]), nearest);

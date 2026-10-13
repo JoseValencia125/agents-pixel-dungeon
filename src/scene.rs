@@ -6,17 +6,23 @@
 
 use crate::assets::{Assets, Sprite};
 use crate::herdr::{harness_for, Agent};
+use crate::identity::{Identity, ProjectMeta, ProjectOverride};
 use crate::l10n::tr;
 use egui::emath::Rot2;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, FontId, Mesh, Painter, Pos2, Rect, Shape, Stroke, Vec2};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const ART: Vec2 = vec2(144.0, 100.0);
 pub const FOOTER: f32 = 36.0; // caption band under the room: chat title + folder · branch
-pub const ROW_H: f32 = 158.0 + FOOTER; // room art 100 px at 1.5 pt/px + 8 pt frame, plus the footer
+pub const HEADER: f32 = 28.0; // the repo's band over the room: its emblem and name
+pub const ROW_H: f32 = 158.0 + HEADER + FOOTER; // room art 100 px at 1.5 pt/px + 8 pt frame, plus header and footer
 pub const ROW_W: f32 = 220.0; // room art 144 px at 1.5 pt/px + 4 pt frame
 pub const HERO: f32 = 32.0; // 16 px sprite at 2 pt/px
 pub const GAP: f32 = 6.0;
+pub const LINE_H: f32 = 30.0; // full screen's spare room, as a line
+/// Between full screen's rooms: their cells already leave 4 pt above and
+/// below the frame, so this brings two frames 6 pt apart.
+pub const COLUMN_GAP: f32 = -2.0;
 pub const TOP_PAD: f32 = 14.0; // room for the drag handle
 pub const BOTTOM_PAD: f32 = 6.0;
 
@@ -63,11 +69,16 @@ pub const STYLES: [RoomStyle; 6] = [
                 route: &[pos2(72.0, 80.0), pos2(52.0, 72.0)] },
     RoomStyle { status: "working", title: "TRABAJANDO", background: "room_working", color: Color32::from_rgb(255, 159, 10), bubble: None, spot: pos2(72.0, 34.0), roam: 0.0, lying: false,
                 route: &[pos2(72.0, 80.0), pos2(36.0, 74.0), pos2(36.0, 36.0)] },
-    RoomStyle { status: "idle", title: "EN ESPERA", background: "room_idle", color: Color32::from_rgb(152, 152, 157), bubble: None, spot: pos2(88.0, 40.0), roam: 0.0, lying: false,
-                route: &[pos2(72.0, 80.0), pos2(98.0, 74.0), pos2(98.0, 42.0)] },
+    RoomStyle { status: "idle", title: "EN ESPERA", background: "room_idle", color: Color32::from_rgb(152, 152, 157), bubble: None, spot: pos2(106.0, 40.0), roam: 0.0, lying: false,
+                route: &[pos2(72.0, 80.0), pos2(90.0, 74.0), pos2(90.0, 46.0)] },
     RoomStyle { status: "done", title: "LISTO", background: "room_done", color: Color32::from_rgb(48, 209, 88), bubble: None, spot: pos2(72.0, 66.0), roam: 0.0, lying: false, route: &[] },
     RoomStyle { status: "unknown", title: "SIN ESTADO", background: "room_unknown", color: Color32::from_rgb(152, 152, 157), bubble: Some("…"), spot: pos2(72.0, 62.0), roam: 24.0, lying: false, route: &[] },
 ];
+
+/// The waiting room's window, whose moonlight the reading hero sits in, and
+/// the hearth at its back.
+const WINDOW: Pos2 = pos2(92.0, 30.0);
+const HEARTH: Pos2 = pos2(106.0, 22.0);
 
 /// The doorway in the bottom wall that every room shares, and a point just
 /// outside it (clipped away) where the hero leaves and arrives.
@@ -156,6 +167,67 @@ fn lerp_pos(a: Pos2, b: Pos2, k: f32) -> Pos2 {
     pos2(lerp(a.x, b.x, k), lerp(a.y, b.y, k))
 }
 
+/// How tall full screen's column draws its rooms, the chosen one too.
+/// Every room has art at each size: the large one, and the
+/// same room 64 and 40 pixels tall, its furniture moved as blocks
+/// (scripts/room_sizes.py).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomSize { Large, Medium, Small }
+
+/// A block of a large room's art (x0, y0, x1, y1) and where it went in a
+/// shorter room (dx, dy), as scripts/room_sizes.py composed it: the first
+/// that holds a point moves it (src/room_moves.rs, generated).
+pub type Move = (f32, f32, f32, f32, f32, f32);
+
+impl RoomSize {
+    pub const ALL: [RoomSize; 3] = [RoomSize::Large, RoomSize::Medium, RoomSize::Small];
+
+    pub fn key(self) -> &'static str {
+        match self { RoomSize::Large => "large", RoomSize::Medium => "medium", RoomSize::Small => "small" }
+    }
+
+    pub fn from_key(key: &str) -> RoomSize {
+        RoomSize::ALL.into_iter().find(|s| s.key() == key).unwrap_or(RoomSize::Medium)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self { RoomSize::Large => "Grande", RoomSize::Medium => "Mediana", RoomSize::Small => "Chica" }
+    }
+
+    /// The room art's height in pixels (all are 144 wide).
+    pub fn art_h(self) -> f32 {
+        match self { RoomSize::Large => ART.y, RoomSize::Medium => 64.0, RoomSize::Small => 40.0 }
+    }
+
+    /// A room's whole cell: frame, repo band, art at 1.5 pt/px, footer.
+    pub fn cell_h(self) -> f32 {
+        8.0 + HEADER + self.art_h() * 1.5 + FOOTER
+    }
+
+    /// Where a point of a large room's art (the room of `state`) lands in
+    /// this size's art.
+    pub fn remap(self, state: &str, p: Pos2) -> Pos2 {
+        if self == RoomSize::Large { return p; }
+        let moves = crate::room_moves::moves(state, self);
+        if let Some(&(_, _, _, _, dx, dy)) = moves.iter().find(|&&(x0, y0, x1, y1, _, _)| p.x >= x0 && p.x < x1 && p.y >= y0 && p.y < y1) {
+            return pos2(p.x + dx, p.y + dy);
+        }
+        // Elsewhere: the back wall stays (the small room loses its middle
+        // band), the floor shrinks to fit, the bottom wall moves up.
+        let y = match self {
+            RoomSize::Medium => if p.y < 28.0 { p.y } else if p.y < 92.0 { 28.0 + (p.y - 28.0) * 28.0 / 64.0 } else { p.y - 36.0 },
+            _ => if p.y < 6.0 { p.y } else if p.y < 13.0 { 6.0 } else if p.y < 28.0 { p.y - 7.0 } else if p.y < 92.0 { 21.0 + (p.y - 28.0) * 15.0 / 64.0 } else { 36.0 + (p.y - 92.0) / 2.0 },
+        };
+        pos2(p.x, y)
+    }
+}
+
+/// The room to open on entering full screen with none chosen: the first
+/// one working, else the most pressing.
+pub fn first_room(agents: &[Agent]) -> Option<String> {
+    agents.iter().find(|a| a.status == "working").or_else(|| agents.iter().min_by_key(|a| a.rank())).map(|a| a.id.clone())
+}
+
 /// The spare room: an empty frame with a "+" and "Summon an agent" under
 /// it. Lit while its panel is open or the pointer is over it.
 fn draw_summon_room(painter: &Painter, rect: Rect, active: bool, hovered: bool) {
@@ -167,6 +239,15 @@ fn draw_summon_room(painter: &Painter, rect: Rect, active: bool, hovered: bool) 
     let ink = if lit { Color32::from_gray(230) } else { Color32::from_gray(140) };
     painter.text(frame.center() - vec2(0.0, 14.0), Align2::CENTER_CENTER, "+", FontId::monospace(56.0), ink);
     painter.text(frame.center() + vec2(0.0, 34.0), Align2::CENTER_CENTER, tr("Invocar un agente"), FontId::monospace(13.0), ink);
+}
+
+/// The spare room as a line of the full-screen column.
+fn draw_summon_line(painter: &Painter, rect: Rect, hovered: bool) {
+    let frame = rect.shrink2(vec2(2.0, 1.0));
+    let ink = if hovered { Color32::from_gray(230) } else { Color32::from_gray(140) };
+    painter.rect_filled(frame, CornerRadius::same(4), Color32::from_rgba_unmultiplied(255, 255, 255, if hovered { 10 } else { 4 }));
+    painter.rect_stroke(frame, CornerRadius::same(4), Stroke::new(1.0_f32, if hovered { Color32::from_gray(190) } else { Color32::from_gray(90) }), egui::StrokeKind::Inside);
+    painter.text(frame.center(), Align2::CENTER_CENTER, format!("+  {}", tr("Invocar un agente")), FontId::monospace(12.0), ink);
 }
 
 /// The spare room while it holds the summon form: lit, in summoning green.
@@ -343,9 +424,17 @@ pub struct Room {
     status: String,
     harness: &'static str,
     name: String,
-    color: Color32,
     activity: String,
-    repo: String,
+    /// The agent's folder, and its repo's emblem (worked out again only
+    /// when the folder or the user's choice for it changes).
+    cwd: String,
+    identity: Identity,
+    /// The repo's own name and whether it is the demo's (never kept).
+    repo_name: String,
+    demo: bool,
+    /// How tall it is drawn; the animation always runs in the large room's
+    /// coordinates, and drawing moves each point to this size's art.
+    pub size: RoomSize,
     branch: String,
     /// Shells the agent left running in the background: a cauldron each.
     shells: Vec<crate::shells::Shell>,
@@ -390,9 +479,12 @@ impl Room {
             status: String::new(),
             harness: harness_for(&agent.name),
             name: agent.name.clone(),
-            color: agent_color(&agent.status),
             activity: String::new(),
-            repo: String::new(),
+            cwd: String::new(),
+            identity: crate::identity::identity(&ProjectMeta { key: String::new(), owner: None, name: String::new(), kind: crate::identity::Kind::Unknown }),
+            size: RoomSize::Large,
+            repo_name: String::new(),
+            demo: false,
             branch: String::new(),
             shells: vec![],
             action: None,
@@ -430,7 +522,34 @@ impl Room {
 
     /// The room frame inside the cell.
     fn frame() -> Rect {
-        Rect::from_min_size(pos2(2.0, 4.0), vec2(ROW_W - 4.0, ROW_H - 8.0 - FOOTER))
+        Rect::from_min_size(pos2(2.0, 4.0 + HEADER), vec2(ROW_W - 4.0, ROW_H - 8.0 - HEADER - FOOTER))
+    }
+
+    /// The room frame at the size it is drawn.
+    fn drawn_frame(&self) -> Rect {
+        Rect::from_min_size(pos2(2.0, 4.0 + HEADER), vec2(ROW_W - 4.0, self.size.art_h() * 1.5))
+    }
+
+    /// The repo's band over the room, in cell points.
+    fn header(&self) -> Rect {
+        let f = self.drawn_frame();
+        Rect::from_min_max(pos2(f.min.x, f.min.y - HEADER), pos2(f.max.x, f.min.y))
+    }
+
+    /// A large-room cell point where it is drawn at this room's size.
+    fn place(&self, p: Pos2) -> Pos2 {
+        if self.size == RoomSize::Large { return p; }
+        let art = self.size.remap(self.style.status, Room::art_point(p));
+        let f = self.drawn_frame();
+        pos2(f.min.x + art.x * 1.5, f.min.y + art.y * 1.5)
+    }
+
+    /// The room's art at the size it is drawn.
+    fn background(&self, style: RoomStyle) -> String {
+        match self.size {
+            RoomSize::Large => style.background.to_string(),
+            size => format!("{}_{}", style.background, size.key()),
+        }
     }
 
     /// Room-art pixel (origin top-left) to cell points, matching how the
@@ -453,9 +572,7 @@ impl Room {
     /// Apply the agent's latest data. If the status changed, swap the room.
     pub fn update(&mut self, agent: &Agent, animated: bool) {
         self.name = agent.name.clone();
-        self.color = agent_color(&agent.status);
         self.activity = agent.activity.clone();
-        self.repo = agent.folder();
         self.branch = agent.branch.clone().unwrap_or_default();
         self.shells = agent.shells.clone();
         self.harness = harness_for(&agent.name);
@@ -842,7 +959,8 @@ impl Room {
                     let p = rt % 4.2;
                     let turning = p > 3.9;
                     if turning { pos.y -= 1.0; }
-                    book = Some((if turning { "book_open_flipped" } else { "book_open" }, vec2(18.0, 12.0), pos2(0.0, 5.0)));
+                    // Held out before it, toward the window.
+                    book = Some((if turning { "book_open_flipped" } else { "book_open" }, vec2(14.0, 9.0), pos2(-11.0, 2.0)));
                 }
                 _ => {}
             }
@@ -966,11 +1084,11 @@ impl Room {
                         spawned.push(Particle { kind: ParticleKind::Z, origin: Room::rp(self.style.spot), delta: Vec2::ZERO, life: 2.8, age: 0.0 });
                     }
                     EmitterKind::Embers => {
-                        let hearth = Room::rp(pos2(70.0, 22.0));
+                        let hearth = Room::rp(HEARTH);
                         let color = self.rng.pick(&[GOLD, ORANGE]);
                         let dx = self.rng.range(-4.0, 4.0);
                         let dy = -self.rng.range(8.0, 14.0);
-                        spawned.push(Particle { kind: ParticleKind::Bit { color, size: 2.0 }, origin: pos2(hearth.x + self.rng.range(-14.0, 14.0), hearth.y), delta: vec2(dx, dy), life: 0.9, age: 0.0 });
+                        spawned.push(Particle { kind: ParticleKind::Bit { color, size: 2.0 }, origin: pos2(hearth.x + self.rng.range(-7.0, 7.0), hearth.y), delta: vec2(dx, dy), life: 0.9, age: 0.0 });
                     }
                 }
             }
@@ -1027,9 +1145,10 @@ impl Room {
 
     /// Draw the room at `origin` (the cell's top-left corner).
     pub fn draw(&self, painter: &Painter, origin: Pos2, assets: &Assets, selected: bool) {
-        let at = |p: Pos2| pos2(origin.x + p.x, origin.y + p.y);
-        let f = Room::frame().translate(origin.to_vec2());
-        let cell = Rect::from_min_max(f.min, pos2(f.max.x, f.max.y + FOOTER));
+        let at = |p: Pos2| { let q = self.place(p); pos2(origin.x + q.x, origin.y + q.y) };
+        let f = self.drawn_frame().translate(origin.to_vec2());
+        let header = self.header().translate(origin.to_vec2());
+        let cell = Rect::from_min_max(header.min, pos2(f.max.x, f.max.y + FOOTER));
         let t = self.routine_clock;
         let style = self.style;
         // Footer band under the room.
@@ -1038,7 +1157,8 @@ impl Room {
         // Backdrop, fading in after a room change.
         let fade = self.swap_at.map(|s| ((self.clock - s) / (0.35 / 1.5)).clamp(0.0, 1.0)).unwrap_or(1.0);
         let tint = with_alpha(Color32::WHITE, fade);
-        if let Some(room) = assets.room(style.background) {
+        let background = self.background(style);
+        if let Some(room) = assets.room(&background) {
             clipped.image(room.tex, f, room.uv, tint);
         }
         // Lights (soft glows) under the actors.
@@ -1071,20 +1191,21 @@ impl Room {
             let sleeper = assets.sleeper(self.harness);
             draw_sprite(&clipped, sleeper, hero_at, sleeper.px * 2.0, false, -(std::f32::consts::FRAC_PI_2 + wobble), Color32::WHITE);
         } else {
-            // In the chamber the hero reads in an armchair by the fire: the
-            // chair's back stands behind it, its arms and seat go over its
-            // legs once it has sat down.
+            // In the inn's room the hero reads in an armchair seen from its
+            // side, in profile, facing the window: the chair's back stands
+            // behind the hero's back, its seat, arm and legs go over the
+            // hero's legs once it has sat down.
             let seat = at(Room::rp(style.spot));
             let seated = style.status == "idle" && !self.in_transition && self.runner.is_none();
             if style.status == "idle" {
-                let back = assets.prop("chair_back");
-                draw_sprite(&clipped, back, pos2(seat.x, seat.y - 10.0), back.px * 2.0, false, 0.0, Color32::WHITE);
+                let back = assets.prop("chair_side_back");
+                draw_sprite(&clipped, back, pos2(seat.x + 9.0, seat.y - 1.0), back.px * 2.0, false, 0.0, Color32::WHITE);
             }
             let sprite = assets.hero_frame(self.harness, kind, index);
-            draw_sprite(&clipped, sprite, hero_at, vec2(HERO, HERO), self.facing < 0.0, 0.0, Color32::WHITE);
+            draw_sprite(&clipped, sprite, hero_at, vec2(HERO, HERO), if seated { true } else { self.facing < 0.0 }, 0.0, Color32::WHITE);
             if seated {
-                let front = assets.prop("chair_front");
-                draw_sprite(&clipped, front, pos2(seat.x, seat.y + 8.0), front.px * 2.0, false, 0.0, Color32::WHITE);
+                let front = assets.prop("chair_side_front");
+                draw_sprite(&clipped, front, pos2(seat.x + 1.0, seat.y + 10.0), front.px * 2.0, false, 0.0, Color32::WHITE);
             }
             if let Some((name, size, offset)) = book {
                 let prop = assets.prop(name);
@@ -1115,7 +1236,8 @@ impl Room {
         }
         // The bed's own blanket over the sleeper, breathing.
         if style.lying && !self.in_transition {
-            if let Some(blanket) = assets.room_part(style.background, 70.0, 53.0, 20.0, 9.0) {
+            let corner = self.size.remap(style.status, pos2(70.0, 53.0));
+            if let Some(blanket) = assets.room_part(&background, corner.x, corner.y, 20.0, 9.0) {
                 let a = Room::rp(pos2(70.0, 53.0));
                 let b = Room::rp(pos2(90.0, 62.0));
                 let e = t % 3.6;
@@ -1126,21 +1248,23 @@ impl Room {
         }
         if style.status == "limited" && !self.in_transition { self.draw_recovery(&clipped, painter, origin, assets); }
         // The room's front layer (the desk), over the hero.
-        if let Some(front) = assets.room(&format!("{}_front", style.background)) {
+        if let Some(front) = assets.room(&format!("{background}_front")) {
             clipped.image(front.tex, f, front.uv, tint);
         }
         if self.party_visible {
             for mini in self.party.iter().filter(|m| m.front) { self.draw_mini(&clipped, mini, origin, assets, mini_tint); }
         }
-        // Night in the chamber: only the fireplace lights the room.
+        // Night in the inn's room: the moon through the window lights the
+        // reader; the hearth in the corner glows and flickers.
         if style.status == "idle" && !self.in_transition {
-            let hearth = at(Room::rp(pos2(70.0, 22.0)));
+            let window = at(Room::rp(WINDOW));
             let reach = f.width() * 2.0;
             let e = t % 4.0;
             let s = if e < 1.8 { lerp(0.97, 1.05, e / 1.8) } else { lerp(1.05, 0.97, (e - 1.8) / 2.2) };
-            draw_sprite(&clipped, assets.prop("darkness"), hearth, vec2(reach * s, reach * s), false, 0.0, Color32::WHITE);
-            let fire = 0.15 + 0.05 * (t * 2.3 + self.rng.0 as f32 % 7.0).sin() * (t * 0.7).cos();
-            draw_sprite(&clipped, glow, pos2(hearth.x + 6.0, hearth.y + 8.0), vec2(120.0, 84.0), false, 0.0, with_alpha(Color32::from_rgb(255, 140, 51), fire));
+            draw_sprite(&clipped, assets.prop("darkness"), window, vec2(reach * s, reach * s), false, 0.0, Color32::WHITE);
+            let hearth = at(Room::rp(HEARTH));
+            let fire = 0.2 + 0.06 * (t * 2.3 + self.rng.0 as f32 % 7.0).sin() * (t * 0.7).cos();
+            draw_sprite(&clipped, glow, pos2(hearth.x, hearth.y + 4.0), vec2(64.0, 48.0), false, 0.0, with_alpha(Color32::from_rgb(255, 140, 51), fire));
         }
         // Speech bubble, bobbing over the hero's head.
         let bubble_text = if let Some(runner) = &self.runner {
@@ -1159,7 +1283,20 @@ impl Room {
         // Rounded corners: cover what the square clip let through.
         cover_corners(painter, f, 6.0, BACKGROUND);
         cover_corners(painter, cell, 6.0, BACKGROUND);
-        // Frame.
+        // The repo's band: its colour, emblem and name, whatever the state.
+        let identity = &self.identity;
+        let primary = identity.primary_color();
+        painter.rect_filled(header, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, blend(Color32::from_rgb(18, 15, 23), primary, 0.16));
+        painter.rect_filled(Rect::from_min_max(pos2(header.min.x, header.max.y - 2.0), header.max), CornerRadius::ZERO, primary);
+        draw_emblem(painter, identity, self.emblem_rect(origin).min, 2.0);
+        let name_room = header.width() - 40.0;
+        let name_color = blend(primary, Color32::WHITE, 0.5);
+        let name = fit_text(painter, &identity.name, FontId::monospace(13.0), name_room);
+        let name_at = pos2(header.min.x + 34.0, header.center().y - 1.0);
+        painter.text(name_at, Align2::LEFT_CENTER, &name, FontId::monospace(13.0), name_color);
+        painter.text(pos2(name_at.x + 0.7, name_at.y), Align2::LEFT_CENTER, &name, FontId::monospace(13.0), name_color);
+        // Frame: quiet, so the repo's colour leads; it only lights up for
+        // an agent that needs you or is out of credits.
         let stroke = if style.status == "blocked" && !self.in_transition {
             let bright = Color32::from_rgb(255, 51, 56);
             let dim = Color32::from_rgb(89, 13, 20);
@@ -1168,13 +1305,11 @@ impl Room {
             let q = (std::f32::consts::TAU * self.clock / 2.4).sin() * 0.5 + 0.5;
             Stroke::new(2.0_f32, blend(Color32::from_rgb(74, 30, 99), LIMITED, q))
         } else {
-            Stroke::new(1.0_f32, with_alpha(style.color, 0.85))
+            Stroke::new(1.0_f32, Color32::from_rgb(58, 52, 68))
         };
         painter.rect_stroke(cell, CornerRadius::same(6), stroke, egui::StrokeKind::Inside);
-        // Labels: the repo (top-left), then the footer: what the agent is
-        // doing, its branch (bottom-left) and the room's state (bottom-right).
-        let repo_chars = (((f.width() - 32.0) / 7.8) as usize).max(4);
-        label(painter, pos2(f.min.x + 12.0, f.min.y + 14.0), Align2::LEFT_CENTER, &Room::clip(&self.repo, repo_chars), 13.0, self.color, true);
+        // The footer: what the agent is doing, its branch (bottom-left) and
+        // the room's state with its light (bottom-right).
         let usable_chars = ((f.width() - 28.0) / 6.65) as usize;
         painter.text(pos2(f.min.x + 10.0, f.max.y + 11.0), Align2::LEFT_CENTER, Room::clip(&self.activity, usable_chars), FontId::monospace(11.0), Color32::WHITE);
         // The new state shows at once, while the hero is still walking
@@ -1185,11 +1320,29 @@ impl Room {
         let at = pos2(f.max.x - 10.0, f.max.y + FOOTER - 10.0);
         painter.text(at, Align2::RIGHT_CENTER, &title, FontId::monospace(11.0), title_color);
         let title_rect = painter.text(pos2(at.x + 0.6, at.y), Align2::RIGHT_CENTER, &title, FontId::monospace(11.0), title_color);
-        let branch_chars = (((title_rect.min.x - f.min.x - 22.0) / 6.65) as usize).max(4);
+        painter.circle_filled(pos2(title_rect.min.x - 8.0, at.y), 3.5, shown.color);
+        painter.circle_stroke(pos2(title_rect.min.x - 8.0, at.y), 3.5, Stroke::new(1.0_f32, Color32::from_black_alpha(140)));
+        let branch_chars = (((title_rect.min.x - f.min.x - 36.0) / 6.65) as usize).max(4);
         painter.text(pos2(f.min.x + 10.0, at.y), Align2::LEFT_CENTER, Room::clip(&self.branch, branch_chars), FontId::monospace(11.0), Color32::from_gray(209));
         if selected {
             painter.rect_stroke(cell.expand(2.0), CornerRadius::same(7), Stroke::new(2.0_f32, Color32::from_rgb(217, 242, 166)), egui::StrokeKind::Outside);
         }
+    }
+
+    /// Where the repo's emblem is drawn on its band.
+    fn emblem_rect(&self, origin: Pos2) -> Rect {
+        let header = self.header().translate(origin.to_vec2());
+        Rect::from_min_size(pos2(header.min.x + 7.0, header.center().y - 13.0), vec2(20.0, 24.0))
+    }
+
+    /// The repo's full name and key, while the pointer is on its band.
+    pub fn header_tip(&self, origin: Pos2, pointer: Pos2) -> Option<String> {
+        if !self.header().translate(origin.to_vec2()).contains(pointer) { return None; }
+        let identity = &self.identity;
+        let mut tip = identity.name.clone();
+        if identity.key != identity.name.to_lowercase() { tip += &format!("\n{}", identity.key); }
+        if !identity.kind.label().is_empty() { tip += &format!(" · {}", identity.kind.label()); }
+        Some(tip)
     }
 
     /// Where the cauldrons of the shells it left running stand: the room's
@@ -1230,7 +1383,7 @@ impl Room {
     /// What the cauldrons stand for, when the pointer is on them: where
     /// they stand, and per shell its description · running time and last line.
     pub fn shells_tip(&self, origin: Pos2, pointer: Pos2) -> Option<(Rect, Vec<(String, Option<String>)>)> {
-        let f = Room::frame().translate(origin.to_vec2());
+        let f = self.drawn_frame().translate(origin.to_vec2());
         let area = self.shells_rect(f)?;
         if !area.contains(pointer) { return None; }
         let now = crate::herdr::unix_now();
@@ -1244,7 +1397,7 @@ impl Room {
         let ink = blend(LIMITED, Color32::WHITE, 0.55);
         let galley = painter.layout_no_wrap(text, FontId::monospace(12.0), ink);
         let width = galley.size().x + 18.0;
-        let foot = Room::rp(pos2(72.0, 73.0));
+        let foot = self.place(Room::rp(pos2(72.0, 73.0)));
         let pill = Rect::from_center_size(pos2(origin.x + foot.x, origin.y + foot.y), vec2(width + 8.0, galley.size().y + 4.0));
         clipped.rect_filled(pill, CornerRadius::same(3), Color32::from_black_alpha(200));
         clipped.rect_stroke(pill, CornerRadius::same(3), Stroke::new(1.0_f32, with_alpha(LIMITED, 0.8)), egui::StrokeKind::Inside);
@@ -1255,7 +1408,8 @@ impl Room {
     fn draw_mini(&self, painter: &Painter, mini: &Mini, origin: Pos2, assets: &Assets, tint: Color32) {
         let frame = (self.clock / 0.16) as usize % 3;
         let sprite = assets.hero_frame(self.harness, "work", frame);
-        let at = pos2(origin.x + mini.pos.x, origin.y + mini.pos.y);
+        let placed = self.place(mini.pos);
+        let at = pos2(origin.x + placed.x, origin.y + placed.y);
         draw_sprite(painter, sprite, at, vec2(24.0, 24.0), mini.facing < 0.0, 0.0, tint);
         // Readers and planners hold an open book or scroll.
         if mini.action == "read" || mini.action == "plan" {
@@ -1266,7 +1420,7 @@ impl Room {
 
     fn draw_particle(&self, painter: &Painter, p: &Particle, origin: Pos2, assets: &Assets) {
         let k = (p.age / p.life).clamp(0.0, 1.0);
-        let at = |q: Pos2| pos2(origin.x + q.x, origin.y + q.y);
+        let at = |q: Pos2| { let q = self.place(q); pos2(origin.x + q.x, origin.y + q.y) };
         match p.kind {
             ParticleKind::Bit { color, size } => {
                 let pos = at(pos2(p.origin.x + p.delta.x * k, p.origin.y + p.delta.y * k));
@@ -1343,6 +1497,43 @@ fn label(painter: &Painter, at: Pos2, align: Align2, text: &str, size: f32, colo
     rect
 }
 
+/// A repo's emblem, 10×12 pixels of `px` points from `top_left`: a dark
+/// edge, the field in its colour with the partition in the second one, and
+/// the charge inked in the middle.
+pub fn draw_emblem(painter: &Painter, identity: &Identity, top_left: Pos2, px: f32) {
+    let ppp = painter.ctx().pixels_per_point();
+    let top_left = pos2((top_left.x * ppp).round() / ppp, (top_left.y * ppp).round() / ppp);
+    let mask = identity.shape.mask();
+    let inside = |x: i32, y: i32| (0..10).contains(&x) && (0..12).contains(&y) && mask[y as usize].as_bytes()[x as usize] == b'#';
+    let charge = identity.symbol.pixels();
+    let inked = |x: i32, y: i32| (2..8).contains(&x) && (2..8).contains(&y) && charge[(y - 2) as usize].as_bytes()[(x - 2) as usize] == b'#';
+    let (primary, secondary, ink) = (identity.primary_color(), identity.secondary_color(), identity.ink());
+    let edge = Color32::from_rgb(24, 20, 37);
+    let rim = |x: i32, y: i32| !(inside(x - 1, y) && inside(x + 1, y) && inside(x, y - 1) && inside(x, y + 1));
+    let mut mesh = Mesh::default();
+    for y in 0..12 {
+        for x in 0..10 {
+            if !inside(x, y) { continue; }
+            let near_rim = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| inside(x + dx, y + dy) && rim(x + dx, y + dy));
+            let color = if rim(x, y) { edge } else if inked(x, y) { ink } else if identity.pattern.second(x as usize, y as usize, near_rim) { secondary } else { primary };
+            mesh.add_colored_rect(Rect::from_min_size(pos2(top_left.x + x as f32 * px, top_left.y + y as f32 * px), vec2(px, px)), color);
+        }
+    }
+    painter.add(Shape::mesh(mesh));
+}
+
+/// `text` cut with "…" to fit `width` points in `font`.
+fn fit_text(painter: &Painter, text: &str, font: FontId, width: f32) -> String {
+    let fits = |t: &str| painter.layout_no_wrap(t.to_string(), font.clone(), Color32::WHITE).size().x <= width;
+    if fits(text) { return text.to_string(); }
+    let mut cut: String = text.to_string();
+    while cut.pop().is_some() {
+        let shown = format!("{}…", cut.trim_end());
+        if fits(&shown) { return shown; }
+    }
+    "…".into()
+}
+
 /// Paint the window background over the corners of a square-clipped rect,
 /// so it reads as rounded.
 fn cover_corners(painter: &Painter, rect: Rect, radius: f32, color: Color32) {
@@ -1370,6 +1561,8 @@ pub struct SceneResponse {
     /// While summoning in the spare room: its rect, for the form drawn in
     /// it, and the part of the scene in view.
     pub summon_rect: Option<(Rect, Rect)>,
+    /// A room's emblem was right-clicked: edit it.
+    pub edit_emblem: Option<String>,
 }
 
 enum ScrollRequest {
@@ -1388,6 +1581,19 @@ pub struct Scene {
     pub empty_text: String,
     /// A spare room after the last one, with a "+" to summon an agent.
     pub summon_tile: bool,
+    /// Full screen: rooms keep their places, so nobody asking scrolls the
+    /// dungeon to the top (they are called over it instead).
+    pub keep_order: bool,
+    /// Full screen's column: every room at `room_size`, the chosen one
+    /// too (it is only outlined), instead of all large.
+    pub compact: bool,
+    pub room_size: RoomSize,
+    /// The user's choices for some repos' emblems (settings' `projects`).
+    pub overrides: BTreeMap<String, ProjectOverride>,
+    /// Every repo's emblem as first worked out (settings' `emblems`), and
+    /// whether a new one was added, for the app to save.
+    pub emblems: BTreeMap<String, crate::identity::SavedEmblem>,
+    pub emblems_added: bool,
     /// The summon panel is open: the spare room holds its form.
     pub summoning: bool,
     summon_shown: bool,
@@ -1407,12 +1613,34 @@ impl Scene {
             reduced_motion: false,
             empty_text: tr("Sin agentes en la sesión"),
             summon_tile: false,
+            keep_order: false,
+            compact: false,
+            room_size: RoomSize::Medium,
+            overrides: BTreeMap::new(),
+            emblems: BTreeMap::new(),
+            emblems_added: false,
             summoning: false,
             summon_shown: false,
             seeds: 7,
             clock: 0.0,
             last_time: None,
         }
+    }
+
+    /// What the emblem editor needs of an agent's room: its emblem, the
+    /// repo's own name, and whether it is the demo's.
+    pub fn emblem_of(&self, id: &str) -> Option<(Identity, String, bool)> {
+        self.rooms.get(id).map(|room| (room.identity.clone(), room.repo_name.clone(), room.demo))
+    }
+
+    /// Work every room's emblem out again (after the settings changed).
+    pub fn reload_emblems(&mut self) {
+        for room in self.rooms.values_mut() { room.cwd.clear(); }
+    }
+
+    /// An agent's repo emblem, once its room is up.
+    pub fn identity(&self, id: &str) -> Option<&Identity> {
+        self.rooms.get(id).map(|room| &room.identity)
     }
 
     pub fn set_selected(&mut self, id: Option<String>) {
@@ -1422,7 +1650,8 @@ impl Scene {
         }
     }
 
-    /// Show these agents (already sorted, attention first). Someone new
+    /// Show these agents (already sorted: attention first, or in place in
+    /// full screen). Someone new
     /// needing attention takes the first room: scroll up to it.
     pub fn sync(&mut self, agents: &[Agent]) {
         let ids: HashSet<&str> = agents.iter().map(|a| a.id.as_str()).collect();
@@ -1431,15 +1660,43 @@ impl Scene {
         let newly_asking = asking.difference(&self.asking_before).next().is_some();
         self.asking_before = asking;
         self.order = agents.iter().map(|a| a.id.clone()).collect();
-        if newly_asking && self.selected.is_none() { self.scroll_request = Some(ScrollRequest::Top); }
+        if newly_asking && self.selected.is_none() && !self.keep_order { self.scroll_request = Some(ScrollRequest::Top); }
+        let mut shown: Vec<usize> = vec![];
         for agent in agents {
-            match self.rooms.get_mut(&agent.id) {
-                Some(room) => room.update(agent, !self.reduced_motion),
+            let room = match self.rooms.get_mut(&agent.id) {
+                Some(room) => { room.update(agent, !self.reduced_motion); room }
                 None => {
                     self.seeds = self.seeds.wrapping_mul(1664525).wrapping_add(1013904223);
-                    self.rooms.insert(agent.id.clone(), Room::new(agent, self.seeds));
+                    self.rooms.entry(agent.id.clone()).or_insert(Room::new(agent, self.seeds))
                 }
+            };
+            // The emblem, read from the folder once (a few small files).
+            if room.cwd != agent.cwd || room.identity.key.is_empty() {
+                room.cwd = agent.cwd.clone();
+                let demo = crate::herdr::demo_meta(agent);
+                let meta = demo.clone().unwrap_or_else(|| crate::identity::read_meta(&agent.cwd));
+                // The emblem kept for this repo, else worked out and kept
+                // (the demo's are never kept).
+                let base = match self.emblems.get(&meta.key).and_then(|kept| kept.restore(&meta)) {
+                    Some(kept) => kept,
+                    None => {
+                        // A colour no other repo has (the demo's: no other room).
+                        let mut fresh = crate::identity::identity(&meta);
+                        let taken = if demo.is_none() { crate::identity::SavedEmblem::colours_of(self.emblems.values()) } else { shown.clone() };
+                        fresh.primary = crate::identity::free_colour(&meta.key, fresh.primary, &taken);
+                        fresh.secondary = crate::identity::metal_apart(fresh.primary, fresh.secondary);
+                        if demo.is_none() {
+                            self.emblems.insert(meta.key.clone(), crate::identity::SavedEmblem::of(&fresh));
+                            self.emblems_added = true;
+                        }
+                        fresh
+                    }
+                };
+                room.identity = crate::identity::apply_override(&meta, base, self.overrides.get(&meta.key));
+                room.repo_name = meta.name.clone();
+                room.demo = demo.is_some();
             }
+            shown.push(room.identity.primary);
         }
     }
 
@@ -1448,9 +1705,44 @@ impl Scene {
     }
 
     pub fn content_height(&self, width: f32) -> f32 {
+        if self.compact { return self.layout(width).1; }
         let columns = columns_fitting(width);
         let lines = (self.slots() + columns - 1) / columns;
         TOP_PAD + lines as f32 * ROW_H + lines.saturating_sub(1) as f32 * GAP + BOTTOM_PAD
+    }
+
+    /// How tall the rooms are drawn: the menu's size in full screen's
+    /// column, large in the widget.
+    pub fn size(&self) -> RoomSize {
+        if self.compact { self.room_size } else { RoomSize::Large }
+    }
+
+    /// Each slot's top-left corner and size (the rooms in order, then the
+    /// spare room), and the content's height: a grid of whole rooms, or
+    /// full screen's column of rooms at the menu's size.
+    fn layout(&self, width: f32) -> (Vec<Rect>, f32) {
+        let mut slots = vec![];
+        if self.compact {
+            let x = ((width - ROW_W) / 2.0).max(GAP);
+            let mut y = TOP_PAD;
+            for _ in &self.order {
+                let h = self.room_size.cell_h();
+                slots.push(Rect::from_min_size(pos2(x, y), vec2(ROW_W, h)));
+                y += h + COLUMN_GAP;
+            }
+            if self.summon_tile {
+                let h = if self.summoning { ROW_H } else { LINE_H };
+                slots.push(Rect::from_min_size(pos2(x, y), vec2(ROW_W, h)));
+                y += h + COLUMN_GAP;
+            }
+            return (slots, y - COLUMN_GAP + BOTTOM_PAD);
+        }
+        let columns = columns_fitting(width);
+        let gap = GAP.max((width - columns as f32 * ROW_W) / (columns + 1) as f32);
+        for index in 0..self.slots() {
+            slots.push(Rect::from_min_size(pos2(gap + (index % columns) as f32 * (ROW_W + gap), TOP_PAD + (index / columns) as f32 * (ROW_H + GAP)), vec2(ROW_W, ROW_H)));
+        }
+        (slots, self.content_height(width))
     }
 
     /// Lay the rooms out in the given width and draw them inside a scroll
@@ -1459,11 +1751,9 @@ impl Scene {
         let dt = match self.last_time { Some(last) if !self.reduced_motion => ((now - last) as f32).clamp(0.0, 0.1), _ => 0.0 };
         self.last_time = Some(now);
         self.clock += dt;
-        let mut response = SceneResponse { clicked: None, finish: None, terminal: None, summon: false, summon_rect: None };
+        let mut response = SceneResponse { clicked: None, finish: None, terminal: None, summon: false, summon_rect: None, edit_emblem: None };
         let width = ui.available_width();
-        let columns = columns_fitting(width);
-        let gap = GAP.max((width - columns as f32 * ROW_W) / (columns + 1) as f32);
-        let height = self.content_height(width);
+        let (slots, height) = self.layout(width);
         let scroll_request = self.scroll_request.take();
         let mut room_rects: Vec<Rect> = vec![];
         let output = egui::ScrollArea::vertical()
@@ -1483,11 +1773,11 @@ impl Scene {
                     ui.scroll_with_delta(vec2(0.0, -(page - GAP)));
                 }
                 let order = self.order.clone();
+                let size = self.size();
                 for (index, id) in order.iter().enumerate() {
+                    let slot = slots[index];
                     let Some(room) = self.rooms.get_mut(id) else { continue };
-                    let col = index % columns;
-                    let line = index / columns;
-                    let target = pos2(gap + col as f32 * (ROW_W + gap), TOP_PAD + line as f32 * (ROW_H + GAP));
+                    let target = slot.min;
                     if room.pos != target {
                         room.move_from = room.shown.unwrap_or(target);
                         room.move_at = self.clock;
@@ -1497,16 +1787,25 @@ impl Scene {
                     let shown = if room.shown.is_none() { target } else { lerp_pos(room.move_from, target, k) };
                     room.shown = Some(shown);
                     room.advance(dt);
-                    let rect = Rect::from_min_size(pos2(content.min.x + shown.x, content.min.y + shown.y), vec2(ROW_W, ROW_H));
+                    let rect = Rect::from_min_size(pos2(content.min.x + shown.x, content.min.y + shown.y), slot.size());
                     if let Some(ScrollRequest::Reveal(wanted)) = &scroll_request {
                         if wanted == id { ui.scroll_to_rect(rect.expand(4.0), None); }
                     }
                     room_rects.push(rect);
                     let hit = ui.interact(rect, ui.id().with(id), egui::Sense::click());
-                    room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
+                    // Only what shows is drawn.
+                    room.size = size;
+                    if ui.is_rect_visible(rect) {
+                        room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
+                    }
                     if hit.clicked() { response.clicked = Some(id.clone()); }
                     if let Some((area, rows)) = hit.hover_pos().and_then(|p| room.shells_tip(rect.min, p)) { crate::ui::shells_note(ui.ctx(), area, &rows); }
-                    hit.context_menu(|ui| {
+                    let hit = match hit.hover_pos().and_then(|p| room.header_tip(rect.min, p)) { Some(tip) => hit.on_hover_text(tip), None => hit };
+                    // A right click on the emblem edits it; elsewhere it opens the room's menu.
+                    let on_emblem = hit.hover_pos().is_some_and(|p| room.emblem_rect(rect.min).expand(2.0).contains(p));
+                    if on_emblem && hit.secondary_clicked() { response.edit_emblem = Some(id.clone()); }
+                    let hit = if on_emblem { hit.on_hover_text(tr("Clic derecho: editar el escudo")) } else { hit };
+                    if !on_emblem { hit.context_menu(|ui| {
                         if ui.button(tr("Abrir una terminal en esta carpeta")).clicked() {
                             response.terminal = Some(id.clone());
                             ui.close_menu();
@@ -1515,12 +1814,14 @@ impl Scene {
                             response.finish = Some(id.clone());
                             ui.close_menu();
                         }
-                    });
+                        if ui.button(tr("Editar el escudo…")).clicked() {
+                            response.edit_emblem = Some(id.clone());
+                            ui.close_menu();
+                        }
+                    }); }
                 }
                 if self.summon_tile {
-                    let index = order.len();
-                    let at = pos2(gap + (index % columns) as f32 * (ROW_W + gap), TOP_PAD + (index / columns) as f32 * (ROW_H + GAP));
-                    let rect = Rect::from_min_size(content.min + at.to_vec2(), vec2(ROW_W, ROW_H));
+                    let rect = slots[order.len()].translate(content.min.to_vec2());
                     if self.summoning {
                         // The room holds the summon form, drawn over it by the app.
                         draw_summon_frame(ui.painter(), rect);
@@ -1528,7 +1829,7 @@ impl Scene {
                         if !self.summon_shown { ui.scroll_to_rect(rect.expand(4.0), None); }
                     } else {
                         let hit = ui.interact(rect, ui.id().with("summon-room"), egui::Sense::click());
-                        draw_summon_room(ui.painter(), rect, false, hit.hovered());
+                        if self.compact { draw_summon_line(ui.painter(), rect, hit.hovered()); } else { draw_summon_room(ui.painter(), rect, false, hit.hovered()); }
                         if hit.clicked() { response.summon = true; }
                     }
                     self.summon_shown = self.summoning;
@@ -1555,5 +1856,87 @@ impl Scene {
             }
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(id: &str, status: &str) -> Agent {
+        Agent::new(id, "claude", status, id, "Doing a long task that would never fit on one line of a window", &format!("/nonexistent/{id}"))
+    }
+
+    #[test]
+    fn every_room_keeps_the_menus_size() {
+        let mut scene = Scene::new();
+        scene.compact = true;
+        scene.room_size = RoomSize::Small;
+        let agents: Vec<Agent> = (0..12).map(|i| agent(&format!("w{i}"), ["working", "done", "idle", "limited", "blocked"][i % 5])).collect();
+        scene.sync(&agents);
+        // Choosing a room only outlines it: the column keeps its height.
+        let before = scene.content_height(ROW_W);
+        scene.set_selected(Some("w0".into()));
+        scene.sync(&agents);
+        assert_eq!(scene.content_height(ROW_W), before);
+        assert_eq!(scene.size(), RoomSize::Small);
+        let expected = TOP_PAD + 12.0 * RoomSize::Small.cell_h() + 11.0 * COLUMN_GAP + BOTTOM_PAD;
+        assert!((before - expected).abs() < 0.5, "{before} vs {expected}");
+        // A state change does not move the choice either.
+        let mut done = agents.clone();
+        done[0].status = "done".into();
+        scene.sync(&done);
+        assert_eq!(scene.selected.as_deref(), Some("w0"));
+        // The widget's rooms are large.
+        scene.compact = false;
+        assert_eq!(scene.size(), RoomSize::Large);
+    }
+
+    #[test]
+    fn shorter_rooms_keep_their_places() {
+        assert_eq!(RoomSize::Large.cell_h(), ROW_H);
+        assert!(RoomSize::Small.cell_h() < RoomSize::Medium.cell_h() && RoomSize::Medium.cell_h() < ROW_H);
+        assert_eq!((RoomSize::from_key("small"), RoomSize::from_key("nonsense")), (RoomSize::Small, RoomSize::Medium));
+        for size in [RoomSize::Medium, RoomSize::Small] {
+            for style in STYLES {
+                // Where the hero stands, walks in and works lands inside each room's shorter art.
+                let mut places: Vec<(&str, Pos2)> = vec![("spot", style.spot), ("door", DOOR)];
+                places.extend(style.route.iter().map(|p| ("route", *p)));
+                if style.status == "working" { places.extend(["read", "forge", "brew", "gems", "summon"].iter().map(|n| (*n, station(n).unwrap().0))); }
+                for (name, p) in places {
+                    let q = size.remap(style.status, p);
+                    assert!((0.0..=144.0).contains(&q.x) && (0.0..=size.art_h()).contains(&q.y), "{size:?} {} {name}: {q:?}", style.status);
+                }
+                assert_eq!(size.remap(style.status, pos2(72.0, 2.0)), pos2(72.0, 2.0), "the top wall stays");
+            }
+            // The hero stands behind the desk, and sleeps under its blanket, as in the large rooms.
+            let working = style_for("working").spot;
+            assert_eq!(size.remap("working", pos2(72.0, 44.0)).y - size.remap("working", working).y, 10.0, "{size:?}");
+            let cot = style_for("limited").spot;
+            assert_eq!(size.remap("limited", pos2(70.0, 53.0)).y - size.remap("limited", cot).y, 53.0 - cot.y, "{size:?}");
+        }
+    }
+
+    #[test]
+    fn kept_emblems_are_used_and_new_ones_kept() {
+        use crate::identity::{SavedEmblem, Symbol};
+        let mut scene = Scene::new();
+        let kept = SavedEmblem { color: "pink".into(), metal: "ink".into(), symbol: Symbol::Moon, pattern: crate::identity::Pattern::Chief, shape: crate::identity::Shape::Kite, kind: crate::identity::Kind::Unknown };
+        scene.emblems.insert("kept".into(), kept.clone());
+        scene.sync(&[agent("kept", "idle"), agent("fresh", "idle")]);
+        let id = scene.identity("kept").unwrap();
+        assert_eq!((id.symbol, crate::identity::COLOURS[id.primary].0), (Symbol::Moon, "pink"));
+        assert!(scene.emblems_added && scene.emblems.contains_key("fresh"));
+        // The demo's rooms are never kept.
+        let mut demo = Scene::new();
+        demo.sync(&crate::herdr::demo_agents(0));
+        assert!(!demo.emblems_added && demo.emblems.is_empty());
+    }
+
+    #[test]
+    fn first_room_on_entering_full_screen() {
+        assert_eq!(first_room(&[agent("a", "done"), agent("b", "working"), agent("c", "working")]).as_deref(), Some("b"));
+        assert_eq!(first_room(&[agent("a", "idle"), agent("b", "blocked")]).as_deref(), Some("b"));
+        assert_eq!(first_room(&[]), None);
     }
 }

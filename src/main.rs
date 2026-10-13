@@ -1,17 +1,20 @@
-//! Herdr Pixel Dungeon: a native pixel-art guild for your live Herdr agents,
+//! Agents Pixel Dungeon: a native pixel-art guild for your live Herdr agents,
 //! for macOS and Linux. Each agent is an animated hero in a dungeon room
 //! that changes with its real Herdr status, in a small floating widget with
 //! a status item in the menu bar or tray.
 
 mod alerts;
 mod ansi;
+mod changes;
 mod assets;
 mod commands;
 mod events;
 mod herdr;
+mod identity;
 mod l10n;
 mod monitor;
 mod prefs;
+mod room_moves;
 mod scene;
 mod selftest;
 mod shells;
@@ -60,7 +63,7 @@ fn native_fullscreen(on: bool) -> bool {
     let Some(mtm) = MainThreadMarker::new() else { return false };
     let app = NSApplication::sharedApplication(mtm);
     let windows = app.windows();
-    let Some(window) = windows.iter().find(|w| w.title().to_string() == "Herdr Pixel Dungeon" && w.styleMask().contains(NSWindowStyleMask::Resizable)) else { return false };
+    let Some(window) = windows.iter().find(|w| w.title().to_string() == "Agents Pixel Dungeon" && w.styleMask().contains(NSWindowStyleMask::Resizable)) else { return false };
     let is_full = window.styleMask().contains(NSWindowStyleMask::FullScreen);
     if on {
         unsafe { window.setCollectionBehavior(window.collectionBehavior() | NSWindowCollectionBehavior::FullScreenPrimary) };
@@ -139,8 +142,8 @@ fn main() {
     let fullscreen = args.iter().any(|a| a == "--fullscreen");
     let on_top = prefs.on_top;
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Herdr Pixel Dungeon")
-        .with_app_id("herdr-pixel-dungeon")
+        .with_title("Agents Pixel Dungeon")
+        .with_app_id("agents-pixel-dungeon")
         .with_decorations(false)
         .with_transparent(true)
         .with_resizable(true)
@@ -152,7 +155,7 @@ fn main() {
     }
     if on_top { viewport = viewport.with_always_on_top(); }
     let options = eframe::NativeOptions { viewport, centered: false, ..Default::default() };
-    let result = eframe::run_native("Herdr Pixel Dungeon", options, Box::new(move |cc| Ok(Box::new(App::new(cc, prefs, session, demo, fullscreen)))));
+    let result = eframe::run_native("Agents Pixel Dungeon", options, Box::new(move |cc| Ok(Box::new(App::new(cc, prefs, session, demo, fullscreen)))));
     if let Err(error) = result {
         eprintln!("{error}");
         std::process::exit(1);
@@ -212,6 +215,15 @@ struct App {
     usage_rx: Option<std::sync::mpsc::Receiver<Vec<usage::HarnessUsage>>>,
     next_usage: f64,
     terminals: terminal::Terminals,
+    /// Full screen's calls to action already answered: the state each agent
+    /// was in when its chat was open. It is called again once that changes.
+    calls_seen: std::collections::HashMap<String, String>,
+    /// Full screen opened a room for this visit already (only on entering,
+    /// so esc can still close it).
+    room_opened: bool,
+    /// A repo's emblem being edited, and whether it is the demo's (edited
+    /// on screen only, never kept).
+    emblem_editor: Option<(ui::EmblemEditor, bool)>,
 }
 
 /// The console's narrowest width in full screen; the rooms get whole
@@ -228,6 +240,11 @@ impl App {
         if demo { monitor.demo = true; }
         let mut scene = Scene::new();
         scene.reduced_motion = reduce_motion();
+        scene.overrides = prefs.projects.clone();
+        let mut prefs = prefs;
+        // Repos that came to share a colour each get their own, once.
+        if crate::identity::spread_colours(&mut prefs.emblems) { prefs.save(); }
+        scene.emblems = prefs.emblems.clone();
         let login = login_item();
         let login_enabled = login.as_ref().map(|l| l.is_enabled().unwrap_or(false)).unwrap_or(false);
         let mut visuals = egui::Visuals::dark();
@@ -241,12 +258,15 @@ impl App {
         let mut app = App {
             monitor,
             terminals: terminal::Terminals::default(),
+            calls_seen: Default::default(),
+            room_opened: false,
+            emblem_editor: None,
             prefs,
             sounds: Sounds::new(),
             notifier: Notifier::new(),
             scene,
             assets: Assets::new(&cc.egui_ctx),
-            tray: Tray::new(&MenuState { sounds: true, sound_help: true, sound_done: true, notify: true, notify_help: true, notify_done: false, on_top: true, fullscreen: false, login: false, sessions: vec![], session: String::new(), demo: false, attention: 0, open_at_start: false, text_scale: 1.0, console_scale: 1.0 }, wake),
+            tray: Tray::new(&MenuState { sounds: true, sound_help: true, sound_done: true, notify: true, notify_help: true, notify_done: false, on_top: true, fullscreen: false, login: false, sessions: vec![], session: String::new(), demo: false, attention: 0, open_at_start: false, text_scale: 1.0, console_scale: 1.0, room_size: String::new() }, wake),
             chat: None,
             compose: ComposeState::default(),
             hud: HudState::default(),
@@ -304,6 +324,7 @@ impl App {
             open_at_start: self.prefs.open_herdr_at_start,
             text_scale: self.prefs.text_scale,
             console_scale: self.prefs.console_scale,
+            room_size: self.prefs.room_size.clone(),
         }
     }
 
@@ -565,7 +586,7 @@ impl App {
                     match result {
                         Ok(()) => self.login_enabled = !self.login_enabled,
                         Err(error) => {
-                            rfd::MessageDialog::new().set_title("Herdr Pixel Dungeon").set_description(format!("{}\n{}", tr("El sistema no permitió abrir la app al iniciar sesión."), error)).show();
+                            rfd::MessageDialog::new().set_title("Agents Pixel Dungeon").set_description(format!("{}\n{}", tr("El sistema no permitió abrir la app al iniciar sesión."), error)).show();
                         }
                     }
                 }
@@ -593,8 +614,9 @@ impl App {
             TrayAction::ConsoleBigger => self.step_console_scale(1),
             TrayAction::ConsoleSmaller => self.step_console_scale(-1),
             TrayAction::ConsoleNormal => self.set_console_scale(1.0),
+            TrayAction::RoomSize(size) => { self.prefs.room_size = size.to_string(); self.prefs.save(); }
             TrayAction::About => {
-                rfd::MessageDialog::new().set_title(tr("Acerca de Herdr Pixel Dungeon")).set_description(format!("Herdr Pixel Dungeon {}\n{}", env!("CARGO_PKG_VERSION"), tr("Creado por Nacho Valencia.\nCódigo y pixel art originales · MIT.\n\nProyecto independiente, sin afiliación con Herdr, Inc."))).show();
+                rfd::MessageDialog::new().set_title(tr("Acerca de Agents Pixel Dungeon")).set_description(format!("Agents Pixel Dungeon {}\n{}", env!("CARGO_PKG_VERSION"), tr("Creado por Diabolo Studio (diabolostudio.com) · Nacho Valencia.\nCódigo y pixel art originales · MIT.\n\nProyecto independiente, sin afiliación con Herdr, Inc."))).show();
             }
             TrayAction::Quit => ctx.send_viewport_cmd(ViewportCommand::Close),
         }
@@ -733,6 +755,15 @@ impl eframe::App for App {
         self.tray.update(&self.menu_state());
         self.track_window(ctx, now);
 
+        // Full screen has one whole room: entering it with none chosen opens
+        // the first one at work (once, so esc can still close it).
+        if !self.fullscreen { self.room_opened = false; }
+        if self.fullscreen && !self.room_opened && !self.monitor.agents.is_empty() {
+            self.room_opened = true;
+            if self.monitor.selected.is_none() {
+                if let Some(id) = scene::first_room(&self.monitor.visible_agents()) { self.monitor.select(Some(id)); }
+            }
+        }
         // A panel opening at one column widens the widget while it is open.
         let was_open = self.chat.is_some() || self.key_panel.is_some();
         let opening = (self.monitor.selected.is_some() || self.monitor.composing) && !was_open;
@@ -756,8 +787,29 @@ impl eframe::App for App {
         self.key_panel = panel;
         self.scene.set_selected(self.monitor.selected.clone());
         self.scene.empty_text = if !self.monitor.agents.is_empty() { tr("Ningún agente coincide") } else if self.monitor.error.is_some() { tr("Esperando a Herdr…") } else { tr("Sin agentes en la sesión") };
-        let visible_agents = self.monitor.visible_agents();
+        let mut visible_agents = self.monitor.visible_agents();
+        // Full screen keeps each room in its place; who waits for you is
+        // called on top instead.
+        if self.fullscreen { visible_agents.sort_by(|a, b| herdr::natural_cmp(&a.id, &b.id)); }
+        self.scene.keep_order = self.fullscreen;
+        self.scene.compact = self.fullscreen;
+        self.scene.room_size = scene::RoomSize::from_key(&self.prefs.room_size);
         self.scene.sync(&visible_agents);
+        if self.scene.emblems_added {
+            self.scene.emblems_added = false;
+            self.prefs.emblems = self.scene.emblems.clone();
+            self.prefs.save();
+        }
+        if let Some(agent) = self.monitor.selected.as_ref().and_then(|id| visible_agents.iter().find(|a| &a.id == id)) {
+            self.calls_seen.insert(agent.id.clone(), agent.status.clone());
+        }
+        self.calls_seen.retain(|id, status| visible_agents.iter().any(|a| &a.id == id && &a.status == status));
+        let calls: Vec<herdr::Agent> = if self.fullscreen {
+            let mut waiting: Vec<herdr::Agent> = visible_agents.iter().filter(|a| matches!(a.status.as_str(), "blocked" | "done") && !self.calls_seen.contains_key(&a.id)).cloned().collect();
+            waiting.sort_by_key(|a| a.rank());
+            waiting
+        } else { Vec::new() };
+        let calls_h = ui::calls_height(calls.len());
 
         let hovering = ctx.input(|i| i.pointer.hover_pos()).is_some();
         let note = connection_note(self.monitor.error.as_deref(), self.monitor.updated, Instant::now(), 5.0);
@@ -773,7 +825,7 @@ impl eframe::App for App {
         if let Some(rx) = &self.usage_rx {
             if let Ok(found) = rx.try_recv() { self.usages = found; self.usage_rx = None; }
         }
-        let usage_h = if fullscreen { ui::usage_height(ctx, &self.usages) } else { 0.0 };
+        let usage_h = if fullscreen { ui::usage_height(ctx, &self.usages, self.prefs.guild_hp_open) } else { 0.0 };
         egui::CentralPanel::default().frame(Frame::NONE).show(ctx, |ui| {
             let full = ui.max_rect();
             // The widget has rounded corners; full screen has the screen's.
@@ -785,7 +837,7 @@ impl eframe::App for App {
             // rooms take one column on the left and the console all the rest.
             let (scene_rect, hud_rect, panel_rect) = if fullscreen {
                 let split = full.min.x + scene::width_for(1);
-                let scene_rect = Rect::from_min_max(full.min, egui::pos2(split, full.max.y - hud_h - usage_h));
+                let scene_rect = Rect::from_min_max(egui::pos2(full.min.x, full.min.y + calls_h), egui::pos2(split, full.max.y - hud_h - usage_h));
                 let hud_rect = Rect::from_min_max(egui::pos2(full.min.x, full.max.y - hud_h), egui::pos2(split, full.max.y));
                 (scene_rect, hud_rect, Rect::from_min_max(egui::pos2(split, full.min.y), full.max))
             } else {
@@ -794,6 +846,13 @@ impl eframe::App for App {
                 let hud_rect = Rect::from_min_max(egui::pos2(full.min.x, scene_rect.max.y), egui::pos2(full.max.x, scene_rect.max.y + hud_h));
                 (scene_rect, hud_rect, Rect::from_min_max(egui::pos2(full.min.x, hud_rect.max.y), full.max))
             };
+            // Full screen: who waits for you, over the rooms.
+            if calls_h > 0.0 {
+                let rect = Rect::from_min_max(full.min, egui::pos2(scene_rect.max.x, scene_rect.min.y));
+                if let Some(id) = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| { ui.set_clip_rect(rect); ui::calls(ui, &calls, &self.scene) }).inner {
+                    self.monitor.select(Some(id));
+                }
+            }
             // The dungeon, with a spare room to summon an agent in full screen.
             self.scene.summon_tile = fullscreen;
             self.scene.summoning = self.monitor.composing;
@@ -811,6 +870,11 @@ impl eframe::App for App {
             }
             if let Some(id) = response.finish { self.confirm_finish(&id); }
             if let Some(id) = response.terminal { self.open_terminal_for(ctx, Some(&id)); }
+            if let Some((emblem, repo_name, demo)) = response.edit_emblem.and_then(|id| self.scene.emblem_of(&id)) {
+                let taken = identity::SavedEmblem::colours_of(self.scene.emblems.iter().filter(|(k, _)| **k != emblem.key).map(|(_, e)| e));
+                let name = if emblem.name == repo_name { String::new() } else { emblem.name.clone() };
+                self.emblem_editor = Some((ui::EmblemEditor { key: emblem.key.clone(), repo_name, name, emblem, taken }, demo));
+            }
             if response.summon { let on = !self.monitor.composing; self.monitor.set_composing(on); }
             // Full screen summons in the spare room itself.
             if let (Some((rect, view)), true) = (response.summon_rect, fullscreen && self.monitor.composing) {
@@ -827,7 +891,8 @@ impl eframe::App for App {
                 ui.painter().rect_filled(rect, CornerRadius::ZERO, ui::HUD_FILL);
                 ui.painter().hline(rect.x_range(), rect.min.y, egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 20)));
                 let inner = Rect::from_min_max(egui::pos2(rect.min.x + 10.0, rect.min.y), egui::pos2(rect.max.x - 10.0, rect.max.y));
-                let picked = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| { ui.set_clip_rect(rect); ui::usage_panel(ui, &self.assets, &self.usages, now, self.prefs.claude_usage_live) }).inner;
+                let picked = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| { ui.set_clip_rect(rect); ui::usage_panel(ui, &self.assets, &self.usages, now, self.prefs.claude_usage_live, self.prefs.guild_hp_open) }).inner;
+                if picked.toggle_open { self.prefs.guild_hp_open = !self.prefs.guild_hp_open; self.prefs.save(); }
                 if let Some(plan) = picked.kiro_plan { self.prefs.kiro_plan = plan; self.prefs.save(); self.next_usage = 0.0; }
                 if let Some(live) = picked.claude_live { self.prefs.claude_usage_live = live; self.prefs.save(); self.next_usage = 0.0; }
             }
@@ -877,6 +942,7 @@ impl eframe::App for App {
         });
 
         self.terminals.show(ctx);
+        self.edit_emblem(ctx);
 
         // Overlays.
         let standalone = self.monitor.standalone() && matches!(self.monitor.herdr, HerdrState::Missing | HerdrState::Down);
@@ -886,7 +952,9 @@ impl eframe::App for App {
             if action.open { self.open_herdr(); }
             if action.dismiss { self.banner_dismissed = true; }
         } else if let Some((text, lost)) = &note { ui::connection_banner(ctx, text, *lost); }
-        if hovering || self.show_log {
+        // Full screen has no strip of buttons: esc and the menu leave it, and
+        // the bar under the rooms summons and opens the log.
+        if (hovering || self.show_log) && !self.fullscreen {
             let action = ui::controls(ctx, self.prefs.sound_enabled, self.show_log, self.fullscreen);
             if action.compose { let on = !self.monitor.composing; self.monitor.set_composing(on); }
             if action.log { self.show_log = !self.show_log; }
@@ -909,13 +977,66 @@ impl eframe::App for App {
     }
 }
 
+impl App {
+    /// The emblem editor, while open: Save keeps the emblem (and the name,
+    /// when it is not the repo's own) in the settings; Automatic forgets them,
+    /// so the repo's emblem is worked out again with a free colour.
+    fn edit_emblem(&mut self, ctx: &egui::Context) {
+        let Some((editor, demo)) = &mut self.emblem_editor else { return };
+        let demo = *demo;
+        match ui::emblem_editor(ctx, editor) {
+            ui::EditorOutcome::Open => return,
+            ui::EditorOutcome::Cancel => {}
+            ui::EditorOutcome::Save => {
+                let key = editor.key.clone();
+                let name = editor.name.trim().to_string();
+                let saved = identity::SavedEmblem::of(&editor.emblem);
+                let mut choice = self.prefs.projects.get(&key).cloned().unwrap_or_default();
+                // What the editor shows now wins over a colour or charge set by hand.
+                choice.color = None;
+                choice.symbol = None;
+                choice.kind = None;
+                choice.name = (!name.is_empty() && name != editor.repo_name).then_some(name);
+                if demo {
+                    self.scene.emblems.insert(key.clone(), saved);
+                    self.scene.overrides.insert(key, choice);
+                } else {
+                    self.prefs.emblems.insert(key.clone(), saved);
+                    if choice == identity::ProjectOverride::default() { self.prefs.projects.remove(&key); } else { self.prefs.projects.insert(key, choice); }
+                    self.prefs.save();
+                    self.scene.emblems = self.prefs.emblems.clone();
+                    self.scene.overrides = self.prefs.projects.clone();
+                }
+                self.scene.reload_emblems();
+            }
+            ui::EditorOutcome::Auto => {
+                let key = editor.key.clone();
+                self.scene.emblems.remove(&key);
+                self.scene.overrides.remove(&key);
+                if !demo {
+                    self.prefs.emblems.remove(&key);
+                    self.prefs.projects.remove(&key);
+                    self.prefs.save();
+                }
+                self.scene.reload_emblems();
+            }
+        }
+        self.emblem_editor = None;
+    }
+}
+
 /// Launch at login through a LaunchAgent (macOS) or an autostart entry (Linux).
 fn login_item() -> Option<auto_launch::AutoLaunch> {
     let exe = std::env::current_exe().ok()?;
     let path = exe.to_string_lossy().to_string();
     // Inside an .app bundle, register the bundle itself.
     let app = path.find("/Contents/MacOS/").map(|at| path[..at].to_string()).unwrap_or(path);
-    auto_launch::AutoLaunchBuilder::new().set_app_name("Herdr Pixel Dungeon").set_app_path(&app).set_use_launch_agent(true).build().ok()
+    let login = auto_launch::AutoLaunchBuilder::new().set_app_name("Agents Pixel Dungeon").set_app_path(&app).set_use_launch_agent(true).build().ok()?;
+    // Launching at login under the app's old name moves to the new one.
+    if let Ok(old) = auto_launch::AutoLaunchBuilder::new().set_app_name("Herdr Pixel Dungeon").set_app_path(&app).set_use_launch_agent(true).build() {
+        if old.is_enabled().unwrap_or(false) && old.disable().is_ok() { let _ = login.enable(); }
+    }
+    Some(login)
 }
 
 /// The system's Reduce Motion setting (macOS); Linux has no common switch,

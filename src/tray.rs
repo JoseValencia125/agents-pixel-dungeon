@@ -1,4 +1,4 @@
-//! The status item: a pixel knight's helm in the menu bar (macOS) or the
+//! The status item: the app's crystal orb in the menu bar (macOS) or the
 //! system tray (Linux). A left click toggles the widget; the menu has the
 //! sounds, notifications, sessions, window options and quit.
 
@@ -36,6 +36,8 @@ pub enum TrayAction {
     ConsoleBigger,
     ConsoleSmaller,
     ConsoleNormal,
+    /// How tall full screen draws its rooms: "large", "medium", "small".
+    RoomSize(&'static str),
     About,
     Quit,
 }
@@ -59,45 +61,40 @@ pub struct MenuState {
     pub open_at_start: bool,
     pub text_scale: f32,
     pub console_scale: f32,
+    pub room_size: String,
 }
 
-/// Menu bar icon: a pixel knight's great helm (T visor, breathing holes,
-/// gorget), one square per pixel, black on clear so macOS tints it as a
-/// template for light and dark bars.
-pub const HELM: [&str; 14] = [
-    "......####......",
-    "....########....",
-    "...##########...",
-    "..############..",
-    "..##........##..",
-    "..##........##..",
-    "..#####..#####..",
-    "..#####..#####..",
-    "..#####..#####..",
-    "..############..",
-    "..##.#.##.#.##..",
-    "...##########...",
-    "..############..",
-    ".##############.",
-];
-
-pub fn helm_rgba(scale: usize, color: [u8; 3]) -> (Vec<u8>, u32, u32) {
-    let w = 16 * scale;
-    let h = HELM.len() * scale;
-    let mut rgba = vec![0u8; w * h * 4];
-    for (y, row) in HELM.iter().enumerate() {
-        for (x, pixel) in row.chars().enumerate() {
-            if pixel != '#' { continue; }
-            for dy in 0..scale {
-                for dx in 0..scale {
-                    let i = ((y * scale + dy) * w + x * scale + dx) * 4;
-                    rgba[i..i + 3].copy_from_slice(&color);
-                    rgba[i + 3] = 255;
-                }
-            }
+/// Menu bar icon: the app's crystal orb with its >_ prompt cut out, on its
+/// stand, `size` pixels square (macOS shows it 18 pt tall, so 36 is sharp
+/// on a Retina bar), smoothed by sampling each pixel 4×4 times. One colour
+/// on clear, so macOS tints it as a template for light and dark bars.
+pub fn orb_rgba(size: usize, color: [u8; 3]) -> (Vec<u8>, u32, u32) {
+    // The shape in a 36-unit square.
+    let segment = |px: f32, py: f32, (ax, ay): (f32, f32), (bx, by): (f32, f32)| {
+        let (dx, dy) = (bx - ax, by - ay);
+        let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+        ((px - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)).sqrt()
+    };
+    let inside = |x: f32, y: f32| {
+        let orb = (x - 18.0).powi(2) + (y - 14.5).powi(2) <= 13.0f32.powi(2);
+        let chevron = segment(x, y, (10.0, 8.5), (16.0, 14.5)) <= 1.7 || segment(x, y, (16.0, 14.5), (10.0, 20.5)) <= 1.7;
+        let underscore = (18.5..=27.0).contains(&x) && (18.8..=22.2).contains(&y);
+        let neck = (12.0..=24.0).contains(&x) && (27.0..=32.0).contains(&y);
+        let base = (6.0..=30.0).contains(&x) && (31.5..=34.5).contains(&y);
+        (orb && !chevron && !underscore) || neck || base
+    };
+    let unit = 36.0 / size as f32;
+    let mut rgba = vec![0u8; size * size * 4];
+    for y in 0..size {
+        for x in 0..size {
+            let hits = (0..16).filter(|i| inside((x as f32 + ((i % 4) as f32 + 0.5) / 4.0) * unit, (y as f32 + ((i / 4) as f32 + 0.5) / 4.0) * unit)).count();
+            if hits == 0 { continue; }
+            let i = (y * size + x) * 4;
+            rgba[i..i + 3].copy_from_slice(&color);
+            rgba[i + 3] = (hits * 255 / 16) as u8;
         }
     }
-    (rgba, w as u32, h as u32)
+    (rgba, size as u32, size as u32)
 }
 
 fn build_menu(state: &MenuState) -> (Menu, HashMap<MenuId, TrayAction>) {
@@ -178,9 +175,17 @@ fn build_menu(state: &MenuState) -> (Menu, HashMap<MenuId, TrayAction>) {
     add(&console_smaller, TrayAction::ConsoleSmaller);
     add(&console_normal, TrayAction::ConsoleNormal);
 
-    let about = item(&tr("Acerca de Herdr Pixel Dungeon"));
+    // Full screen's rooms, at one of three sizes.
+    let rooms = Submenu::new(tr("Tamaño de las salas"), true);
+    for size in crate::scene::RoomSize::ALL {
+        let entry = check(&tr(size.label()), true, state.room_size == size.key());
+        let _ = rooms.append(&entry);
+        add(&entry, TrayAction::RoomSize(size.key()));
+    }
+
+    let about = item(&tr("Acerca de Agents Pixel Dungeon"));
     let quit = item(&tr("Salir"));
-    let _ = menu.append_items(&[&sounds, &notify, &text, &console, &PredefinedMenuItem::separator(), &sessions, &open_herdr, &open_at_start, &PredefinedMenuItem::separator(), &about, &quit]);
+    let _ = menu.append_items(&[&sounds, &notify, &text, &console, &rooms, &PredefinedMenuItem::separator(), &sessions, &open_herdr, &open_at_start, &PredefinedMenuItem::separator(), &about, &quit]);
     add(&about, TrayAction::About);
     add(&quit, TrayAction::Quit);
     (menu, actions)
@@ -250,20 +255,20 @@ impl Tray {
         {
             let (menu, actions) = build_menu(state);
             *self.actions.lock().unwrap() = actions;
-            let tooltip = trf("Herdr Pixel Dungeon · {} necesitan atención", &[&state.attention]);
+            let tooltip = trf("Agents Pixel Dungeon · {} necesitan atención", &[&state.attention]);
             match &self.icon {
                 Some(icon) => {
                     icon.set_menu(Some(Box::new(menu)));
                     let _ = icon.set_tooltip(Some(tooltip));
                 }
                 None => {
-                    let (rgba, w, h) = helm_rgba(1, [0, 0, 0]);
+                    let (rgba, w, h) = orb_rgba(36, [0, 0, 0]);
                     let built = TrayIconBuilder::new()
                         .with_menu(Box::new(menu))
                         .with_menu_on_left_click(false)
                         .with_icon_as_template(true)
                         .with_tooltip(tooltip)
-                        .with_icon(Icon::from_rgba(rgba, w, h).expect("helm icon"))
+                        .with_icon(Icon::from_rgba(rgba, w, h).expect("orb icon"))
                         .build();
                     self.icon = built.ok();
                 }
@@ -295,15 +300,15 @@ fn linux_host(shared: Arc<Mutex<HashMap<MenuId, TrayAction>>>) -> Sender<MenuSta
                     Ok(state) => {
                         let (menu, actions) = build_menu(&state);
                         *shared.lock().unwrap() = actions;
-                        let tooltip = trf("Herdr Pixel Dungeon · {} necesitan atención", &[&state.attention]);
+                        let tooltip = trf("Agents Pixel Dungeon · {} necesitan atención", &[&state.attention]);
                         match &icon {
                             Some(existing) => { existing.set_menu(Some(Box::new(menu))); let _ = existing.set_tooltip(Some(tooltip)); }
                             None => {
-                                let (rgba, w, h) = helm_rgba(2, [230, 230, 230]);
+                                let (rgba, w, h) = orb_rgba(32, [230, 230, 230]);
                                 icon = TrayIconBuilder::new()
                                     .with_menu(Box::new(menu))
                                     .with_tooltip(tooltip)
-                                    .with_icon(Icon::from_rgba(rgba, w, h).expect("helm icon"))
+                                    .with_icon(Icon::from_rgba(rgba, w, h).expect("orb icon"))
                                     .build()
                                     .ok();
                             }

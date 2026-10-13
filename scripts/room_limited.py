@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Draw the usage limit's room, the infirmary, from the other rooms' art:
 room_blocked's walls and floor in a clean teal, its gate behind a white
-banner with the red cross, and room_idle's bed made up as a white cot (at
-the same spot, so the sleeper and the breathing blanket line up). Writes
+banner with the red cross, and the old waiting room's bed (art/idle_bed.png)
+made up as a white cot (at the same spot, so the sleeper and the breathing
+blanket line up). Writes
 Resources/Sprites/rooms/room_limited.png. Needs Pillow."""
 import os
 from PIL import Image, ImageDraw
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 out = f"{root}/Resources/Sprites/rooms/room_limited.png"
 blocked = Image.open(f"{root}/Resources/Sprites/rooms/room_blocked.png").convert("RGBA")
-idle = Image.open(f"{root}/Resources/Sprites/rooms/room_idle.png").convert("RGBA")
+bed_art = Image.open(f"{root}/art/idle_bed.png").convert("RGBA")
 im = blocked.copy()
 px = im.load()
 W, H = im.size
@@ -82,7 +83,7 @@ for (x0, y0) in ((19, 6), (115, 6)):
         d.rectangle([mx - 3, my - 1, mx + 3, my + 1], fill=RED)
 
 # 6. The cot: room_idle's bed with white sheets on a steel frame.
-bed = idle.crop((52, 52, 93, 66))
+bed = bed_art.copy()
 bp = bed.load()
 for y in range(bed.height):
     for x in range(bed.width):

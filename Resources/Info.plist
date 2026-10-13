@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>herdr-pixel-dungeon</string>
-<key>CFBundleIdentifier</key><string>io.github.josevalencia125.herdr-pixel-dungeon</string>
-<key>CFBundleName</key><string>Herdr Pixel Dungeon</string>
+<key>CFBundleExecutable</key><string>agents-pixel-dungeon</string>
+<key>CFBundleIdentifier</key><string>io.github.josevalencia125.agents-pixel-dungeon</string>
+<key>CFBundleName</key><string>Agents Pixel Dungeon</string>
 <key>CFBundleIconFile</key><string>icon</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>CFBundleShortVersionString</key><string>2.1.2</string>
@@ -11,5 +11,5 @@
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSUIElement</key><true/>
-<key>NSHumanReadableCopyright</key><string>© 2026 Nacho Valencia. MIT.</string>
+<key>NSHumanReadableCopyright</key><string>© 2026 Nacho Valencia · Diabolo Studio (diabolostudio.com). MIT.</string>
 </dict></plist>

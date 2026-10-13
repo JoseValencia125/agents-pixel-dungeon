@@ -1,8 +1,8 @@
-# Herdr Pixel Dungeon — guide
+# Agents Pixel Dungeon — guide
 
 Everything the README leaves out: how the dungeon reads the agents, what each panel does, the menu, configuration, privacy and the standalone mode.
 
-Herdr Pixel Dungeon is an independent project, not affiliated with or endorsed by Herdr, Inc.; "Herdr" names the runtime the app connects to.
+Agents Pixel Dungeon is an independent project, not affiliated with or endorsed by Herdr, Inc.; "Herdr" names the runtime the app connects to.
 
 ## How the rooms are kept current
 
@@ -56,6 +56,16 @@ When an agent starts needing help the app also posts a desktop notification (Not
 
 The scroll button unrolls the guild's log on a parchment: agents joining and leaving, state changes, subagents starting and the messages you sent, newest first with the time. It keeps the last 40 lines in memory only.
 
+## Each repo's guild
+
+A room's top band is its repo's: an emblem, the repo's name and its colour, which never change with the agent's state (the state is the room itself, the light and word at the bottom right, and the red frame while it needs you). The emblem is worked out from the repo, with no setup and the same on every launch and machine:
+
+- **What it is made from**: `owner/repo` from the folder's `origin` remote (any host, SSH or HTTPS); without a remote, the repo's or folder's name. Two clones of a repo share their emblem.
+- **The charge** (the figure in the middle) comes from a family chosen by the project's files: games (`project.godot`, Unreal, Unity) a sword, heart or crown; mobile (Android, Flutter, Xcode) a phone or bolt; docs (MkDocs, mdBook, Docusaurus, or only Markdown) a book or quill; Ruby (`Gemfile`) a gem or crown; Python a snake or flask; Rust, Go, C/C++, JVM and .NET a gear or anvil; web (`package.json`, Deno, TypeScript) a scroll, bolt or leaf; infrastructure (Docker, Terraform, Helm) a crate or tower. Anything else draws from all nineteen charges.
+- **The rest** (colour among twelve, a second tincture among six, partition among six, shield among six, and which charge of the family) comes from a hash of that name (FNV-1a), so related repos still look apart.
+
+To choose for yourself, add `projects` to `settings.json`, keyed by the name the emblem is made from (hover a room's band to see it): `"projects": {"someone/app": {"name": "App", "color": "yellow", "symbol": "quill", "kind": "game"}}`. Every field is optional. Colours: red, orange, amber, yellow, green, forest, cyan, blue, magenta, pink, steel, tan. Charges: gear, anvil, snake, flask, gem, crown, phone, bolt, sword, heart, scroll, leaf, book, quill, crate, tower, star, moon, eye. Kinds: game, mobile, docs, ruby, python, systems, web, infra. Restart the app after editing it.
+
 ## Many agents
 
 Resize the widget from its edges or the grip in its bottom-right corner: rooms wrap into as many columns as fit, and the window snaps to whole rooms. It starts at two columns and up to four rows; the size you pick is remembered, the smallest is one room. With fewer agents than columns it narrows (a single agent is one square), and it grows with the agents up to your row count; past that, scroll with the trackpad or wheel — a small badge counts the rooms hidden below or above and jumps to them. An agent that starts needing attention takes the first room and the view scrolls to it.
@@ -64,9 +74,9 @@ With three or more agents a bar under the rooms shows one chip per state with it
 
 ## Full screen
 
-The ⤢ button (top-right on hover), the menu's **Full screen**, or ⌃⌘F (F11 on Linux) take the dungeon to its own full-screen space (on macOS the real thing: swipe between spaces, like the green button): the rooms stack in one column on the left (scroll for more), a spare room with **+** to summon an agent, and the state bar under them; all the rest is the console — the chat of the room you click, the summon panel from **+**, or a hint while nothing is chosen — at full height, showing the terminal as it is, colours and spinners included, refreshed twice a second, with the last few hundred lines of its history to scroll through; you type on its own prompt line. ⌘-click (Ctrl-click on Linux) a path in the console to show it in Finder (the file manager on Linux), or a URL to open it in the browser.
+The ⤢ button (top-right on hover), the menu's **Full screen**, or ⌃⌘F (F11 on Linux) take the dungeon to its own full-screen space (on macOS the real thing: swipe between spaces, like the green button): the agents stack in one column on the left (scroll for more) and keep their places whatever their state. Every room stays whole, whatever its state, at the size picked in the menu's **Room size** (Large, Medium — the default — or Small: each room redrawn shorter, with its furniture where the hero uses it); the one you chose keeps that size and is outlined. Click a room to open its chat. Entering full screen with nothing chosen opens the first agent at work. Hover a room's band for its repo, while **Waiting for you** over them lists who needs you or has finished (click one to open its chat; it leaves the list once you have, until its state changes again), a spare room with **+** to summon an agent, and the state bar under them; all the rest is the console — the chat of the room you click, the summon panel from **+**, or a hint while nothing is chosen — at full height, showing the terminal as it is, colours and spinners included, refreshed twice a second, with the last thousand lines of its history to scroll through; you type on its own prompt line. In full screen the chat's header has worded buttons: **>_ Terminal** (amber) and **± Diff** (cyan); esc closes the chat, and the console's text size stays on ⌘⇧+ / ⌘⇧− and the menu. **± Diff** (lit while open) opens a column on the right with the files changed in the agent's folder, against what you pick over the list: **Uncommitted** (the last commit), **Unpushed** (the branch's upstream: unpushed commits and uncommitted changes) or **Against main** (where the branch left main or master, as in a pull request); untracked files always count: each with its letter (M changed, A added, D deleted, R renamed, U untracked, ! in conflict), its path and the lines added and removed; click one to see its diff under the list. It is re-read every 3 s while open, without taking git's lock. Each repo's emblem is kept in `settings.json` (`emblems`) the first time it is seen, with a colour no other repo has (while there are colours left), so it stays the same across launches even if the repo's files change. Right-click a room's emblem (or **Edit the emblem…** in its menu) to change its name, main and second colours, charge, partition or shield; **Automatic** goes back to the one worked out from the repo. When the agent's branch has a pull request (found with GitHub's `gh`, once a minute), a **PR #N** chip in the chat's header — green open, purple merged, grey closed or draft — opens it in the browser. ⌘-click (Ctrl-click on Linux) a path in the console to show it in Finder (the file manager on Linux), or a URL to open it in the browser.
 
-Under the rooms, full screen shows the guild's HP (usage left): each harness's plan left, re-read every 30 s. Claude's HP is the week's general limit and its MP the 5-hour session; Codex's are its week and its 5-hour window, from the rate limits in its session logs; Click Claude (its hero or name) to pick where its numbers come from: the last `/usage` (the default) or live with its token (see Privacy). Kiro's HP is the month's credits against the plan you pick by clicking Kiro (its sessions record the credits per turn). Each bar says when it refills. Esc closes the open chat first, then leaves full screen; so do the button, the menu and the keys. The widget comes back where it was, at its size. `--fullscreen` starts there.
+Under the rooms, full screen shows the guild's HP (usage left), closed to one line by default (each hero with what it has left; click it to open the bars, and the title to close them again; the choice is remembered): each harness's plan left, re-read every 30 s. Claude's HP is the week's general limit and its MP the 5-hour session; Codex's are its week and its 5-hour window, from the rate limits in its session logs; Click Claude (its hero or name) to pick where its numbers come from: the last `/usage` (the default) or live with its token (see Privacy). Kiro's HP is the month's credits against the plan you pick by clicking Kiro (its sessions record the credits per turn). Each bar says when it refills. Esc closes the open chat first, then leaves full screen; so do the button, the menu and the keys. The widget comes back where it was, at its size. `--fullscreen` starts there.
 
 ## Text size
 
@@ -74,7 +84,7 @@ Under the rooms, full screen shows the guild's HP (usage left): each harness's p
 
 ## The status item and its menu
 
-Close or minimize the window to keep monitoring from the menu bar (macOS) or the tray (Linux), where a pixel knight's helm marks the app; its tooltip counts the agents needing attention. A left click shows or hides the window; the menu has:
+Close or minimize the window to keep monitoring from the menu bar (macOS) or the tray (Linux), where the app's pixel crystal orb marks it; its tooltip counts the agents needing attention. A left click shows or hides the window; the menu has:
 
 - **Show / hide**, **Move back to the corner**, **Always on top** (on by default), **Full screen**, **Open at login** (a LaunchAgent on macOS, an autostart entry on Linux).
 - **Console text size**: the agent's terminal at its own size, apart from the panels' text (also **A+** / **A-** in the chat header, or ⌘⇧+ / ⌘⇧- / ⌘⇧0).
@@ -83,7 +93,7 @@ Close or minimize the window to keep monitoring from the menu bar (macOS) or the
 - **Herdr session**: Herdr's sessions (`herdr session list`), to switch which one the dungeon watches — agents, log and selection start over — remembered; `HERDR_SESSION` still overrides it at launch. **Demo** shows fictional agents without Herdr; live mode never inserts fictional agents.
 - **Open Herdr** and **Open Herdr at startup** (see below).
 
-The widget reopens where you left it, at the size you gave it, and remembers sounds, notifications, the session, the state filter and the text size, in `settings.json` under `~/Library/Application Support/herdr-pixel-dungeon` (macOS) or `~/.config/herdr-pixel-dungeon` (Linux).
+The widget reopens where you left it, at the size you gave it, and remembers sounds, notifications, the session, the state filter and the text size, in `settings.json` under `~/Library/Application Support/agents-pixel-dungeon` (macOS) or `~/.config/agents-pixel-dungeon` (Linux).
 
 ## Languages
 
@@ -107,10 +117,10 @@ Command-line flags: `--demo` (fictional agents), `--fullscreen` (start in full s
 
 ```sh
 ./scripts/build.sh
-./target/release/herdr-pixel-dungeon --self-test
-./target/release/herdr-pixel-dungeon --diagnose
-open 'build/Herdr Pixel Dungeon.app' --args --demo     # macOS
-./build/herdr-pixel-dungeon --demo                      # Linux
+./target/release/agents-pixel-dungeon --self-test
+./target/release/agents-pixel-dungeon --diagnose
+open 'build/Agents Pixel Dungeon.app' --args --demo     # macOS
+./build/agents-pixel-dungeon --demo                      # Linux
 ```
 
 `cargo test` runs the same checks as `--self-test`: snapshot states, invalid/empty replies, monitor transitions, subagents, tool actions, translations, sound and notification settings, chat selection, question options, filters, connection notes, sessions, Herdr events and error codes, background jobs, the standalone heuristics, git branches, hero mapping and bundled PNG decoding. `--diagnose` prints live agent data; review it before sharing publicly.
@@ -127,4 +137,4 @@ A banner over the rooms offers **Install Herdr** (its official installer, `curl 
 
 ## Support
 
-If the dungeon is useful to you, you can [sponsor the project on GitHub](https://github.com/sponsors/JoseValencia125). Sponsorships help pay for the time spent drawing new heroes and rooms and keeping up with Herdr releases.
+Agents Pixel Dungeon is made by [Diabolo Studio](https://diabolostudio.com/). If the dungeon is useful to you, you can [sponsor the project on GitHub](https://github.com/sponsors/JoseValencia125). Sponsorships help pay for the time spent drawing new heroes and rooms and keeping up with Herdr releases.

@@ -158,11 +158,11 @@ pub fn run() {
     let kiro = crate::ansi::parse(&format!("› /model\nSelect model:   type to search\n\n❯ auto                 1.00x credits    Models chosen by task [active]\n  claude-opus-5.5      2.00x credits    Claude Opus 5.5\n(+13 more)\n{rule}\n Settings for selected model: auto      tab to switch panels\n{rule}\n esc to close · ↑↓ to navigate · ↵ to select · tab to switch panels"));
     assert_eq!((crate::ui::prompt_line(&kiro), crate::ui::picker_open(&kiro)), (None, true), "Kiro's /model picker was taken for a prompt");
     // A new shell that asks something first eats the agent's command.
-    let omz = "Restored session: Sun Oct 11 18:22:00 -03 2026\n[oh-my-zsh] Would you like to update? [Y/n] kiro-cli\n\n➜  herdr-pixel-dungeon iro-cli\nzsh: correct 'iro-cli' to 'kiro-cli' [nyae]?";
+    let omz = "Restored session: Sun Oct 11 18:22:00 -03 2026\n[oh-my-zsh] Would you like to update? [Y/n] kiro-cli\n\n➜  agents-pixel-dungeon iro-cli\nzsh: correct 'iro-cli' to 'kiro-cli' [nyae]?";
     assert!(shell_blocker(omz).is_some_and(|w| w.contains("omz update")), "oh-my-zsh's update prompt not recognised");
     assert!(shell_blocker("[oh-my-zsh] Would you like to update? [Y/n] ").is_some(), "A waiting oh-my-zsh prompt not recognised");
     assert!(shell_blocker("➜  x iro-cli\nzsh: correct 'iro-cli' to 'kiro-cli' [nyae]?").is_some_and(|w| w.contains("iro-cli")), "zsh's correction prompt not recognised");
-    assert_eq!(shell_blocker("Restored session: Sun Oct 11\n➜  herdr-pixel-dungeon "), None, "A plain shell prompt taken for a question");
+    assert_eq!(shell_blocker("Restored session: Sun Oct 11\n➜  agents-pixel-dungeon "), None, "A plain shell prompt taken for a question");
     // Codex (0.162) marks its highlight, its prompt and past messages with ›.
     let approval: Vec<String> = ["› Run the shell command: touch b.txt", "• Running touch b.txt", "  Would you like to run the following command?", "  $ touch b.txt", "› 1. Yes, proceed (y)", "  2. Yes, and don't ask again for commands that start with `touch b.txt;",  "     touch c.txt` (p)", "  3. No, and tell Codex what to do differently (esc)", "  Press enter to confirm or esc to cancel"].iter().map(|l| l.to_string()).collect();
     let menu = MenuOptions::new(&approval);
@@ -312,6 +312,18 @@ pub fn run() {
     assert!(columns_fitting(10.0) == 1 && width_for(2) == 458.0);
     let listed = decode_sessions(br#"{"sessions":[{"default":true,"name":"default","running":true},{"name":"work","running":false}]}"#);
     assert!(listed == vec![HerdrSession { name: "default".into(), running: true }, HerdrSession { name: "work".into(), running: false }] && decode_sessions(b"nope").is_empty());
+    // An agent's folder is kept as ~/…: the repo behind it is still read.
+    let here = std::env::current_dir().unwrap();
+    if let Ok(inside) = here.strip_prefix(home_dir()) {
+        if here.join(".git").exists() {
+            let meta = crate::identity::read_meta(&format!("~/{}", inside.display()));
+            assert!(meta.kind != crate::identity::Kind::Unknown || meta.owner.is_some(), "Repo behind ~/…: {meta:?}");
+        }
+    }
+    for (column, files) in [(500.0, 1), (500.0, 2), (100.0, 40), (900.0, 40)] {
+        let h = crate::ui::changes_list_height(column, files);
+        assert!(h > 0.0 && h <= 21.0 * files as f32 + 4.0, "changes list height {h} for {files} files in {column}");
+    }
     let named = agent_name("codex", "Mi Proyecto_2");
     assert!(named.starts_with("codex-mi-proyecto-2-") && named.len() == 24, "Agent name: {named}");
     let long = agent_name("claude", "saludtech-android-app");

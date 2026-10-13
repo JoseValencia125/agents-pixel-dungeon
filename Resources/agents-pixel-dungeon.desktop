@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Herdr Pixel Dungeon
+Name=Agents Pixel Dungeon
 Comment=A pixel-art guild for your live Herdr agents
-Exec=herdr-pixel-dungeon
-Icon=herdr-pixel-dungeon
+Exec=agents-pixel-dungeon
+Icon=agents-pixel-dungeon
 Terminal=false
 Categories=Development;Utility;
-StartupWMClass=herdr-pixel-dungeon
+StartupWMClass=agents-pixel-dungeon

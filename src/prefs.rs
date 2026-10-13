@@ -35,8 +35,19 @@ pub struct Prefs {
     /// Claude's HP live from Anthropic with Claude Code's OAuth token; off,
     /// only the last /usage Claude Code cached in ~/.claude.json.
     pub claude_usage_live: bool,
+    /// How tall full screen draws its rooms: "large", "medium" or "small".
+    pub room_size: String,
+    /// Full screen's guild HP shows each harness's bars; closed, one line.
+    pub guild_hp_open: bool,
     /// Folders starred in the summon panel, offered first.
     pub favorite_folders: Vec<String>,
+    /// Optional choices for a repo's emblem, by its key (`owner/repo`, or the
+    /// folder's name): `{"someone/app": {"name": "App", "color": "yellow",
+    /// "symbol": "quill", "kind": "game"}}`. Every repo gets one without it.
+    pub projects: std::collections::BTreeMap<String, crate::identity::ProjectOverride>,
+    /// Each repo's emblem as it was first worked out, by key, so it does not
+    /// change between launches.
+    pub emblems: std::collections::BTreeMap<String, crate::identity::SavedEmblem>,
     #[serde(skip)]
     pub path: Option<PathBuf>,
 }
@@ -63,7 +74,11 @@ impl Default for Prefs {
             console_scale: 1.0,
             kiro_plan: 0,
             claude_usage_live: false,
+            guild_hp_open: false,
+            room_size: "medium".into(),
             favorite_folders: vec![],
+            projects: Default::default(),
+            emblems: Default::default(),
             path: None,
         }
     }
@@ -73,7 +88,15 @@ fn one() -> f32 { 1.0 }
 
 impl Prefs {
     pub fn default_path() -> PathBuf {
-        dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("herdr-pixel-dungeon").join("settings.json")
+        let config = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
+        let path = config.join("agents-pixel-dungeon").join("settings.json");
+        // The settings from before the app was renamed come along, once.
+        let old = config.join("herdr-pixel-dungeon").join("settings.json");
+        if !path.exists() && old.exists() {
+            if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
+            let _ = std::fs::copy(&old, &path);
+        }
+        path
     }
 
     pub fn load(path: PathBuf) -> Prefs {
@@ -90,5 +113,19 @@ impl Prefs {
         let Some(path) = &self.path else { return };
         if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
         if let Ok(text) = serde_json::to_string_pretty(self) { let _ = std::fs::write(path, text); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guild_hp_starts_closed_and_remembers() {
+        assert!(!Prefs::default().guild_hp_open);
+        let old: Prefs = serde_json::from_str(r#"{"sound_enabled": true}"#).unwrap();
+        assert!(!old.guild_hp_open, "settings from before keep it closed");
+        let open: Prefs = serde_json::from_str(&serde_json::to_string(&Prefs { guild_hp_open: true, ..Prefs::default() }).unwrap()).unwrap();
+        assert!(open.guild_hp_open);
     }
 }
