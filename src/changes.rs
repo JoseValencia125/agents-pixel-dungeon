@@ -18,6 +18,21 @@ pub struct FileChange {
     pub removed: Option<u32>,
 }
 
+/// What the files are compared with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffBase {
+    /// The last commit: what is not committed yet.
+    Uncommitted,
+    /// The branch's upstream: what is not pushed yet, committed or not.
+    Unpushed,
+    /// Where the branch left main (or master): everything on the branch.
+    Main,
+}
+
+impl DiffBase {
+    pub const ALL: [DiffBase; 3] = [DiffBase::Uncommitted, DiffBase::Unpushed, DiffBase::Main];
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequest {
     pub number: u64,
@@ -77,13 +92,57 @@ pub fn parse_numstat(data: &[u8]) -> HashMap<String, (Option<u32>, Option<u32>)>
     counts
 }
 
-/// The folder's changed files against its last commit, untracked ones too;
-/// an error when it is not a git repository.
-pub fn changed_files(cwd: &str) -> Result<Vec<FileChange>, String> {
+/// `git diff --name-status -z`: each file's status letter and (new) path.
+pub fn parse_name_status(data: &[u8]) -> Vec<(char, String)> {
+    let mut fields = data.split(|b| *b == 0).filter(|f| !f.is_empty());
+    let mut files = vec![];
+    while let Some(code) = fields.next() {
+        let status = code[0] as char;
+        // A rename or copy gives the old path, then the new one.
+        if matches!(status, 'R' | 'C') { fields.next(); }
+        let Some(path) = fields.next() else { break };
+        files.push((status, String::from_utf8_lossy(path).to_string()));
+    }
+    files
+}
+
+/// The commit `base` stands for in `cwd` and how to name it: None for the
+/// last commit; an error when there is no upstream or no main branch.
+pub fn base_commit(cwd: &str, base: DiffBase) -> Result<Option<(String, String)>, String> {
+    let name = |args: &[&str]| git(cwd, args).map(|d| String::from_utf8_lossy(&d).trim().to_string()).filter(|s| !s.is_empty());
+    match base {
+        DiffBase::Uncommitted => Ok(None),
+        DiffBase::Unpushed => {
+            let upstream = name(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+                .or_else(|| name(&["rev-parse", "--abbrev-ref", "HEAD"]).map(|b| format!("origin/{b}")).filter(|r| name(&["rev-parse", "--verify", "--quiet", r]).is_some()))
+                .ok_or_else(|| "no upstream".to_string())?;
+            Ok(Some((upstream.clone(), upstream)))
+        }
+        DiffBase::Main => {
+            let main = ["origin/main", "origin/master", "main", "master"].into_iter().find(|r| name(&["rev-parse", "--verify", "--quiet", r]).is_some()).ok_or_else(|| "no main".to_string())?;
+            let fork = name(&["merge-base", "HEAD", main]).ok_or_else(|| "no main".to_string())?;
+            Ok(Some((fork, main.to_string())))
+        }
+    }
+}
+
+/// The folder's changed files against `base` (the last commit, else a
+/// commit), untracked ones too; an error when it is not a git repository
+/// or the base cannot be found.
+pub fn changed_files(cwd: &str, base: DiffBase) -> Result<Vec<FileChange>, String> {
     let status = git(cwd, &["status", "--porcelain=v1", "-z", "--untracked-files=all"]).ok_or_else(|| "not a repository".to_string())?;
-    let counts = git(cwd, &["diff", "HEAD", "--numstat", "-z"]).or_else(|| git(cwd, &["diff", "--cached", "--numstat", "-z"])).map(|d| parse_numstat(&d)).unwrap_or_default();
+    let against = base_commit(cwd, base)?;
     let root = git(cwd, &["rev-parse", "--show-toplevel"]).map(|d| String::from_utf8_lossy(&d).trim().to_string()).unwrap_or_else(|| cwd.to_string());
-    Ok(parse_status(&status).into_iter().map(|(status, path)| {
+    let (files, counts) = match &against {
+        None => (parse_status(&status), git(cwd, &["diff", "HEAD", "--numstat", "-z"]).or_else(|| git(cwd, &["diff", "--cached", "--numstat", "-z"])).map(|d| parse_numstat(&d)).unwrap_or_default()),
+        Some((commit, _)) => {
+            // The working tree against that commit, and what git does not track yet.
+            let mut files = git(&root, &["diff", commit, "--name-status", "-z"]).map(|d| parse_name_status(&d)).unwrap_or_default();
+            files.extend(parse_status(&status).into_iter().filter(|(s, _)| *s == '?'));
+            (files, git(&root, &["diff", commit, "--numstat", "-z"]).map(|d| parse_numstat(&d)).unwrap_or_default())
+        }
+    };
+    Ok(files.into_iter().map(|(status, path)| {
         let (added, removed) = match counts.get(&path) {
             Some(&(a, r)) => (a, r),
             // An untracked file: all its lines are new.
@@ -94,9 +153,9 @@ pub fn changed_files(cwd: &str) -> Result<Vec<FileChange>, String> {
     }).collect())
 }
 
-/// A file's diff against the last commit, as lines (an untracked file's
-/// lines, all added). At most `limit` lines.
-pub fn file_diff(cwd: &str, change: &FileChange, limit: usize) -> Vec<String> {
+/// A file's diff against `base`, as lines (an untracked file's lines, all
+/// added). At most `limit` lines.
+pub fn file_diff(cwd: &str, change: &FileChange, base: DiffBase, limit: usize) -> Vec<String> {
     let root = git(cwd, &["rev-parse", "--show-toplevel"]).map(|d| String::from_utf8_lossy(&d).trim().to_string()).unwrap_or_else(|| cwd.to_string());
     if change.status == '?' {
         return match std::fs::read(std::path::Path::new(&root).join(&change.path)) {
@@ -105,7 +164,8 @@ pub fn file_diff(cwd: &str, change: &FileChange, limit: usize) -> Vec<String> {
             Err(_) => vec![],
         };
     }
-    let data = git(&root, &["diff", "HEAD", "--no-color", "--", &change.path]).filter(|d| !d.is_empty())
+    let against = base_commit(cwd, base).ok().flatten().map(|(commit, _)| commit).unwrap_or_else(|| "HEAD".to_string());
+    let data = git(&root, &["diff", &against, "--no-color", "--", &change.path]).filter(|d| !d.is_empty())
         .or_else(|| git(&root, &["diff", "--cached", "--no-color", "--", &change.path]))
         .unwrap_or_default();
     String::from_utf8_lossy(&data).lines().skip_while(|l| !l.starts_with("@@") && !l.starts_with("Binary")).take(limit).map(str::to_string).collect()
@@ -131,17 +191,22 @@ pub fn pull_request(cwd: &str) -> Option<PullRequest> {
 }
 
 // The agent's folder comes abbreviated for display (~/…): expanded here.
-pub fn fetch_changes(cwd: String) -> Receiver<Result<Vec<FileChange>, String>> {
+/// The changed files against `base`, and the name of what they are
+/// compared with (an upstream, main), read on a thread.
+pub fn fetch_changes(cwd: String, base: DiffBase) -> Receiver<Result<(Vec<FileChange>, Option<String>), String>> {
     let cwd = crate::herdr::expand_home(&cwd);
     let (tx, rx) = channel();
-    std::thread::spawn(move || { let _ = tx.send(changed_files(&cwd)); });
+    std::thread::spawn(move || {
+        let named = base_commit(&cwd, base).ok().flatten().map(|(_, name)| name);
+        let _ = tx.send(changed_files(&cwd, base).map(|files| (files, named)));
+    });
     rx
 }
 
-pub fn fetch_diff(cwd: String, change: FileChange) -> Receiver<Vec<String>> {
+pub fn fetch_diff(cwd: String, change: FileChange, base: DiffBase) -> Receiver<Vec<String>> {
     let cwd = crate::herdr::expand_home(&cwd);
     let (tx, rx) = channel();
-    std::thread::spawn(move || { let _ = tx.send(file_diff(&cwd, &change, 4000)); });
+    std::thread::spawn(move || { let _ = tx.send(file_diff(&cwd, &change, base, 4000)); });
     rx
 }
 
@@ -176,6 +241,11 @@ mod tests {
     }
 
     #[test]
+    fn name_statuses() {
+        assert_eq!(parse_name_status(b"M\0src/ui.rs\0R087\0old.rs\0new.rs\0A\0added.rs\0"), vec![('M', "src/ui.rs".into()), ('R', "new.rs".into()), ('A', "added.rs".into())]);
+    }
+
+    #[test]
     fn pull_requests() {
         let pr = parse_pull_request(br#"{"isDraft":false,"number":10,"state":"OPEN","title":"Guild rooms","url":"https://github.com/o/r/pull/10"}"#).unwrap();
         assert_eq!((pr.number, pr.title.as_str(), pr.state.as_str(), pr.draft), (10, "Guild rooms", "OPEN", false));
@@ -196,12 +266,23 @@ mod tests {
         run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a"]);
         std::fs::write(dir.join("a.txt"), "one\nTWO\nthree\n").unwrap();
         std::fs::write(dir.join("b.txt"), "new\n").unwrap();
-        let files = changed_files(&cwd).unwrap();
+        let files = changed_files(&cwd, DiffBase::Uncommitted).unwrap();
         assert!(files.contains(&FileChange { status: 'M', path: "a.txt".into(), added: Some(2), removed: Some(1) }), "{files:?}");
         assert!(files.contains(&FileChange { status: '?', path: "b.txt".into(), added: Some(1), removed: Some(0) }), "{files:?}");
-        let diff = file_diff(&cwd, &files.iter().find(|f| f.path == "a.txt").unwrap().clone(), 100);
+        let diff = file_diff(&cwd, &files.iter().find(|f| f.path == "a.txt").unwrap().clone(), DiffBase::Uncommitted, 100);
         assert!(diff[0].starts_with("@@") && diff.contains(&"-two".to_string()) && diff.contains(&"+three".to_string()), "{diff:?}");
-        assert_eq!(file_diff(&cwd, &files.iter().find(|f| f.path == "b.txt").unwrap().clone(), 100), vec!["+new".to_string()]);
+        assert_eq!(file_diff(&cwd, &files.iter().find(|f| f.path == "b.txt").unwrap().clone(), DiffBase::Uncommitted, 100), vec!["+new".to_string()]);
+        // A branch off main with a commit of its own: against main it shows
+        // the committed file too; there is no upstream to compare with.
+        run(&["branch", "-m", "main"]);
+        run(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.join("c.txt"), "c\n").unwrap();
+        run(&["add", "c.txt"]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "c"]);
+        let uncommitted: Vec<String> = changed_files(&cwd, DiffBase::Uncommitted).unwrap().into_iter().map(|f| f.path).collect();
+        let branch: Vec<String> = changed_files(&cwd, DiffBase::Main).unwrap().into_iter().map(|f| f.path).collect();
+        assert!(!uncommitted.contains(&"c.txt".to_string()) && branch.contains(&"c.txt".to_string()) && branch.contains(&"a.txt".to_string()), "{branch:?}");
+        assert!(changed_files(&cwd, DiffBase::Unpushed).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

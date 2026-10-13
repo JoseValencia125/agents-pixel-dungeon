@@ -350,8 +350,8 @@ pub struct ChatState {
     shell_stop: Option<u32>,
     /// Full screen's column of changed files (re-read every 3 s while open),
     /// the file whose diff shows, and the branch's pull request (every minute).
-    changes: Option<Result<Vec<crate::changes::FileChange>, String>>,
-    changes_rx: Option<Receiver<Result<Vec<crate::changes::FileChange>, String>>>,
+    changes: Option<Result<(Vec<crate::changes::FileChange>, Option<String>), String>>,
+    changes_rx: Option<Receiver<Result<(Vec<crate::changes::FileChange>, Option<String>), String>>>,
     next_changes: f64,
     diff_path: Option<String>,
     diff: Vec<String>,
@@ -412,6 +412,13 @@ pub struct ChatAction {
 /// The terminal is shown as it is, colours and spinners included, refreshed
 /// twice a second; `wide` (full screen) sizes the font so its lines stay
 /// whole. A question keeps the plain lines, whose options are clicked.
+/// What the changed files are compared with (kept while the app runs, for
+/// every agent).
+fn diff_base(ctx: &Context) -> crate::changes::DiffBase {
+    let index = ctx.data(|d| d.get_temp::<usize>(egui::Id::new("diff-base"))).unwrap_or(0);
+    crate::changes::DiffBase::ALL[index.min(2)]
+}
+
 /// Whether full screen shows the column of changed files (kept while the
 /// app runs, for every agent).
 fn changes_open(ctx: &Context) -> bool {
@@ -442,10 +449,10 @@ fn poll_changes(ctx: &Context, agent: &Agent, state: &mut ChatState, now: f64, c
         if let Ok(pull) = rx.try_recv() { state.pull = pull; state.pull_rx = None; ctx.request_repaint(); }
     }
     if column && now >= state.next_changes && state.changes_rx.is_none() {
-        state.changes_rx = Some(crate::changes::fetch_changes(agent.cwd.clone()));
+        state.changes_rx = Some(crate::changes::fetch_changes(agent.cwd.clone(), diff_base(ctx)));
         state.next_changes = now + 3.0;
-        let picked = state.diff_path.as_ref().and_then(|p| state.changes.as_ref()?.as_ref().ok()?.iter().find(|f| &f.path == p)).cloned();
-        if let (Some(change), None) = (picked, &state.diff_rx) { state.diff_rx = Some(crate::changes::fetch_diff(agent.cwd.clone(), change)); }
+        let picked = state.diff_path.as_ref().and_then(|p| state.changes.as_ref()?.as_ref().ok()?.0.iter().find(|f| &f.path == p)).cloned();
+        if let (Some(change), None) = (picked, &state.diff_rx) { state.diff_rx = Some(crate::changes::fetch_diff(agent.cwd.clone(), change, diff_base(ctx))); }
     }
     if let Some(rx) = &state.changes_rx {
         if let Ok(changes) = rx.try_recv() { state.changes = Some(changes); state.changes_rx = None; ctx.request_repaint(); }
@@ -469,11 +476,13 @@ fn changes_column(ui: &mut Ui, agent: &Agent, state: &mut ChatState) {
     let inner = rect.shrink(8.0);
     ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
-        let files = match &state.changes { Some(Ok(files)) => Some(files.clone()), _ => None };
+        let files = match &state.changes { Some(Ok((files, _))) => Some(files.clone()), _ => None };
         // Its title: how many files and lines, and × to close it.
         ui.horizontal(|ui| {
             let title = match (&state.changes, &files) {
                 (_, Some(files)) => trf("{} archivos cambiados", &[&files.len().to_string()]),
+                (Some(Err(e)), _) if e == "no upstream" => tr("Esta rama no está en el remoto"),
+                (Some(Err(e)), _) if e == "no main" => tr("No hay rama main ni master"),
                 (Some(Err(_)), _) => tr("No es un repositorio git"),
                 _ => tr("Leyendo cambios…"),
             };
@@ -490,6 +499,31 @@ fn changes_column(ui: &mut Ui, agent: &Agent, state: &mut ChatState) {
                     ui.label(mono(&format!("+{added}"), 10.0).color(Color32::from_rgb(99, 199, 77)));
                 }
             });
+        });
+        // What they are compared with: the last commit, the remote, main.
+        let base = diff_base(ui.ctx());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+            ui.spacing_mut().button_padding = vec2(6.0, 2.0);
+            for (i, option) in crate::changes::DiffBase::ALL.into_iter().enumerate() {
+                let (label, tip) = match option {
+                    crate::changes::DiffBase::Uncommitted => (tr("Sin commit"), tr("Lo que cambió desde el último commit")),
+                    crate::changes::DiffBase::Unpushed => (tr("Sin subir"), tr("Todo lo que aún no está en el remoto: commits sin subir y cambios sin commit")),
+                    crate::changes::DiffBase::Main => (tr("Contra main"), tr("Todo lo de la rama desde que salió de main, como en un PR")),
+                };
+                let on = option == base;
+                let cyan = Color32::from_rgb(44, 232, 245);
+                let chip = egui::Button::new(mono(&label, 10.0).color(if on { Color32::from_rgb(10, 30, 34) } else { cyan })).fill(if on { cyan } else { alpha(cyan, 0.06) }).stroke(Stroke::new(1.0_f32, alpha(cyan, 0.45))).corner_radius(CornerRadius::same(3));
+                if ui.add(chip).on_hover_text(tip).clicked() && !on {
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("diff-base"), i));
+                    state.changes = None;
+                    state.changes_rx = None;
+                    state.next_changes = 0.0;
+                    state.diff.clear();
+                    state.diff_rx = None;
+                }
+            }
+            if let Some(Ok((_, Some(name)))) = &state.changes { ui.label(mono(&trf("contra {}", &[name]), 10.0).color(DIM)); }
         });
         let Some(files) = files else { return };
         if files.is_empty() { ui.label(mono(&tr("Sin cambios"), 11.0).color(DIM)); return; }
@@ -520,7 +554,7 @@ fn changes_column(ui: &mut Ui, agent: &Agent, state: &mut ChatState) {
                 if response.on_hover_text(&file.path).clicked() {
                     state.diff_path = if picked { None } else { Some(file.path.clone()) };
                     state.diff.clear();
-                    if !picked { state.diff_rx = Some(crate::changes::fetch_diff(agent.cwd.clone(), file.clone())); }
+                    if !picked { state.diff_rx = Some(crate::changes::fetch_diff(agent.cwd.clone(), file.clone(), base)); }
                 }
             }
         });
