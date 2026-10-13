@@ -1,4 +1,4 @@
-//! Herdr Pixel Dungeon: a native pixel-art guild for your live Herdr agents,
+//! Agents Pixel Dungeon: a native pixel-art guild for your live Herdr agents,
 //! for macOS and Linux. Each agent is an animated hero in a dungeon room
 //! that changes with its real Herdr status, in a small floating widget with
 //! a status item in the menu bar or tray.
@@ -60,7 +60,7 @@ fn native_fullscreen(on: bool) -> bool {
     let Some(mtm) = MainThreadMarker::new() else { return false };
     let app = NSApplication::sharedApplication(mtm);
     let windows = app.windows();
-    let Some(window) = windows.iter().find(|w| w.title().to_string() == "Herdr Pixel Dungeon" && w.styleMask().contains(NSWindowStyleMask::Resizable)) else { return false };
+    let Some(window) = windows.iter().find(|w| w.title().to_string() == "Agents Pixel Dungeon" && w.styleMask().contains(NSWindowStyleMask::Resizable)) else { return false };
     let is_full = window.styleMask().contains(NSWindowStyleMask::FullScreen);
     if on {
         unsafe { window.setCollectionBehavior(window.collectionBehavior() | NSWindowCollectionBehavior::FullScreenPrimary) };
@@ -139,8 +139,8 @@ fn main() {
     let fullscreen = args.iter().any(|a| a == "--fullscreen");
     let on_top = prefs.on_top;
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Herdr Pixel Dungeon")
-        .with_app_id("herdr-pixel-dungeon")
+        .with_title("Agents Pixel Dungeon")
+        .with_app_id("agents-pixel-dungeon")
         .with_decorations(false)
         .with_transparent(true)
         .with_resizable(true)
@@ -152,7 +152,7 @@ fn main() {
     }
     if on_top { viewport = viewport.with_always_on_top(); }
     let options = eframe::NativeOptions { viewport, centered: false, ..Default::default() };
-    let result = eframe::run_native("Herdr Pixel Dungeon", options, Box::new(move |cc| Ok(Box::new(App::new(cc, prefs, session, demo, fullscreen)))));
+    let result = eframe::run_native("Agents Pixel Dungeon", options, Box::new(move |cc| Ok(Box::new(App::new(cc, prefs, session, demo, fullscreen)))));
     if let Err(error) = result {
         eprintln!("{error}");
         std::process::exit(1);
@@ -569,7 +569,7 @@ impl App {
                     match result {
                         Ok(()) => self.login_enabled = !self.login_enabled,
                         Err(error) => {
-                            rfd::MessageDialog::new().set_title("Herdr Pixel Dungeon").set_description(format!("{}\n{}", tr("El sistema no permitió abrir la app al iniciar sesión."), error)).show();
+                            rfd::MessageDialog::new().set_title("Agents Pixel Dungeon").set_description(format!("{}\n{}", tr("El sistema no permitió abrir la app al iniciar sesión."), error)).show();
                         }
                     }
                 }
@@ -598,7 +598,7 @@ impl App {
             TrayAction::ConsoleSmaller => self.step_console_scale(-1),
             TrayAction::ConsoleNormal => self.set_console_scale(1.0),
             TrayAction::About => {
-                rfd::MessageDialog::new().set_title(tr("Acerca de Herdr Pixel Dungeon")).set_description(format!("Herdr Pixel Dungeon {}\n{}", env!("CARGO_PKG_VERSION"), tr("Creado por Nacho Valencia.\nCódigo y pixel art originales · MIT.\n\nProyecto independiente, sin afiliación con Herdr, Inc."))).show();
+                rfd::MessageDialog::new().set_title(tr("Acerca de Agents Pixel Dungeon")).set_description(format!("Agents Pixel Dungeon {}\n{}", env!("CARGO_PKG_VERSION"), tr("Creado por Nacho Valencia.\nCódigo y pixel art originales · MIT.\n\nProyecto independiente, sin afiliación con Herdr, Inc."))).show();
             }
             TrayAction::Quit => ctx.send_viewport_cmd(ViewportCommand::Close),
         }
@@ -940,7 +940,12 @@ fn login_item() -> Option<auto_launch::AutoLaunch> {
     let path = exe.to_string_lossy().to_string();
     // Inside an .app bundle, register the bundle itself.
     let app = path.find("/Contents/MacOS/").map(|at| path[..at].to_string()).unwrap_or(path);
-    auto_launch::AutoLaunchBuilder::new().set_app_name("Herdr Pixel Dungeon").set_app_path(&app).set_use_launch_agent(true).build().ok()
+    let login = auto_launch::AutoLaunchBuilder::new().set_app_name("Agents Pixel Dungeon").set_app_path(&app).set_use_launch_agent(true).build().ok()?;
+    // Launching at login under the app's old name moves to the new one.
+    if let Ok(old) = auto_launch::AutoLaunchBuilder::new().set_app_name("Herdr Pixel Dungeon").set_app_path(&app).set_use_launch_agent(true).build() {
+        if old.is_enabled().unwrap_or(false) && old.disable().is_ok() { let _ = login.enable(); }
+    }
+    Some(login)
 }
 
 /// The system's Reduce Motion setting (macOS); Linux has no common switch,

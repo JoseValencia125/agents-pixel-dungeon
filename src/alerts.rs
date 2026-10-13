@@ -192,7 +192,7 @@ impl Notifier {
 #[cfg(target_os = "macos")]
 fn prepare() {
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-    let bundle = if exe.contains("/Contents/MacOS/") { "io.github.josevalencia125.herdr-pixel-dungeon" } else { "com.apple.Terminal" };
+    let bundle = if exe.contains("/Contents/MacOS/") { "io.github.josevalencia125.agents-pixel-dungeon" } else { "com.apple.Terminal" };
     if mac_notification_sys::set_application(bundle).is_err() {
         // Not registered with Launch Services (e.g. a bundle never opened): no notifications rather than dialogs.
         NOTIFICATIONS_OFF.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -209,7 +209,7 @@ fn post_one(title: &str, body: &str, pane: &str, open_tx: Sender<String>) {
     let shown = notify_rust::Notification::new()
         .summary(title)
         .body(body)
-        .appname("Herdr Pixel Dungeon")
+        .appname("Agents Pixel Dungeon")
         .action("default", "Open")
         .show();
     if let Ok(handle) = shown {
@@ -223,5 +223,5 @@ fn post_one(title: &str, body: &str, pane: &str, open_tx: Sender<String>) {
 #[cfg(not(target_os = "linux"))]
 fn post_one(title: &str, body: &str, _pane: &str, _open_tx: Sender<String>) {
     if NOTIFICATIONS_OFF.load(std::sync::atomic::Ordering::Relaxed) { return; }
-    let _ = notify_rust::Notification::new().summary(title).body(body).appname("Herdr Pixel Dungeon").show();
+    let _ = notify_rust::Notification::new().summary(title).body(body).appname("Agents Pixel Dungeon").show();
 }

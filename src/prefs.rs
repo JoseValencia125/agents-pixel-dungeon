@@ -73,7 +73,15 @@ fn one() -> f32 { 1.0 }
 
 impl Prefs {
     pub fn default_path() -> PathBuf {
-        dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("herdr-pixel-dungeon").join("settings.json")
+        let config = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
+        let path = config.join("agents-pixel-dungeon").join("settings.json");
+        // The settings from before the app was renamed come along, once.
+        let old = config.join("herdr-pixel-dungeon").join("settings.json");
+        if !path.exists() && old.exists() {
+            if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
+            let _ = std::fs::copy(&old, &path);
+        }
+        path
     }
 
     pub fn load(path: PathBuf) -> Prefs {

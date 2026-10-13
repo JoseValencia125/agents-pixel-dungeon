@@ -1,6 +1,6 @@
-<p align="center"><img src="Resources/Icon/icon_256.png" width="128" alt="Herdr Pixel Dungeon icon: a knight's helm on a dungeon tile"></p>
+<p align="center"><img src="Resources/Icon/icon_256.png" width="128" alt="Agents Pixel Dungeon icon: a knight's helm on a dungeon tile"></p>
 
-# Herdr Pixel Dungeon
+# Agents Pixel Dungeon
 
 **A native pixel-art guild for your live [Herdr](https://herdr.dev) agents, for macOS and Linux.**
 
@@ -14,7 +14,7 @@ Each coding agent is a hero in a dungeon room that changes with its real Herdr s
 
 ## Download
 
-Binaries for macOS (`.app`) and Linux (x86_64) are on the [Releases](https://github.com/JoseValencia125/herdr-pixel-dungeon/releases) page. The macOS app is ad-hoc signed, not notarized: the first time, right-click it and choose Open.
+Binaries for macOS (`.app`) and Linux (x86_64) are on the [Releases](https://github.com/JoseValencia125/agents-pixel-dungeon/releases) page. The macOS app is ad-hoc signed, not notarized: the first time, right-click it and choose Open.
 
 ## States and rooms
 
@@ -70,19 +70,19 @@ The [guide](docs/GUIDE.md) has the details: how states are read, background jobs
 Requires [Rust](https://rustup.rs) (stable) and [Herdr](https://herdr.dev). Tested with Herdr 0.9.x.
 
 ```sh
-git clone https://github.com/JoseValencia125/herdr-pixel-dungeon.git
-cd herdr-pixel-dungeon
+git clone https://github.com/JoseValencia125/agents-pixel-dungeon.git
+cd agents-pixel-dungeon
 ./scripts/build.sh
 ```
 
-- **macOS**: `open 'build/Herdr Pixel Dungeon.app'` (optionally copy it to `~/Applications`).
-- **Linux** (X11 or Wayland): `./build/herdr-pixel-dungeon`. Needs GTK 3, libayatana-appindicator, xdo and ALSA — on Debian/Ubuntu `sudo apt install libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libasound2-dev`. `build/` also has a `.desktop` entry and icon.
+- **macOS**: `open 'build/Agents Pixel Dungeon.app'` (optionally copy it to `~/Applications`).
+- **Linux** (X11 or Wayland): `./build/agents-pixel-dungeon`. Needs GTK 3, libayatana-appindicator, xdo and ALSA — on Debian/Ubuntu `sudo apt install libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libasound2-dev`. `build/` also has a `.desktop` entry and icon.
 
 `cargo test` and `--self-test` run the checks; `--demo` shows fictional agents without Herdr.
 
 ## Support the Guild 🧪⚔️
 
-Herdr Pixel Dungeon is free and open source, built alongside other experiments in AI agents, developer tooling and pixel-art interfaces. If it brightens your terminal, you can buy the guild a potion on [GitHub Sponsors](https://github.com/sponsors/JoseValencia125).
+Agents Pixel Dungeon is free and open source, built alongside other experiments in AI agents, developer tooling and pixel-art interfaces. If it brightens your terminal, you can buy the guild a potion on [GitHub Sponsors](https://github.com/sponsors/JoseValencia125).
 
 <p align="center"><a href="https://github.com/sponsors/JoseValencia125"><img src="https://img.shields.io/badge/Sponsor-Buy%20the%20guild%20a%20potion-db61a2?logo=githubsponsors&logoColor=white" alt="Sponsor Nacho Valencia on GitHub"></a></p>
 
@@ -101,4 +101,4 @@ Created by **Nacho Valencia**: code and all pixel art. MIT, see [LICENSE](LICENS
 
 Inspired by **[Claude Dungeon](https://github.com/thousandsky2024/claude-pixel-agent-web)** by [thousandsky2024](https://github.com/thousandsky2024), which first pictured coding agents as dungeon heroes. No code or artwork from it is included.
 
-[Herdr](https://github.com/herdrdev/herdr) is by the Herdr contributors and is installed separately. Herdr Pixel Dungeon is an independent, community-made project: it is not affiliated with, endorsed by or sponsored by Herdr, Inc. "Herdr" is used only to describe what the app connects to; Herdr and other names are trademarks of their respective owners.
+[Herdr](https://github.com/herdrdev/herdr) is by the Herdr contributors and is installed separately. Agents Pixel Dungeon is an independent, community-made project: it is not affiliated with, endorsed by or sponsored by Herdr, Inc. "Herdr" is used only to describe what the app connects to; Herdr and other names are trademarks of their respective owners.

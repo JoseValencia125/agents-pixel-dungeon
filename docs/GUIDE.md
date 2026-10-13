@@ -1,8 +1,8 @@
-# Herdr Pixel Dungeon — guide
+# Agents Pixel Dungeon — guide
 
 Everything the README leaves out: how the dungeon reads the agents, what each panel does, the menu, configuration, privacy and the standalone mode.
 
-Herdr Pixel Dungeon is an independent project, not affiliated with or endorsed by Herdr, Inc.; "Herdr" names the runtime the app connects to.
+Agents Pixel Dungeon is an independent project, not affiliated with or endorsed by Herdr, Inc.; "Herdr" names the runtime the app connects to.
 
 ## How the rooms are kept current
 
@@ -83,7 +83,7 @@ Close or minimize the window to keep monitoring from the menu bar (macOS) or the
 - **Herdr session**: Herdr's sessions (`herdr session list`), to switch which one the dungeon watches — agents, log and selection start over — remembered; `HERDR_SESSION` still overrides it at launch. **Demo** shows fictional agents without Herdr; live mode never inserts fictional agents.
 - **Open Herdr** and **Open Herdr at startup** (see below).
 
-The widget reopens where you left it, at the size you gave it, and remembers sounds, notifications, the session, the state filter and the text size, in `settings.json` under `~/Library/Application Support/herdr-pixel-dungeon` (macOS) or `~/.config/herdr-pixel-dungeon` (Linux).
+The widget reopens where you left it, at the size you gave it, and remembers sounds, notifications, the session, the state filter and the text size, in `settings.json` under `~/Library/Application Support/agents-pixel-dungeon` (macOS) or `~/.config/agents-pixel-dungeon` (Linux).
 
 ## Languages
 
@@ -107,10 +107,10 @@ Command-line flags: `--demo` (fictional agents), `--fullscreen` (start in full s
 
 ```sh
 ./scripts/build.sh
-./target/release/herdr-pixel-dungeon --self-test
-./target/release/herdr-pixel-dungeon --diagnose
-open 'build/Herdr Pixel Dungeon.app' --args --demo     # macOS
-./build/herdr-pixel-dungeon --demo                      # Linux
+./target/release/agents-pixel-dungeon --self-test
+./target/release/agents-pixel-dungeon --diagnose
+open 'build/Agents Pixel Dungeon.app' --args --demo     # macOS
+./build/agents-pixel-dungeon --demo                      # Linux
 ```
 
 `cargo test` runs the same checks as `--self-test`: snapshot states, invalid/empty replies, monitor transitions, subagents, tool actions, translations, sound and notification settings, chat selection, question options, filters, connection notes, sessions, Herdr events and error codes, background jobs, the standalone heuristics, git branches, hero mapping and bundled PNG decoding. `--diagnose` prints live agent data; review it before sharing publicly.

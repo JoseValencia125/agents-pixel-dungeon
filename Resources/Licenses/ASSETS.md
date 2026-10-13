@@ -1,6 +1,6 @@
 # Pixel art
 
-All bundled artwork is original and made for Herdr Pixel Dungeon:
+All bundled artwork is original and made for Agents Pixel Dungeon:
 
 - `Sprites/rooms`: `room_working` (plus its `room_working_front` foreground layer), `room_blocked`, `room_done`, `room_idle` and `room_unknown`.
 - `Icon/`: the app icon, the guild's knight helm on a dungeon tile, drawn by `scripts/icon.py`.

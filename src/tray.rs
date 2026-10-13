@@ -178,7 +178,7 @@ fn build_menu(state: &MenuState) -> (Menu, HashMap<MenuId, TrayAction>) {
     add(&console_smaller, TrayAction::ConsoleSmaller);
     add(&console_normal, TrayAction::ConsoleNormal);
 
-    let about = item(&tr("Acerca de Herdr Pixel Dungeon"));
+    let about = item(&tr("Acerca de Agents Pixel Dungeon"));
     let quit = item(&tr("Salir"));
     let _ = menu.append_items(&[&sounds, &notify, &text, &console, &PredefinedMenuItem::separator(), &sessions, &open_herdr, &open_at_start, &PredefinedMenuItem::separator(), &about, &quit]);
     add(&about, TrayAction::About);
@@ -250,7 +250,7 @@ impl Tray {
         {
             let (menu, actions) = build_menu(state);
             *self.actions.lock().unwrap() = actions;
-            let tooltip = trf("Herdr Pixel Dungeon · {} necesitan atención", &[&state.attention]);
+            let tooltip = trf("Agents Pixel Dungeon · {} necesitan atención", &[&state.attention]);
             match &self.icon {
                 Some(icon) => {
                     icon.set_menu(Some(Box::new(menu)));
@@ -295,7 +295,7 @@ fn linux_host(shared: Arc<Mutex<HashMap<MenuId, TrayAction>>>) -> Sender<MenuSta
                     Ok(state) => {
                         let (menu, actions) = build_menu(&state);
                         *shared.lock().unwrap() = actions;
-                        let tooltip = trf("Herdr Pixel Dungeon · {} necesitan atención", &[&state.attention]);
+                        let tooltip = trf("Agents Pixel Dungeon · {} necesitan atención", &[&state.attention]);
                         match &icon {
                             Some(existing) => { existing.set_menu(Some(Box::new(menu))); let _ = existing.set_tooltip(Some(tooltip)); }
                             None => {

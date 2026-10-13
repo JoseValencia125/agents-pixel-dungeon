@@ -1,13 +1,13 @@
 [package]
-name = "herdr-pixel-dungeon"
+name = "agents-pixel-dungeon"
 version = "2.1.2"
 edition = "2021"
 description = "A native pixel-art guild for your live Herdr agents, for macOS and Linux."
 license = "MIT"
-default-run = "herdr-pixel-dungeon"
+default-run = "agents-pixel-dungeon"
 
 [[bin]]
-name = "herdr-pixel-dungeon"
+name = "agents-pixel-dungeon"
 path = "src/main.rs"
 
 [dependencies]

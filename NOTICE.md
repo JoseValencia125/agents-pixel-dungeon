@@ -1,6 +1,6 @@
 # Attribution and provenance
 
-## Herdr Pixel Dungeon
+## Agents Pixel Dungeon
 
 All code and pixel art in this repository are original work, copyright (c) 2026 Nacho Valencia, released under the MIT license in LICENSE.
 
