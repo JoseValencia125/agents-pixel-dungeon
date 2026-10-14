@@ -24,7 +24,7 @@ pub enum ModelSwitch { BetweenTurns, NewSession, Unsupported, Unknown }
 #[serde(rename_all = "snake_case")]
 pub enum Transport { Acp, Stdio, Pane, Mock }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Capabilities {
     pub adapter_version: String,
     pub runtime_version: String,
@@ -39,10 +39,27 @@ pub struct Capabilities {
     pub model_switch: ModelSwitch,
     pub usage_reporting: Support,
     pub native_fork: Support,
+    /// The harness can be given MCP servers.
+    #[serde(default = "unknown")]
+    pub mcp: Support,
+    /// The harness runs subagents of its own.
+    #[serde(default = "unknown")]
+    pub subagents: Support,
+    /// The harness has a plan-only mode.
+    #[serde(default = "unknown")]
+    pub plan_mode: Support,
+    /// The harness can take screenshots (images in prompts or tools).
+    #[serde(default = "unknown")]
+    pub screenshots: Support,
+    /// The harness takes a message while a turn runs.
+    #[serde(default = "unknown")]
+    pub steering: Support,
     pub max_concurrent_sessions: Option<u32>,
     #[serde(default)]
     pub extensions: BTreeMap<String, Value>,
 }
+
+fn unknown() -> Support { Support::Unknown }
 
 #[derive(Clone, Debug)]
 pub struct SessionRef {
@@ -66,7 +83,8 @@ pub enum HarnessEvent {
     Text(String),
     /// A chunk of the agent's reasoning, kept only as telemetry.
     Thought(String),
-    Tool { id: String, title: String, kind: String, status: String, action: String },
+    /// `paths` are the files the tool touches, when the harness says.
+    Tool { id: String, title: String, kind: String, status: String, action: String, paths: Vec<String> },
     Plan(Value),
     ModelChanged { effective: String, reason: String },
     PermissionRequested { request_id: String, title: String, detail: String, options: Vec<PermissionOption> },
@@ -119,6 +137,12 @@ pub trait HarnessAdapter: Send + Sync {
     /// Find the runtime and what it supports, without creating a session.
     fn probe(&self) -> HarnessResult<Capabilities>;
     fn create_session(&self, options: &SessionOptions) -> HarnessResult<SessionRef>;
+    /// Reopen a session the harness persisted, by its native id, so an
+    /// attempt can go on after the guild restarted. Adapters whose
+    /// runtime cannot do this keep the default.
+    fn resume_session(&self, _options: &SessionOptions, _native_id: &str) -> HarnessResult<SessionRef> {
+        Err(HarnessError::UnsupportedCapability("resume_session"))
+    }
     fn prompt(&self, session: &SessionRef, request_id: &str, text: &str) -> HarnessResult<TurnHandle>;
     fn interrupt(&self, session: &SessionRef) -> HarnessResult<()>;
     /// Close whatever the adapter started for this session. True when

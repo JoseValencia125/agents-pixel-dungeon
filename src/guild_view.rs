@@ -22,6 +22,37 @@ enum Msg {
     Event(Event),
     Transcript(String, Vec<Event>),
     Note(String, &'static str),
+    Artifact(String, String),
+}
+
+/// The board's form for a new quest, kept between frames.
+#[derive(Default)]
+pub struct QuestForm {
+    pub open: bool,
+    /// A repo to register when the guild has no project for it yet.
+    pub repo_path: String,
+    pub project_id: String,
+    pub title: String,
+    /// One task per line: `Title :: instructions`; a leading `>` makes it
+    /// depend on the task above.
+    pub tasks: String,
+    pub members_open: bool,
+    pub member_name: String,
+    pub member_harness: String,
+    pub member_model: String,
+    pub member_role: String,
+}
+
+impl QuestForm {
+    /// The task lines as (title, instructions, depends on the previous).
+    pub fn parse_tasks(text: &str) -> Vec<(String, String, bool)> {
+        text.lines().filter(|l| !l.trim().is_empty()).map(|line| {
+            let trimmed = line.trim_start();
+            let (dep, rest) = match trimmed.strip_prefix('>') { Some(r) => (true, r.trim()), None => (false, trimmed.trim()) };
+            let (title, instructions) = match rest.split_once("::") { Some((t, i)) => (t.trim(), i.trim()), None => (rest, "") };
+            (title.to_string(), instructions.to_string(), dep)
+        }).collect()
+    }
 }
 
 pub struct GuildView {
@@ -44,6 +75,10 @@ pub struct GuildView {
     demo_tick: usize,
     /// The rooms must be rebuilt (demo toggled) even without a message.
     dirty: bool,
+    /// The last candidate diff fetched: (artifact id, text).
+    pub diff: Option<(String, String)>,
+    pub diff_open: bool,
+    pub form: QuestForm,
 }
 
 impl GuildView {
@@ -64,6 +99,9 @@ impl GuildView {
             started: false,
             demo_tick: 0,
             dirty: true,
+            diff: None,
+            diff_open: false,
+            form: QuestForm::default(),
         }
     }
 
@@ -109,6 +147,7 @@ impl GuildView {
                     self.transcript = events;
                 }
                 Msg::Note(text, tone) => self.notes.push((text, tone)),
+                Msg::Artifact(id, text) => self.diff = Some((id, text)),
             }
         }
         if self.demo && self.snapshot.as_ref().map(|s| s.service_version != "demo").unwrap_or(true) {
@@ -154,6 +193,68 @@ impl GuildView {
                 let _ = outbox.send(Msg::Note(trf("Guild: {}", &[&e.message]), "blocked"));
                 wake();
             }
+        });
+    }
+
+    /// Fetch an artifact's text (a candidate diff) on a thread.
+    pub fn fetch_artifact(&mut self, id: &str) {
+        if self.diff.as_ref().map(|d| d.0 == id).unwrap_or(false) { return; }
+        if self.demo {
+            self.diff = Some((id.into(), "diff --git a/src/status.rs b/src/status.rs\n+pub enum Status { Poison, Shield }\n".into()));
+            return;
+        }
+        self.diff = Some((id.into(), String::new()));
+        let client = self.client.clone();
+        let outbox = self.outbox.clone();
+        let wake = self.wake.clone();
+        let id = id.to_string();
+        std::thread::spawn(move || {
+            match client.call("artifact.read", json!({"artifactId": id})) {
+                Ok(r) => { let _ = outbox.send(Msg::Artifact(id, r["text"].as_str().unwrap_or("").to_string())); }
+                Err(e) => { let _ = outbox.send(Msg::Note(trf("Guild: {}", &[&e.message]), "blocked")); }
+            }
+            wake();
+        });
+    }
+
+    /// Register the project if a path was given, create the quest and its
+    /// tasks in order, and start it when asked. One thread, in sequence,
+    /// so each id feeds the next command; the first error stops it.
+    pub fn create_quest(&mut self, start: bool) {
+        let form = std::mem::take(&mut self.form);
+        if self.demo {
+            self.demo_tick += 1;
+            self.snapshot = Some(demo_snapshot(self.demo_tick));
+            return;
+        }
+        let client = self.client.clone();
+        let outbox = self.outbox.clone();
+        let wake = self.wake.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let project = if !form.repo_path.trim().is_empty() {
+                    let r = client.call("project.add", json!({"repoPath": form.repo_path.trim()})).map_err(|e| e.message)?;
+                    r["project"]["id"].as_str().unwrap_or("").to_string()
+                } else { form.project_id.clone() };
+                if project.is_empty() { return Err(tr("Elige un proyecto")); }
+                let title = form.title.trim();
+                if title.is_empty() { return Err(tr("La misión necesita un título")); }
+                let quest = client.call("quest.create", json!({"projectId": project, "title": title})).map_err(|e| e.message)?;
+                let quest_id = quest["id"].as_str().unwrap_or("").to_string();
+                let mut previous: Option<String> = None;
+                for (t, instructions, dep) in QuestForm::parse_tasks(&form.tasks) {
+                    let depends: Vec<String> = if dep { previous.iter().cloned().collect() } else { vec![] };
+                    let r = client.call("task.create", json!({"questId": quest_id, "title": t, "instructions": instructions, "dependsOn": depends})).map_err(|e| e.message)?;
+                    previous = r["id"].as_str().map(str::to_string);
+                }
+                if start { client.call("quest.start", json!({"questId": quest_id})).map_err(|e| e.message)?; }
+                Ok(title.to_string())
+            })();
+            let _ = outbox.send(match result {
+                Ok(title) => Msg::Note(trf("Misión creada: {}", &[&title]), "info"),
+                Err(e) => Msg::Note(trf("Guild: {}", &[&e]), "blocked"),
+            });
+            wake();
         });
     }
 
@@ -341,6 +442,20 @@ pub struct PanelAction {
 }
 
 /// An attempt's state in the user's words.
+/// How long the attempt has run (or ran), for the panel.
+fn elapsed_label(a: &Attempt) -> Option<String> {
+    let start = chrono::DateTime::parse_from_rfc3339(a.started_at.as_deref()?).ok()?;
+    let end = a.finished_at.as_deref().and_then(|f| chrono::DateTime::parse_from_rfc3339(f).ok()).map(|f| f.with_timezone(&chrono::Utc)).unwrap_or_else(chrono::Utc::now);
+    let secs = (end - start.with_timezone(&chrono::Utc)).num_seconds().max(0);
+    Some(if secs < 60 { format!("{secs} s") } else if secs < 3600 { format!("{} min", secs / 60) } else { format!("{} h {:02} min", secs / 3600, (secs % 3600) / 60) })
+}
+
+/// The last two components of a path, for the transcript.
+fn short_path(p: &str) -> String {
+    let parts: Vec<&str> = p.rsplit('/').take(2).collect();
+    parts.into_iter().rev().collect::<Vec<_>>().join("/")
+}
+
 pub fn state_label(state: AttemptState) -> String {
     tr(match state {
         AttemptState::Queued => "en cola",
@@ -399,6 +514,8 @@ pub fn panel(ui: &mut Ui, view: &mut GuildView, agent: &Agent, _now: f64, wide: 
     let color = crate::scene::agent_color(&agent.status);
     ui.horizontal_wrapped(|ui| {
         ui.label(mono(&state, 11.0).strong().color(color));
+        if let Some(elapsed) = elapsed_label(&a) { ui.label(mono(&elapsed, 11.0).color(DIM)); }
+        if a.resumed > 0 { ui.label(mono(&trf("reanudado ×{}", &[&a.resumed]), 10.5).color(DIM)); }
         if let Some(c) = &a.candidate {
             ui.label(mono(&trf("{} archivos · +{} −{}", &[&c.files_changed, &c.insertions, &c.deletions]), 11.0).color(INK));
         }
@@ -436,6 +553,9 @@ pub fn panel(ui: &mut Ui, view: &mut GuildView, agent: &Agent, _now: f64, wide: 
                 if let Some(t) = &task { if button(ui, &tr("Integrar"), Color32::from_rgb(48, 209, 88)) { view.command("task.integrate", json!({"taskId": t.id})); } }
             }
             (s, _) if s.is_active() => {
+                if matches!(s, AttemptState::Running | AttemptState::WaitingInput) {
+                    if button(ui, &tr("Interrumpir"), Color32::from_rgb(255, 159, 10)) { view.command("attempt.interrupt", json!({"attemptId": a.id})); }
+                }
                 if button(ui, &tr("Cancelar intento"), Color32::from_rgb(200, 200, 205)) { view.command("attempt.cancel", json!({"attemptId": a.id})); }
             }
             (_, Some(TaskState::Failed)) | (_, Some(TaskState::Blocked)) => {
@@ -444,9 +564,39 @@ pub fn panel(ui: &mut Ui, view: &mut GuildView, agent: &Agent, _now: f64, wide: 
             _ => {}
         }
     });
-    // Transcript.
+    // The candidate's diff, or the transcript.
+    let diff_id = a.candidate.as_ref().and_then(|c| c.diff_artifact_id.clone());
+    if let Some(id) = &diff_id {
+        ui.horizontal(|ui| {
+            let on = view.diff_open;
+            if ui.add(egui::Button::new(mono("± Diff", 11.0).strong().color(if on { Color32::from_rgb(20, 18, 26) } else { INK })).fill(if on { Color32::from_rgb(140, 217, 115) } else { Color32::TRANSPARENT }).corner_radius(CornerRadius::same(3)).stroke(Stroke::new(1.0_f32, DIM))).clicked() {
+                view.diff_open = !view.diff_open;
+            }
+        });
+        if view.diff_open { view.fetch_artifact(id); }
+    } else {
+        view.diff_open = false;
+    }
     ui.add_space(2.0);
     let height = ui.available_height().max(60.0);
+    if view.diff_open {
+        let text = view.diff.as_ref().filter(|d| Some(&d.0) == diff_id.as_ref()).map(|d| d.1.clone()).unwrap_or_default();
+        egui::ScrollArea::both().id_salt(("guild-diff", &a.id)).max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+            if text.is_empty() { ui.label(mono("…", 11.0).color(DIM)); }
+            let size = if wide { 11.0 } else { 10.0 };
+            for line in text.lines() {
+                let color = match line.chars().next() {
+                    Some('+') if !line.starts_with("+++") => Color32::from_rgb(140, 217, 115),
+                    Some('-') if !line.starts_with("---") => Color32::from_rgb(255, 120, 110),
+                    Some('@') => Color32::from_rgb(120, 170, 255),
+                    _ if line.starts_with("diff ") => INK,
+                    _ => DIM,
+                };
+                ui.label(mono(line, size).color(color));
+            }
+        });
+        return action;
+    }
     egui::ScrollArea::vertical().id_salt(("guild-transcript", &a.id)).max_height(height).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
         if view.transcript_of.as_deref() != Some(a.id.as_str()) {
             ui.label(mono("…", 11.0).color(DIM));
@@ -462,6 +612,8 @@ pub fn panel(ui: &mut Ui, view: &mut GuildView, agent: &Agent, _now: f64, wide: 
                     }
                 }
                 "tool.started" => { ui.label(mono(&format!("⚒ {}", p["title"].as_str().unwrap_or("")), size).color(Color32::from_rgb(255, 159, 10))); }
+                "file.changed" => { for f in p["paths"].as_array().into_iter().flatten().filter_map(Value::as_str) { ui.label(mono(&format!("± {}", short_path(f)), size).color(Color32::from_rgb(140, 217, 115))); } }
+                "session.resumed" => { ui.label(mono(&tr("Sesión reanudada tras un reinicio"), size).color(DIM)); }
                 "permission.requested" => { ui.label(mono(&format!("? {}", p["title"].as_str().unwrap_or("")), size).color(Color32::from_rgb(255, 69, 58))); }
                 "permission.resolved" => { ui.label(mono(&format!("→ {}", p["optionId"].as_str().unwrap_or("")), size).color(DIM)); }
                 "candidate.committed" => { ui.label(mono(&trf("Candidato: {} archivos", &[&p["filesChanged"]]), size).color(Color32::from_rgb(48, 209, 88))); }
@@ -489,6 +641,7 @@ pub fn board(ctx: &Context, view: &mut GuildView) -> BoardAction {
     let mut action = BoardAction::default();
     let mut commands: Vec<(&'static str, Value)> = vec![];
     let mut start_service = false;
+    let mut create: Option<bool> = None;
     egui::Area::new(egui::Id::new("quest-board")).anchor(Align2::LEFT_TOP, vec2(8.0, 38.0)).order(egui::Order::Foreground).show(ctx, |ui| {
         Frame::new()
             .fill(Color32::from_rgb(237, 217, 168))
@@ -505,15 +658,80 @@ pub fn board(ctx: &Context, view: &mut GuildView) -> BoardAction {
                         if ui.add(egui::Button::new(mono("x", 11.0).strong().color(ink)).frame(false)).on_hover_text(tr("Cerrar")).clicked() { action.close = true; }
                     });
                 });
-                let Some(snap) = view.snapshot.as_ref() else {
+                let Some(snap) = view.snapshot.clone() else {
                     ui.label(mono(&tr("Servicio de la guild apagado"), 11.0).color(faint));
                     if button(ui, &tr("Arrancar el servicio"), Color32::from_rgb(255, 159, 10)) { start_service = true; }
-                    ui.label(mono("agents-pixel-dungeon-guild project add <repo>", 10.0).color(faint));
                     return;
                 };
-                if snap.quests.is_empty() {
-                    ui.label(mono(&tr("Sin misiones todavía"), 11.0).color(faint));
-                    ui.label(mono("agents-pixel-dungeon-guild quest new <project> \"…\"", 10.0).color(faint));
+                // Members, and the form to add one.
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(mono(&tr("Miembros:"), 10.5).strong().color(ink));
+                    if snap.members.is_empty() { ui.label(mono(&tr("ninguno"), 10.5).color(faint)); }
+                    for (i, m) in snap.members.iter().enumerate() {
+                        if i > 0 { ui.label(mono("·", 10.5).color(faint)); }
+                        let text = format!("{} ({} · {})", m.name, m.harness, m.model_id.clone().unwrap_or_else(|| tr("modelo por defecto")));
+                        if ui.add(egui::Label::new(mono(&text, 10.5).color(ink)).sense(egui::Sense::click())).on_hover_text(m.roles.join(", ")).clicked() {
+                            action.open = Some(GuildView::member_agent_id(&m.id));
+                        }
+                    }
+                    if small(ui, if view.form.members_open { "−" } else { "+" }, ink) { view.form.members_open = !view.form.members_open; }
+                });
+                if view.form.members_open {
+                    let harnesses: Vec<String> = snap.harnesses.iter().filter(|h| h.available).map(|h| h.kind.to_string()).collect();
+                    if view.form.member_harness.is_empty() { view.form.member_harness = harnesses.first().cloned().unwrap_or_else(|| "kiro".into()); }
+                    if view.form.member_role.is_empty() { view.form.member_role = "implementer".into(); }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut view.form.member_name).hint_text(tr("nombre")).desired_width(70.0).font(egui::FontId::monospace(crate::ui::fs(10.5))));
+                        egui::ComboBox::from_id_salt("member-harness").selected_text(mono(&view.form.member_harness, 10.5)).width(70.0).show_ui(ui, |ui| {
+                            for h in &harnesses { ui.selectable_value(&mut view.form.member_harness, h.clone(), mono(h, 10.5)); }
+                        });
+                        ui.add(egui::TextEdit::singleline(&mut view.form.member_model).hint_text(tr("modelo")).desired_width(110.0).font(egui::FontId::monospace(crate::ui::fs(10.5))));
+                        egui::ComboBox::from_id_salt("member-role").selected_text(mono(&view.form.member_role, 10.5)).width(90.0).show_ui(ui, |ui| {
+                            for r in ["implementer", "reviewer", "planner"] { ui.selectable_value(&mut view.form.member_role, r.to_string(), mono(r, 10.5)); }
+                        });
+                        let name = view.form.member_name.trim().to_string();
+                        if !name.is_empty() && small(ui, &tr("Añadir miembro"), ink) {
+                            let id: String = name.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
+                            let model = view.form.member_model.trim();
+                            commands.push(("member.add", json!({"id": id, "name": name, "harness": view.form.member_harness, "roles": [view.form.member_role], "model": if model.is_empty() { Value::Null } else { json!(model) }})));
+                            view.form.member_name.clear();
+                        }
+                    });
+                }
+                // The form for a new quest.
+                ui.horizontal(|ui| {
+                    if small(ui, &tr("Nueva misión"), ink) { view.form.open = !view.form.open; }
+                    if snap.quests.is_empty() { ui.label(mono(&tr("Sin misiones todavía"), 11.0).color(faint)); }
+                });
+                if view.form.open {
+                    Frame::new().fill(Color32::from_rgb(229, 206, 152)).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = vec2(5.0, 4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(mono(&tr("Proyecto"), 10.5).color(ink));
+                            if snap.projects.is_empty() {
+                                ui.add(egui::TextEdit::singleline(&mut view.form.repo_path).hint_text(tr("ruta del repositorio")).desired_width(220.0).font(egui::FontId::monospace(crate::ui::fs(10.5))));
+                            } else {
+                                if view.form.project_id.is_empty() { view.form.project_id = snap.projects[0].id.clone(); }
+                                let shown = snap.projects.iter().find(|p| p.id == view.form.project_id).map(|p| p.name.clone()).unwrap_or_default();
+                                egui::ComboBox::from_id_salt("quest-project").selected_text(mono(&shown, 10.5)).width(150.0).show_ui(ui, |ui| {
+                                    for p in &snap.projects { ui.selectable_value(&mut view.form.project_id, p.id.clone(), mono(&p.name, 10.5)); }
+                                });
+                                ui.add(egui::TextEdit::singleline(&mut view.form.repo_path).hint_text(tr("u otra ruta")).desired_width(90.0).font(egui::FontId::monospace(crate::ui::fs(10.5))));
+                            }
+                        });
+                        ui.add(egui::TextEdit::singleline(&mut view.form.title).hint_text(tr("Título de la misión")).desired_width(f32::INFINITY).font(egui::FontId::monospace(crate::ui::fs(11.0))));
+                        ui.add(egui::TextEdit::multiline(&mut view.form.tasks).hint_text(tr("Una tarea por línea: Título :: instrucciones\n> depende de la tarea anterior")).desired_rows(4).desired_width(f32::INFINITY).font(egui::FontId::monospace(crate::ui::fs(10.5))));
+                        let tasks = QuestForm::parse_tasks(&view.form.tasks);
+                        ui.horizontal(|ui| {
+                            let ready = !view.form.title.trim().is_empty() && !tasks.is_empty() && (!view.form.project_id.is_empty() || !view.form.repo_path.trim().is_empty());
+                            ui.label(mono(&trf("{} tareas", &[&tasks.len()]), 10.0).color(faint));
+                            if ready {
+                                if small(ui, &tr("Crear e iniciar"), ink) { create = Some(true); }
+                                if small(ui, &tr("Crear"), ink) { create = Some(false); }
+                            }
+                            if small(ui, &tr("Cancelar"), ink) { view.form.open = false; }
+                        });
+                    });
                 }
                 egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| {
                     for q in &snap.quests {
@@ -577,6 +795,7 @@ pub fn board(ctx: &Context, view: &mut GuildView) -> BoardAction {
             });
     });
     for (method, params) in commands { view.command(method, params); }
+    if let Some(start) = create { view.form.open = false; view.create_quest(start); }
     if start_service { view.start_service(); }
     action
 }
@@ -596,7 +815,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
     };
     let attempt = |id: &str, task: &str, member: &str, harness: HarnessKind, model: &str, state: AttemptState| Attempt {
         id: id.into(), task_id: task.into(), task_version: 1, quest_id: "q1".into(), project_id: "verbrawl".into(), member_id: member.into(), harness, model_requested: Some(model.into()), model_effective: Some(model.into()),
-        state, workspace_id: Some(format!("w-{id}")), session_id: None, generation: 1, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 1,
+        state, workspace_id: Some(format!("w-{id}")), session_id: None, generation: 1, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 1, resumed: 0,
         started_at: Some(t.clone()), finished_at: None, created_at: t.clone(), updated_at: t.clone(),
     };
     let workspace = |id: &str, branch: &str| Workspace { id: format!("w-{id}"), project_id: "verbrawl".into(), attempt_id: id.into(), path: format!("~/demo/verbrawl/worktrees/{id}"), branch: branch.into(), base_sha: "490acd6".into(), state: WorkspaceState::Active, created_at: t.clone(), updated_at: t.clone() };
@@ -609,7 +828,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         PermissionOption { id: "reject".into(), name: "Reject".into(), kind: "reject_once".into() },
     ], asked_at: t.clone() });
     let mut a4 = attempt("a4", "t4", "lira", HarnessKind::Claude, "claude-opus-5.5", AttemptState::Submitted);
-    a4.candidate = Some(Candidate { base_sha: "490acd6".into(), head_sha: "dcdbee6".into(), tree_sha: "e3b0c44".into(), files_changed: 3, insertions: 48, deletions: 6, diff_artifact_id: None });
+    a4.candidate = Some(Candidate { base_sha: "490acd6".into(), head_sha: "dcdbee6".into(), tree_sha: "e3b0c44".into(), files_changed: 3, insertions: 48, deletions: 6, diff_artifact_id: Some("art-demo".into()) });
     a4.verifier_results = vec![VerifierResult { id: "unit".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1840, log_artifact_id: None, tail: "12 passed".into() }];
     a4.summary = tr("Fixtures y pruebas del contrato listos");
     if tick % 2 == 1 {

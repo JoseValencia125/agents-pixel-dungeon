@@ -710,7 +710,10 @@ impl eframe::App for App {
                 if let Some(id) = id { self.monitor.select(Some(id)); }
             }
         }
-        if std::env::var("HPD_TEST_BOARD").is_ok() && now > 1.0 && now < 1.2 { self.show_board = true; }
+        if let Ok(v) = std::env::var("HPD_TEST_BOARD") {
+            if now > 1.0 && now < 1.2 { self.show_board = true; self.guild.form.open = v == "form"; }
+        }
+        if std::env::var("HPD_TEST_DIFF").is_ok() && now > 1.0 && now < 1.2 { self.guild.diff_open = true; }
         // HPD_TEST_SHOT=<file.png>: save what the window shows after 3 s, for
         // captures when the screen cannot be grabbed (another space is full screen).
         if let Ok(path) = std::env::var("HPD_TEST_SHOT") {

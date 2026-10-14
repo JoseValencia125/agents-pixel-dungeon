@@ -229,7 +229,9 @@ fn handle_notification(method: &str, msg: &Value, inner: &Arc<Mutex<Inner>>) {
             let status = update.get("status").and_then(Value::as_str).unwrap_or(if kind == "tool_call" { "pending" } else { "in_progress" }).to_string();
             guard.tools.insert(id.clone(), (title.clone(), tool_kind.clone()));
             let action = action_for_tool(&tool_kind, &title).to_string();
-            HarnessEvent::Tool { id, title, kind: tool_kind, status, action }
+            let paths: Vec<String> = update.get("locations").and_then(Value::as_array).into_iter().flatten()
+                .filter_map(|l| l.get("path").and_then(Value::as_str)).map(str::to_string).collect();
+            HarnessEvent::Tool { id, title, kind: tool_kind, status, action, paths }
         }
         "plan" => HarnessEvent::Plan(update.get("entries").cloned().unwrap_or(Value::Null)),
         "config_option_update" | "current_mode_update" | "available_commands_update" => {
@@ -317,38 +319,11 @@ fn current_model(result: &Value) -> Option<String> {
     result.get("models").and_then(|m| m.get("currentModelId")).and_then(Value::as_str).map(str::to_string)
 }
 
-impl HarnessAdapter for KiroAcp {
-    fn kind(&self) -> HarnessKind { HarnessKind::Kiro }
-
-    fn probe(&self) -> HarnessResult<Capabilities> {
-        if !self.binary.exists() {
-            return Err(HarnessError::RuntimeFailed(format!("kiro-cli not found ({})", self.binary.display())));
-        }
-        let output = Command::new(&self.binary).arg("--version").output().map_err(|e| HarnessError::RuntimeFailed(e.to_string()))?;
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let mut extensions = BTreeMap::new();
-        extensions.insert("engine".into(), json!(if self.engine == Engine::V3 { "v3" } else { "v2" }));
-        extensions.insert("binary".into(), json!(self.binary.display().to_string()));
-        Ok(Capabilities {
-            adapter_version: ADAPTER_VERSION.into(),
-            runtime_version: version,
-            protocol_version: Some("acp-1".into()),
-            transport: Transport::Acp,
-            create_session: Support::Supported,
-            resume_session: Support::Unknown,
-            cancel_turn: Support::Supported,
-            structured_events: Support::Supported,
-            permission_requests: Support::Supported,
-            model_discovery: Support::Supported,
-            model_switch: ModelSwitch::BetweenTurns,
-            usage_reporting: Support::Unknown,
-            native_fork: Support::Unknown,
-            max_concurrent_sessions: None,
-            extensions,
-        })
-    }
-
-    fn create_session(&self, options: &SessionOptions) -> HarnessResult<SessionRef> {
+impl KiroAcp {
+    /// Start a kiro-cli process and open a session in it: a new one, or
+    /// (`load` = its native id) one kiro-cli persisted, through ACP's
+    /// `session/load`, which replays its history first.
+    fn open_session(&self, options: &SessionOptions, load: Option<&str>) -> HarnessResult<SessionRef> {
         let id = crate::domain::new_id();
         let proc = self.spawn(&options.cwd, &format!("kiro-{id}"))?;
         let init = proc.call(
@@ -367,24 +342,30 @@ impl HarnessAdapter for KiroAcp {
             proc.kill();
             return Err(HarnessError::RuntimeFailed("kiro-cli did not start the v3 engine (no extensionMethods announced)".into()));
         }
+        if load.is_some() && init.pointer("/agentCapabilities/loadSession").and_then(Value::as_bool) != Some(true) {
+            proc.kill();
+            return Err(HarnessError::UnsupportedCapability("resume_session"));
+        }
         let mut params = json!({"cwd": options.cwd.display().to_string(), "mcpServers": []});
-        if self.engine == Engine::V3 {
+        if let Some(native) = load { params["sessionId"] = json!(native); }
+        if self.engine == Engine::V3 && load.is_none() {
             let mut meta = serde_json::Map::new();
             if let Some(m) = &options.model_id { meta.insert("modelId".into(), json!(m)); }
             if let Some(mode) = &options.mode { meta.insert("modeId".into(), json!(mode)); }
             if !meta.is_empty() { params["_meta"] = json!({"kiro": meta}); }
         }
-        let created = match proc.call("session/new", params, SESSION_TIMEOUT) {
+        let method = if load.is_some() { "session/load" } else { "session/new" };
+        let created = match proc.call(method, params, SESSION_TIMEOUT) {
             Ok(v) => v,
             Err(err) => {
                 proc.kill();
                 return Err(err);
             }
         };
-        let native = created.get("sessionId").and_then(Value::as_str).map(str::to_string);
+        let native = created.get("sessionId").and_then(Value::as_str).map(str::to_string).or_else(|| load.map(str::to_string));
         let Some(native) = native else {
             proc.kill();
-            return Err(HarnessError::InvalidOutput("session/new returned no sessionId".into()));
+            return Err(HarnessError::InvalidOutput(format!("{method} returned no sessionId")));
         };
         *proc.native_session.lock().unwrap() = Some(native.clone());
         let (config, models) = parse_models(&created);
@@ -408,6 +389,52 @@ impl HarnessAdapter for KiroAcp {
             }
         }
         Ok(session)
+    }
+}
+
+impl HarnessAdapter for KiroAcp {
+    fn kind(&self) -> HarnessKind { HarnessKind::Kiro }
+
+    fn probe(&self) -> HarnessResult<Capabilities> {
+        if !self.binary.exists() {
+            return Err(HarnessError::RuntimeFailed(format!("kiro-cli not found ({})", self.binary.display())));
+        }
+        let output = Command::new(&self.binary).arg("--version").output().map_err(|e| HarnessError::RuntimeFailed(e.to_string()))?;
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let mut extensions = BTreeMap::new();
+        extensions.insert("engine".into(), json!(if self.engine == Engine::V3 { "v3" } else { "v2" }));
+        extensions.insert("binary".into(), json!(self.binary.display().to_string()));
+        Ok(Capabilities {
+            adapter_version: ADAPTER_VERSION.into(),
+            runtime_version: version,
+            protocol_version: Some("acp-1".into()),
+            transport: Transport::Acp,
+            create_session: Support::Supported,
+            // v3 announces loadSession and fork in initialize; v2 is not probed.
+            resume_session: if self.engine == Engine::V3 { Support::Supported } else { Support::Unknown },
+            cancel_turn: Support::Supported,
+            structured_events: Support::Supported,
+            permission_requests: Support::Supported,
+            model_discovery: Support::Supported,
+            model_switch: ModelSwitch::BetweenTurns,
+            usage_reporting: Support::Unknown,
+            native_fork: if self.engine == Engine::V3 { Support::Supported } else { Support::Unknown },
+            mcp: Support::Supported,
+            subagents: Support::Unknown,
+            plan_mode: if self.engine == Engine::V3 { Support::Supported } else { Support::Unknown },
+            screenshots: Support::Unsupported,
+            steering: Support::Unsupported,
+            max_concurrent_sessions: None,
+            extensions,
+        })
+    }
+
+    fn create_session(&self, options: &SessionOptions) -> HarnessResult<SessionRef> {
+        self.open_session(options, None)
+    }
+
+    fn resume_session(&self, options: &SessionOptions, native_id: &str) -> HarnessResult<SessionRef> {
+        self.open_session(options, Some(native_id))
     }
 
     fn prompt(&self, session: &SessionRef, request_id: &str, text: &str) -> HarnessResult<TurnHandle> {

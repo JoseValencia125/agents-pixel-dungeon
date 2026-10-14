@@ -25,6 +25,7 @@ struct MockState {
     sessions: Vec<(String, PathBuf, Option<String>)>,
     pending: Vec<(String, String, std::sync::mpsc::Sender<bool>)>,
     interrupted: Vec<String>,
+    resumed: Vec<String>,
 }
 
 pub struct MockHarness {
@@ -39,6 +40,8 @@ impl MockHarness {
         MockHarness { behaviour: Mutex::new(behaviour), delay_ms: 50, state: Arc::default() }
     }
     pub fn set_behaviour(&self, b: MockBehaviour) { *self.behaviour.lock().unwrap() = b; }
+    /// Session ids that were reopened through `resume_session`.
+    pub fn resumed(&self) -> Vec<String> { self.state.lock().unwrap().resumed.clone() }
 }
 
 impl HarnessAdapter for MockHarness {
@@ -51,7 +54,7 @@ impl HarnessAdapter for MockHarness {
             protocol_version: None,
             transport: Transport::Mock,
             create_session: Support::Supported,
-            resume_session: Support::Unsupported,
+            resume_session: Support::Supported,
             cancel_turn: Support::Supported,
             structured_events: Support::Supported,
             permission_requests: Support::Supported,
@@ -59,6 +62,11 @@ impl HarnessAdapter for MockHarness {
             model_switch: ModelSwitch::BetweenTurns,
             usage_reporting: Support::Unsupported,
             native_fork: Support::Unsupported,
+            mcp: Support::Unsupported,
+            subagents: Support::Unsupported,
+            plan_mode: Support::Unsupported,
+            screenshots: Support::Unsupported,
+            steering: Support::Unsupported,
             max_concurrent_sessions: None,
             extensions: Default::default(),
         })
@@ -68,6 +76,16 @@ impl HarnessAdapter for MockHarness {
         let id = crate::domain::new_id();
         self.state.lock().unwrap().sessions.push((id.clone(), options.cwd.clone(), options.model_id.clone()));
         Ok(SessionRef { id: id.clone(), native_id: Some(format!("mock-{id}")) })
+    }
+
+    fn resume_session(&self, options: &SessionOptions, native_id: &str) -> HarnessResult<SessionRef> {
+        let Some(id) = native_id.strip_prefix("mock-") else { return Err(HarnessError::InvalidOutput(format!("not a mock session: {native_id}"))) };
+        let id = id.to_string();
+        let mut st = self.state.lock().unwrap();
+        st.resumed.push(id.clone());
+        st.sessions.retain(|s| s.0 != id);
+        st.sessions.push((id.clone(), options.cwd.clone(), options.model_id.clone()));
+        Ok(SessionRef { id, native_id: Some(native_id.into()) })
     }
 
     fn prompt(&self, session: &SessionRef, request_id: &str, _text: &str) -> HarnessResult<TurnHandle> {
@@ -87,12 +105,12 @@ impl HarnessAdapter for MockHarness {
             .name("mock-harness".into())
             .spawn(move || {
                 let finish = |file: &str, content: &str| {
-                    let _ = ev_tx.send(HarnessEvent::Tool { id: "t1".into(), title: "read_file".into(), kind: "read".into(), status: "completed".into(), action: "read".into() });
+                    let _ = ev_tx.send(HarnessEvent::Tool { id: "t1".into(), title: "read_file".into(), kind: "read".into(), status: "completed".into(), action: "read".into(), paths: vec![] });
                     std::thread::sleep(Duration::from_millis(delay));
                     let path = cwd.join(file);
                     if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
                     let _ = std::fs::write(&path, content);
-                    let _ = ev_tx.send(HarnessEvent::Tool { id: "t2".into(), title: "write_file".into(), kind: "edit".into(), status: "completed".into(), action: "forge".into() });
+                    let _ = ev_tx.send(HarnessEvent::Tool { id: "t2".into(), title: "write_file".into(), kind: "edit".into(), status: "completed".into(), action: "forge".into(), paths: vec![file.to_string()] });
                     let _ = ev_tx.send(HarnessEvent::Text(format!("Wrote {file}. Done.")));
                     let _ = res_tx.send(TurnOutcome::Completed { stop_reason: "end_turn".into() });
                 };

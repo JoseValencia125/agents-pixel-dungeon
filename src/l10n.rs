@@ -12,6 +12,9 @@ pub const LANGUAGES: [&str; 5] = ["es", "en", "fr", "it", "pt"];
 pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock::new(|| {
     let rows: &[(&str, [&str; 4])] = &[
         // The guild: quests, tasks and attempts
+        ("Interrumpir", ["Interrupt", "Interrompre", "Interrompi", "Interromper"]),
+        ("Crear", ["Create", "Créer", "Crea", "Criar"]),
+        ("modelo", ["model", "modèle", "modello", "modelo"]),
         ("Tablón de misiones", ["Quest board", "Tableau des quêtes", "Bacheca delle missioni", "Quadro de missões"]),
         ("Servicio de la guild apagado", ["Guild service off", "Service de la guilde arrêté", "Servizio della gilda spento", "Serviço da guilda desligado"]),
         ("Servicio de la guild conectado", ["Guild service connected", "Service de la guilde connecté", "Servizio della gilda collegato", "Serviço da guilda ligado"]),

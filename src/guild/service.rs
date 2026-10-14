@@ -5,7 +5,7 @@
 
 use crate::api::{ApiError, ApiResult, Handler};
 use crate::domain::*;
-use crate::harness::{HarnessAdapter, HarnessEvent, SessionOptions, SessionRef, TurnOutcome};
+use crate::harness::{HarnessAdapter, HarnessEvent, SessionOptions, SessionRef, Support, TurnOutcome};
 use crate::store::Store;
 use crate::{config, scheduler, workspaces};
 use serde_json::{json, Value};
@@ -37,6 +37,9 @@ struct Running {
     session: SessionRef,
     harness: HarnessKind,
     cancel_requested: bool,
+    /// Stop the turn but keep the attempt: whatever is in the worktree
+    /// becomes the candidate.
+    interrupt_requested: bool,
     started: Instant,
 }
 
@@ -118,8 +121,8 @@ impl Service {
         let mut out = vec![];
         for a in adapters {
             let status = match a.probe() {
-                Ok(c) => HarnessStatus { kind: a.kind(), available: true, runtime_version: c.runtime_version, detail: format!("{:?} transport", c.transport), models: vec![] },
-                Err(e) => HarnessStatus { kind: a.kind(), available: false, runtime_version: String::new(), detail: e.to_string(), models: vec![] },
+                Ok(c) => HarnessStatus { kind: a.kind(), available: true, runtime_version: c.runtime_version.clone(), detail: format!("{:?} transport", c.transport), models: vec![], capabilities: Some(c) },
+                Err(e) => HarnessStatus { kind: a.kind(), available: false, runtime_version: String::new(), detail: e.to_string(), models: vec![], capabilities: None },
             };
             out.push(status);
         }
@@ -187,6 +190,31 @@ impl Service {
             AttemptState::Queued => "attempt.queued",
         };
         self.emit_locked(&store, Event::new(kind, "guild").about_attempt(&a).with(json!({"state": to, "failure": a.failure})));
+        if to.is_terminal() {
+            // One row per finished attempt, so routing can learn from history later.
+            let task = store.task(&a.task_id)?;
+            let member = store.member(&a.member_id)?;
+            let duration_ms = a.started_at.as_deref().zip(a.finished_at.as_deref()).and_then(|(s, f)| {
+                let s = chrono::DateTime::parse_from_rfc3339(s).ok()?;
+                let f = chrono::DateTime::parse_from_rfc3339(f).ok()?;
+                Some((f - s).num_milliseconds())
+            });
+            self.emit_locked(&store, Event::new("attempt.finished", "guild").about_attempt(&a).with(json!({
+                "result": to,
+                "role": task.as_ref().map(|t| t.role.clone()),
+                "member": member.as_ref().map(|m| m.name.clone()),
+                "harness": a.harness,
+                "model": a.model_effective.clone().or(a.model_requested.clone()),
+                "durationMs": duration_ms,
+                "turns": a.turns,
+                "resumed": a.resumed,
+                "attemptNumber": task.as_ref().map(|t| t.attempts_made),
+                "filesChanged": a.candidate.as_ref().map(|c| c.files_changed),
+                "verifiersPassed": a.verifier_results.iter().filter(|v| v.status == "passed").count(),
+                "verifiersFailed": a.verifier_results.iter().filter(|v| v.status != "passed").count(),
+                "failure": a.failure,
+            })));
+        }
         Ok(a)
     }
 
@@ -306,6 +334,7 @@ impl Service {
                     failure: None,
                     verifier_results: vec![],
                     turns: 0,
+                    resumed: 0,
                     started_at: Some(now()),
                     finished_at: None,
                     created_at: now(),
@@ -334,7 +363,7 @@ impl Service {
         // Reserve the slot before the thread starts, so the next tick counts it.
         self.running.lock().unwrap().insert(
             attempt_id.clone(),
-            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessKind::Mock, cancel_requested: false, started: Instant::now() },
+            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessKind::Mock, cancel_requested: false, interrupt_requested: false, started: Instant::now() },
         );
         let service = self.clone();
         std::thread::Builder::new()
@@ -345,6 +374,30 @@ impl Service {
                 if let Err(e) = outcome {
                     service.log(&format!("attempt {attempt_id}: {e}"));
                     let _ = service.finish_attempt(&attempt_id, TurnOutcome::Failed { reason: e.to_string() });
+                }
+                service.tick();
+            })
+            .ok();
+    }
+
+    /// Like `spawn_driver`, for an attempt reopened after a restart. If
+    /// the session cannot be reopened the attempt is lost, as it was.
+    fn spawn_resumer(self: &Arc<Service>, attempt_id: String, native_id: String) {
+        self.running.lock().unwrap().insert(
+            attempt_id.clone(),
+            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessKind::Mock, cancel_requested: false, interrupt_requested: false, started: Instant::now() },
+        );
+        let service = self.clone();
+        std::thread::Builder::new()
+            .name(format!("resume-{}", &attempt_id[attempt_id.len().saturating_sub(6)..]))
+            .spawn(move || {
+                let outcome = service.resume(&attempt_id, &native_id);
+                service.running.lock().unwrap().remove(&attempt_id);
+                if let Err(e) = outcome {
+                    service.log(&format!("attempt {attempt_id}: resume failed: {e}"));
+                    let task = service.store.lock().unwrap().attempt(&attempt_id).ok().flatten().and_then(|a| service.store.lock().unwrap().task(&a.task_id).ok().flatten());
+                    let _ = service.move_attempt(&attempt_id, AttemptState::Lost, Some(format!("the service restarted and the session could not be reopened: {e}")));
+                    if let Some(t) = task { let _ = service.after_failed_attempt(&t, "lost"); }
                 }
                 service.tick();
             })
@@ -387,32 +440,61 @@ impl Service {
         let role_prompt = if member.role_prompt.trim().is_empty() { config::default_role_prompt(&task.role) } else { member.role_prompt.clone() };
         let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_requested.clone(), mode: member.mode.clone(), role_prompt: role_prompt.clone() };
         let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
+        let prompt = compose_prompt(&role_prompt, &task, &workspace);
+        self.run_turn(attempt_id, &attempt, &member, &adapter, session, &prompt)
+    }
+
+    /// Go on with an attempt whose harness session survived a restart:
+    /// reopen the session in the same worktree and ask it to continue.
+    fn resume(self: &Arc<Service>, attempt_id: &str, native_id: &str) -> Res<()> {
+        let (attempt, task, member, workspace) = {
+            let store = self.store.lock().unwrap();
+            let a = store.attempt(attempt_id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
+            let t = store.task(&a.task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
+            let m = store.member(&a.member_id)?.ok_or_else(|| ApiError::not_found("member"))?;
+            let w = a.workspace_id.as_ref().and_then(|id| store.workspace(id).ok().flatten()).ok_or_else(|| ApiError::not_found("workspace"))?;
+            (a, t, m, w)
+        };
+        if !Path::new(&workspace.path).exists() { return Err(ApiError::conflict("the worktree is gone")); }
+        let adapter = self.adapter(member.harness)?;
+        let role_prompt = if member.role_prompt.trim().is_empty() { config::default_role_prompt(&task.role) } else { member.role_prompt.clone() };
+        let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_effective.clone().or(attempt.model_requested.clone()), mode: member.mode.clone(), role_prompt };
+        let session = adapter.resume_session(&options, native_id).map_err(|e| ApiError::new("harness", e.to_string()))?;
+        self.update_attempt(attempt_id, |a| a.resumed += 1)?;
+        self.emit(Event::new("session.resumed", "harness").about_attempt(&attempt).with(json!({"nativeId": native_id, "harness": member.harness})));
+        let prompt = "The guild restarted while you were working. Your worktree is as you left it. Continue the task from where you stopped; if it was already complete, say so and finish with the summary.".to_string();
+        self.run_turn(attempt_id, &attempt, &member, &adapter, session, &prompt)
+    }
+
+    /// Record the session, send one prompt, follow it to the end, close the
+    /// session and finish the attempt. Shared by first runs and resumes.
+    fn run_turn(self: &Arc<Service>, attempt_id: &str, attempt: &Attempt, member: &Member, adapter: &Arc<dyn HarnessAdapter>, session: SessionRef, prompt: &str) -> Res<()> {
         let runtime_version = self.harness_status.lock().unwrap().iter().find(|s| s.kind == member.harness).map(|s| s.runtime_version.clone()).unwrap_or_default();
         let session_row = Session { id: session.id.clone(), attempt_id: attempt_id.into(), harness: member.harness, native_id: session.native_id.clone(), runtime_version, state: "running".into(), created_at: now(), updated_at: now() };
         {
             let store = self.store.lock().unwrap();
             store.put_session(&session_row)?;
-            self.emit_locked(&store, Event::new("session.started", "harness").about_attempt(&attempt).with(json!({"sessionId": session.id, "nativeId": session.native_id, "harness": member.harness})));
+            self.emit_locked(&store, Event::new("session.started", "harness").about_attempt(attempt).with(json!({"sessionId": session.id, "nativeId": session.native_id, "harness": member.harness})));
         }
-        let effective = attempt.model_requested.clone();
+        let effective = attempt.model_effective.clone().or(attempt.model_requested.clone());
         self.update_attempt(attempt_id, |a| {
             a.session_id = Some(session.id.clone());
             a.model_effective = effective;
-            a.turns = 1;
+            a.turns += 1;
+            a.pending_permission = None;
         })?;
         {
             let mut running = self.running.lock().unwrap();
-            let slot = running.entry(attempt_id.to_string()).or_insert(Running { session: session.clone(), harness: member.harness, cancel_requested: false, started: Instant::now() });
+            let slot = running.entry(attempt_id.to_string()).or_insert(Running { session: session.clone(), harness: member.harness, cancel_requested: false, interrupt_requested: false, started: Instant::now() });
             slot.session = session.clone();
             slot.harness = member.harness;
         }
         self.move_attempt(attempt_id, AttemptState::Running, None)?;
-        let prompt = compose_prompt(&role_prompt, &task, &workspace);
-        let handle = adapter.prompt(&session, attempt_id, &prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
-        self.emit(Event::new("turn.started", "guild").about_attempt(&attempt).with(json!({"turnId": handle.turn_id, "promptChars": prompt.len()})));
-        let outcome = self.follow_turn(attempt_id, &attempt, &adapter, &session, handle);
+        let handle = adapter.prompt(&session, attempt_id, prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
+        self.emit(Event::new("turn.started", "guild").about_attempt(attempt).with(json!({"turnId": handle.turn_id, "promptChars": prompt.len()})));
+        let outcome = self.follow_turn(attempt_id, attempt, adapter, &session, handle);
         let stopped = adapter.stop(&session).unwrap_or(false);
-        self.emit(Event::new("session.closed", "harness").about_attempt(&attempt).with(json!({"confirmed": stopped})));
+        self.emit(Event::new("session.closed", "harness").about_attempt(attempt).with(json!({"confirmed": stopped})));
         self.finish_attempt(attempt_id, outcome)
     }
 
@@ -429,7 +511,16 @@ impl Service {
         let mut interrupted_at: Option<Instant> = None;
         let mut timed_out = false;
         let mut tools_open: HashMap<String, String> = HashMap::new();
+        let mut phase: Option<&'static str> = None;
         let mut events_closed = false;
+        // An interrupted turn ends as a completed one: the worktree is the candidate.
+        let settle = |outcome: TurnOutcome, s: &Service| -> TurnOutcome {
+            let interrupted = s.running.lock().unwrap().get(attempt_id).map(|r| r.interrupt_requested && !r.cancel_requested).unwrap_or(false);
+            match outcome {
+                TurnOutcome::Cancelled if interrupted => TurnOutcome::Completed { stop_reason: "interrupted".into() },
+                other => other,
+            }
+        };
         let flush = |text: &mut String, s: &Service| {
             if text.trim().is_empty() { text.clear(); return; }
             let chunk = std::mem::take(text);
@@ -440,15 +531,15 @@ impl Service {
         loop {
             if let Ok(outcome) = handle.result.try_recv() {
                 // Drain whatever the adapter still has queued.
-                while let Ok(ev) = handle.events.try_recv() { self.turn_event(attempt_id, attempt, ev, &mut text, &mut tools_open); }
+                while let Ok(ev) = handle.events.try_recv() { self.turn_event(attempt_id, attempt, ev, &mut text, &mut tools_open, &mut phase); }
                 flush(&mut text, self);
-                return if timed_out { TurnOutcome::Failed { reason: "timed out".into() } } else { outcome };
+                return if timed_out { TurnOutcome::Failed { reason: "timed out".into() } } else { settle(outcome, self) };
             }
             if !events_closed {
                 match handle.events.recv_timeout(Duration::from_millis(300)) {
                     Ok(ev) => {
                         let is_tool = matches!(ev, HarnessEvent::Tool { .. } | HarnessEvent::PermissionRequested { .. });
-                        self.turn_event(attempt_id, attempt, ev, &mut text, &mut tools_open);
+                        self.turn_event(attempt_id, attempt, ev, &mut text, &mut tools_open, &mut phase);
                         if is_tool { flush(&mut text, self); last_flush = Instant::now(); }
                     }
                     Err(RecvTimeoutError::Timeout) => {}
@@ -458,7 +549,7 @@ impl Service {
                 match handle.result.recv_timeout(Duration::from_millis(300)) {
                     Ok(outcome) => {
                         flush(&mut text, self);
-                        return if timed_out { TurnOutcome::Failed { reason: "timed out".into() } } else { outcome };
+                        return if timed_out { TurnOutcome::Failed { reason: "timed out".into() } } else { settle(outcome, self) };
                     }
                     Err(RecvTimeoutError::Disconnected) => {
                         flush(&mut text, self);
@@ -468,15 +559,15 @@ impl Service {
                 }
             }
             if last_flush.elapsed() > Duration::from_secs(2) { flush(&mut text, self); last_flush = Instant::now(); }
-            let (cancel, started) = {
+            let (cancel, interrupt, started) = {
                 let running = self.running.lock().unwrap();
-                running.get(attempt_id).map(|r| (r.cancel_requested, r.started)).unwrap_or((true, Instant::now()))
+                running.get(attempt_id).map(|r| (r.cancel_requested, r.interrupt_requested, r.started)).unwrap_or((true, false, Instant::now()))
             };
             if !timed_out && started.elapsed() > self.settings.attempt_timeout {
                 timed_out = true;
                 self.emit(Event::new("attempt.timeout", "guild").about_attempt(attempt).with(json!({"afterSeconds": self.settings.attempt_timeout.as_secs()})));
             }
-            if (cancel || timed_out) && interrupted_at.is_none() {
+            if (cancel || interrupt || timed_out) && interrupted_at.is_none() {
                 let _ = adapter.interrupt(session);
                 interrupted_at = Some(Instant::now());
             }
@@ -484,27 +575,39 @@ impl Service {
                 if at.elapsed() > self.settings.cancel_timeout {
                     flush(&mut text, self);
                     let _ = adapter.stop(session);
-                    return if timed_out { TurnOutcome::Failed { reason: "timed out".into() } } else { TurnOutcome::Cancelled };
+                    return if timed_out { TurnOutcome::Failed { reason: "timed out".into() } } else { settle(TurnOutcome::Cancelled, self) };
                 }
             }
         }
     }
 
-    fn turn_event(&self, attempt_id: &str, attempt: &Attempt, ev: HarnessEvent, text: &mut String, tools_open: &mut HashMap<String, String>) {
+    /// Record a change of what the agent is doing, once per change:
+    /// `agent.thinking`, `agent.working` or `agent.waiting`.
+    fn set_phase(&self, attempt: &Attempt, phase: &mut Option<&'static str>, to: &'static str) {
+        if *phase == Some(to) { return; }
+        *phase = Some(to);
+        self.emit(Event::new(match to { "thinking" => "agent.thinking", "waiting" => "agent.waiting", _ => "agent.working" }, "harness").about_attempt(attempt));
+    }
+
+    fn turn_event(&self, attempt_id: &str, attempt: &Attempt, ev: HarnessEvent, text: &mut String, tools_open: &mut HashMap<String, String>, phase: &mut Option<&'static str>) {
         match ev {
-            HarnessEvent::Text(chunk) => text.push_str(&chunk),
-            HarnessEvent::Thought(_) => {}
-            HarnessEvent::Tool { id, title, kind, status, action } => {
+            HarnessEvent::Text(chunk) => { self.set_phase(attempt, phase, "working"); text.push_str(&chunk) }
+            HarnessEvent::Thought(_) => self.set_phase(attempt, phase, "thinking"),
+            HarnessEvent::Tool { id, title, kind, status, action, paths } => {
+                self.set_phase(attempt, phase, "working");
                 let first = !tools_open.contains_key(&id);
                 let finished = status == "completed" || status == "failed";
                 if first {
                     tools_open.insert(id.clone(), title.clone());
                     let _ = self.update_attempt(attempt_id, |a| a.action = Some(action.clone()));
-                    self.emit(Event::new("tool.started", "harness").about_attempt(attempt).with(json!({"toolId": id, "title": title, "kind": kind, "action": action})));
+                    self.emit(Event::new("tool.started", "harness").about_attempt(attempt).with(json!({"toolId": id, "title": title, "kind": kind, "action": action, "paths": paths})));
                 }
                 if finished {
                     tools_open.remove(&id);
-                    self.emit(Event::new("tool.completed", "harness").about_attempt(attempt).with(json!({"toolId": id, "title": title, "status": status})));
+                    self.emit(Event::new("tool.completed", "harness").about_attempt(attempt).with(json!({"toolId": id, "title": title, "status": status, "paths": paths})));
+                    if status == "completed" && matches!(kind.as_str(), "edit" | "delete" | "move") && !paths.is_empty() {
+                        self.emit(Event::new("file.changed", "harness").about_attempt(attempt).with(json!({"paths": paths, "toolId": id, "kind": kind})));
+                    }
                 }
             }
             HarnessEvent::Plan(entries) => {
@@ -516,6 +619,7 @@ impl Service {
                 self.emit(Event::new("model.changed", "harness").about_attempt(attempt).with(json!({"effective": effective, "reason": reason})));
             }
             HarnessEvent::PermissionRequested { request_id, title, detail, options } => {
+                self.set_phase(attempt, phase, "waiting");
                 let request = PermissionRequest { request_id: request_id.clone(), title: title.clone(), detail: detail.clone(), options: options.clone(), asked_at: now() };
                 let _ = self.update_attempt(attempt_id, |a| a.pending_permission = Some(request.clone()));
                 let _ = self.move_attempt(attempt_id, AttemptState::WaitingInput, None);
@@ -537,6 +641,12 @@ impl Service {
             (a, t, p, w)
         };
         if attempt.state.is_terminal() { return Ok(()); }
+        // While the service shuts down the attempt stays as it is: the next
+        // start resumes the session or adopts the worktree as its candidate.
+        if self.stop.load(Ordering::Relaxed) {
+            self.log(&format!("attempt {attempt_id}: left {:?} for the next start", attempt.state));
+            return Ok(());
+        }
         match outcome {
             TurnOutcome::Completed { stop_reason } => {
                 self.emit(Event::new("turn.completed", "harness").about_attempt(&attempt).with(json!({"stopReason": stop_reason})));
@@ -630,6 +740,17 @@ impl Service {
             if self.running.lock().unwrap().contains_key(&a.id) { continue; }
             self.log(&format!("reconciling attempt {} ({:?})", a.id, a.state));
             let workspace = a.workspace_id.as_ref().and_then(|id| self.store.lock().unwrap().workspace(id).ok().flatten());
+            // A harness that persists sessions gets to continue where it was.
+            if matches!(a.state, AttemptState::Running | AttemptState::WaitingInput) {
+                let native = a.session_id.as_ref().and_then(|id| self.store.lock().unwrap().session(id).ok().flatten()).and_then(|s| s.native_id);
+                let can_resume = self.harness_status.lock().unwrap().iter().find(|s| s.kind == a.harness)
+                    .and_then(|s| s.capabilities.as_ref()).map(|c| c.resume_session == Support::Supported).unwrap_or(false);
+                if let (Some(native), true, true) = (native, can_resume, workspace.as_ref().map(|w| Path::new(&w.path).exists()).unwrap_or(false)) {
+                    self.log(&format!("resuming attempt {} on session {native}", a.id));
+                    self.spawn_resumer(a.id.clone(), native);
+                    continue;
+                }
+            }
             let recovered = workspace.as_ref().filter(|w| Path::new(&w.path).exists()).and_then(|w| workspaces::commit_candidate(w, "guild candidate (recovered after restart)").ok().flatten());
             let task = self.store.lock().unwrap().task(&a.task_id).ok().flatten();
             match (recovered, a.state) {
@@ -646,6 +767,21 @@ impl Service {
                     let _ = self.move_attempt(&a.id, AttemptState::Lost, Some("the service restarted while it ran".into()));
                     if let Some(t) = &task { let _ = self.after_failed_attempt(t, "lost"); }
                 }
+            }
+        }
+    }
+
+    /// Close every live harness session, leaving the attempts in their
+    /// state for the next start to resume.
+    pub fn shutdown(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let live: Vec<(String, HarnessKind, SessionRef)> = self.running.lock().unwrap().iter().map(|(id, r)| (id.clone(), r.harness, r.session.clone())).collect();
+        for (attempt_id, harness, session) in live {
+            if session.id.is_empty() { continue; }
+            let Ok(adapter) = self.adapter(harness) else { continue };
+            let _ = adapter.stop(&session);
+            if let Ok(Some(a)) = self.store.lock().unwrap().attempt(&attempt_id) {
+                self.emit(Event::new("session.closed", "guild").about_attempt(&a).with(json!({"confirmed": true, "reason": "service stopping"})));
             }
         }
     }
@@ -714,6 +850,7 @@ impl Service {
             "task.retry" => self.task_retry(params),
             "task.cancel" => self.task_cancel(params),
             "attempt.cancel" => self.attempt_cancel(p_str(params, "attemptId")?),
+            "attempt.interrupt" => self.attempt_interrupt(p_str(params, "attemptId")?),
             "permission.respond" => self.permission_respond(params),
             "task.accept" => self.task_accept(params),
             "task.reject" => self.task_reject(params),
@@ -951,6 +1088,20 @@ impl Service {
         Ok(json!({"cancelled": task_id}))
     }
 
+    /// End the turn now and keep what the worktree has as the candidate.
+    fn attempt_interrupt(&self, attempt_id: &str) -> ApiResult {
+        let attempt = self.store.lock().unwrap().attempt(attempt_id)?.ok_or_else(|| ApiError::not_found(format!("attempt {attempt_id}")))?;
+        if !matches!(attempt.state, AttemptState::Running | AttemptState::WaitingInput) {
+            return Err(ApiError::conflict(format!("attempt is {:?}, not running", attempt.state)));
+        }
+        let mut running = self.running.lock().unwrap();
+        let Some(r) = running.get_mut(attempt_id) else { return Err(ApiError::conflict("the attempt has no live turn")) };
+        r.interrupt_requested = true;
+        drop(running);
+        self.emit(Event::new("attempt.interrupt_requested", "user").about_attempt(&attempt));
+        Ok(json!({"interrupting": attempt_id}))
+    }
+
     fn attempt_cancel(&self, attempt_id: &str) -> ApiResult {
         let attempt = self.store.lock().unwrap().attempt(attempt_id)?.ok_or_else(|| ApiError::not_found(format!("attempt {attempt_id}")))?;
         if attempt.state.is_terminal() { return Err(ApiError::conflict(format!("attempt is already {:?}", attempt.state))); }
@@ -1128,7 +1279,9 @@ pub fn run(service: Arc<Service>, socket: &Path) -> std::io::Result<()> {
         })
         .ok();
     let handler: Arc<dyn Handler> = Arc::new(service.clone());
-    crate::api::serve(socket, handler, service.stop.clone())
+    let result = crate::api::serve(socket, handler, service.stop.clone());
+    service.shutdown();
+    result
 }
 
 #[allow(dead_code)]
@@ -1213,6 +1366,11 @@ mod tests {
         let kinds: Vec<String> = service.store.lock().unwrap().events_after(0, 1000).unwrap().into_iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&"merge.completed".to_string()));
         assert!(kinds.contains(&"tool.started".to_string()));
+        // The normalized agent events the dungeon draws from.
+        for k in ["agent.working", "file.changed", "attempt.finished", "session.started", "session.closed"] {
+            assert!(kinds.contains(&k.to_string()), "missing {k} in {kinds:?}");
+        }
+        assert_eq!(kinds.iter().filter(|k| *k == "agent.working").count(), 1, "one phase event per change");
         assert!(!kinds.iter().any(|k| k == "task.completed") || kinds.iter().position(|k| k == "task.completed") > kinds.iter().position(|k| k == "attempt.submitted"));
     }
 
@@ -1257,6 +1415,60 @@ mod tests {
         service.handle("attempt.cancel", &json!({"attemptId": snap.attempts[0].id})).unwrap();
         let snap = wait_for(&service, "cancelled", |s| s.attempts[0].state == AttemptState::Cancelled);
         assert_eq!(snap.tasks.iter().find(|t| t.id == "t1").unwrap().state, TaskState::Blocked);
+    }
+
+    #[test]
+    fn interrupting_keeps_the_worktree_as_the_candidate() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Hang);
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Hangs"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "running", |s| s.attempts.first().map(|a| a.state == AttemptState::Running).unwrap_or(false));
+        service.handle("attempt.interrupt", &json!({"attemptId": snap.attempts[0].id})).unwrap();
+        let snap = wait_for(&service, "submitted", |s| s.attempts[0].state == AttemptState::Submitted);
+        assert_eq!(snap.tasks[0].state, TaskState::Verifying);
+        assert!(snap.attempts[0].candidate.is_none(), "nothing was written, so no candidate commit");
+        let kinds: Vec<String> = service.store.lock().unwrap().events_after(0, 1000).unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&"attempt.interrupt_requested".to_string()));
+        assert!(kinds.contains(&"candidate.empty".to_string()));
+    }
+
+    #[test]
+    fn a_restart_resumes_the_session_when_the_harness_can() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let db = home.0.join("guild.db");
+        // First life: an attempt is running when the service "dies".
+        let first = Service::new(Store::open(&db).unwrap(), Settings { attempt_timeout: Duration::from_secs(600), ..Settings::default() });
+        let hang = Arc::new(MockHarness::new(MockBehaviour::Hang));
+        first.register(hang.clone());
+        first.probe_harnesses();
+        first.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        first.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"], "model": "mock-fast"})).unwrap();
+        let quest_id = first.handle("quest.create", &json!({"projectId": "p", "title": "Survive"})).unwrap()["id"].as_str().unwrap().to_string();
+        first.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Keep going"})).unwrap();
+        first.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&first, "running", |s| s.attempts.first().map(|a| a.state == AttemptState::Running).unwrap_or(false));
+        let attempt_id = snap.attempts[0].id.clone();
+        // Second life over the same database: the quest and task are still there,
+        // and the attempt goes on in a reopened session that now finishes.
+        let second = Service::new(Store::open(&db).unwrap(), Settings::default());
+        let mock = Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "done.txt".into(), content: "ok\n".into() }));
+        second.register(mock.clone());
+        second.probe_harnesses();
+        let snap = second.snapshot().unwrap();
+        assert_eq!(snap.quests[0].state, QuestState::Running);
+        assert_eq!(snap.tasks[0].state, TaskState::Running);
+        second.reconcile();
+        let snap = wait_for(&second, "resumed and submitted", |s| s.attempts[0].state == AttemptState::Submitted);
+        assert_eq!(snap.attempts[0].id, attempt_id, "the same attempt, not a new one");
+        assert_eq!(snap.attempts[0].resumed, 1);
+        assert_eq!(snap.attempts[0].turns, 2);
+        assert_eq!(mock.resumed().len(), 1);
+        assert_eq!(snap.attempts[0].candidate.as_ref().unwrap().files_changed, 1);
+        let kinds: Vec<String> = second.store.lock().unwrap().events_after(0, 1000).unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&"session.resumed".to_string()));
+        // Let the first life's hung turn end so its thread stops.
+        let _ = first.handle("attempt.cancel", &json!({"attemptId": attempt_id}));
     }
 
     #[test]

@@ -196,6 +196,9 @@ pub struct Attempt {
     #[serde(default)]
     pub verifier_results: Vec<VerifierResult>,
     pub turns: u32,
+    /// Times the session was reopened after a restart.
+    #[serde(default)]
+    pub resumed: u32,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub created_at: String,
@@ -356,6 +359,8 @@ pub struct HarnessStatus {
     pub detail: String,
     #[serde(default)]
     pub models: Vec<ModelOption>,
+    #[serde(default)]
+    pub capabilities: Option<crate::harness::Capabilities>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

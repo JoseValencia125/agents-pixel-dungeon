@@ -36,6 +36,7 @@ USAGE
   guild reject <task> [--reason TEXT]
   guild integrate <task>
   guild retry <task>  |  guild cancel-task <task>  |  guild cancel <attempt>
+  guild interrupt <attempt>          end the turn now; what the worktree has becomes the candidate
   guild permission <attempt> <option-id|deny>
   guild attempt <attempt>            the attempt, its candidate, verifiers and transcript
   guild events [--follow] [--after SEQ] [--attempt ID]
@@ -274,6 +275,11 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
         }
         "cancel" => {
             let r = call(&ensure_running()?, "attempt.cancel", json!({"attemptId": a.pos(0, "attempt")?}))?;
+            println!("{}", summarize(&r));
+            Ok(())
+        }
+        "interrupt" => {
+            let r = call(&ensure_running()?, "attempt.interrupt", json!({"attemptId": a.pos(0, "attempt")?}))?;
             println!("{}", summarize(&r));
             Ok(())
         }
