@@ -42,6 +42,12 @@ pub fn run() {
     assert_eq!(git_branch(&repo.join("src").to_string_lossy()).as_deref(), Some("feature/x"));
     let _ = std::fs::remove_dir_all(&repo);
     assert!(harness_for("claude") == "claude" && harness_for("Codex CLI") == "codex" && harness_for("opencode") == "hero");
+    // Full-permission launch: only kiro has the flag, and it is the one
+    // kiro-cli chat takes (`-a, --trust-all-tools`); every other harness
+    // offers nothing, so the summon form hides the toggle for them.
+    assert_eq!(crate::herdr::trust_all_args("kiro"), &["--trust-all-tools"], "Kiro's full-permission flag");
+    assert!(crate::herdr::supports_trust_all("kiro"), "Kiro supports full permission");
+    assert!(["claude", "codex", "gemini", "cursor", "opencode", ""].iter().all(|k| crate::herdr::trust_all_args(k).is_empty() && !crate::herdr::supports_trust_all(k)), "Only Kiro offers full permission for now");
     let with_session = decode_snapshot(br#"{"result":{"snapshot":{"agents":[{"pane_id":"a","agent":"claude","agent_session":{"kind":"id","value":"s-1"}}]}}}"#).unwrap();
     assert!(with_session[0].session.as_deref() == Some("s-1") && with_session[0].subagents == 0);
     assert!(tool_action("WebSearch") == "read" && tool_action("Edit") == "forge" && tool_action("Bash") == "brew" && tool_action("Task") == "summon" && tool_action("TodoWrite") == "plan" && tool_action("mcp__x") == "type");
@@ -100,6 +106,7 @@ pub fn run() {
     let _ = std::fs::remove_file(&path);
     let mut prefs = Prefs::load(path.clone());
     assert!(wants_sound(&prefs, AlertKind::NeedsHelp) && wants_sound(&prefs, AlertKind::Finished));
+    assert_eq!(prefs.panel_height, crate::ui::PANEL_HEIGHT, "New settings get the chat's usual height");
     prefs.sound_finished = false;
     prefs.save();
     let reread = Prefs::load(path.clone());
@@ -261,6 +268,14 @@ pub fn run() {
     assert!(flowed[2].starts_with("Tipografía") && flowed[2].ends_with("capturas.") && flowed[3].starts_with("  - Primer paso") && flowed[3].ends_with("de HP.") && flowed[4] == "❯ 1. Yes");
     assert!(job_state("blocked", Some("active"), false) == "working" && job_state("blocked", Some("idle"), false) == "idle" && job_state("blocked", Some("idle"), true) == "blocked" && job_state("working", Some("blocked"), false) == "blocked" && job_state("blocked", None, false) == "blocked", "Job tempo must decide its state");
     let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    for command in ["agent", "/Users/me/.local/bin/agent", "cursor-agent"] {
+        assert_eq!(identify(&args(&[command])), Some("cursor"));
+    }
+    assert_eq!(identify(&args(&["node", "--use-system-ca", "/Users/me/.local/share/cursor-agent/versions/2026.10.14/index.js"])), Some("cursor"));
+    assert_eq!(identify(&args(&["agent", "--version"])), None);
+    assert_eq!(crate::herdr::harness_for("cursor-project-1234"), "cursor");
+    assert_eq!(crate::herdr::harness_for("agent"), "cursor");
+    assert_eq!(crate::herdr::harness_for("unknown-agent"), "hero");
     assert_eq!(identify(&args(&["claude"])), Some("claude"));
     assert_eq!(identify(&args(&["/Users/me/.local/share/claude/versions/2.1.295", "--resume", "x"])), Some("claude"));
     assert_eq!(identify(&args(&["node", "/usr/lib/node_modules/@openai/codex/bin/codex.js"])), Some("codex"));
@@ -375,6 +390,14 @@ pub fn run() {
     let refusal = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"You've hit your session limit · resets 2:20pm (America/Santiago)"}]},"quotaLimits":{"status":"rejected","resetsAt":1790094600},"error":"rate_limit","isApiErrorMessage":true}"#;
     assert_eq!(limit_in_tail(&format!("{}\n{refusal}", r#"{"type":"user","message":{"content":"hola"}}"#)), Some(Some(1790094600)), "Limit row not read");
     assert_eq!(limit_in_tail(&format!("{refusal}\n{}", r#"{"type":"user","message":{"content":"sigue"}}"#)), None, "A later prompt ends the limit");
+    // A background shell finishing after the refusal writes a tool_result as a
+    // `user` row; auto mode is still trapped under the limit, not moving on.
+    let tool_result = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}}"#;
+    assert_eq!(limit_in_tail(&format!("{refusal}\n{tool_result}")), Some(Some(1790094600)), "A tool result must not end the limit");
+    // Auto mode keeps thinking, calling tools and replying while it waits for
+    // the reset: ordinary rows after the refusal must not end the limit.
+    let churn = format!("{}\n{}\n{tool_result}", r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"…"}]}}"#, r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#);
+    assert_eq!(limit_in_tail(&format!("{refusal}\n{churn}")), Some(Some(1790094600)), "Auto-mode churn must not end the limit");
     assert_eq!(limit_in_tail(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#), None);
     assert!(is_limit_text("rate limited — wait and retry · You've hit your session limit") && is_limit_text("Claude usage limit reached.") && !is_limit_text("Done, under the limit"));
     use chrono::TimeZone;
@@ -403,7 +426,50 @@ pub fn run() {
     let _ = std::fs::remove_dir_all(&daemon);
     assert!(natural_cmp("w2:p1", "w10:p1") == std::cmp::Ordering::Less && natural_cmp("a", "A") == std::cmp::Ordering::Equal);
     assert_eq!(l10n::trf("Tú → {}: {}", &[&"a", &"b"]), l10n::text("Tú → {}: {}", &l10n::CURRENT).replacen("{}", "a", 1).replacen("{}", "b", 1));
-    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, background shells, {} bundled sprites", ROOM_FILES.len() + 1);
+    window_sizing();
+    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, window sizing, background shells, {} bundled sprites", ROOM_FILES.len() + 1);
+}
+
+/// The widget's size: fitted to the agents until the user resizes it, then
+/// kept whatever the agents or the chat panel need.
+fn window_sizing() {
+    use crate::{fit_panel, layout_height, layout_width, snap_columns, snap_rows};
+    use crate::scene::{columns_fitting, GAP, ROW_H};
+    use crate::ui::{MIN_PANEL, PANEL_HEIGHT};
+    let rows = |n: f32| n * ROW_H + (n - 1.0) * GAP;
+    let (chrome, screen) = (60.0, 2000.0);
+    // Automatic: never more columns than agents, nor rows than they fill.
+    assert_eq!(layout_width(4, 2, false, None), width_for(2));
+    assert_eq!(layout_width(2, 0, false, None), width_for(1));
+    assert!((1..=8).all(|n| columns_fitting(width_for(n)) == n));
+    assert_eq!(layout_height(2, 4, chrome, None, screen), chrome + rows(2.0));
+    assert_eq!(layout_height(9, 4, chrome, None, screen), chrome + rows(4.0));
+    assert_eq!(layout_height(9, 9, chrome, None, 900.0), 900.0);
+    // A one-room widget widens while a panel is open.
+    assert_eq!(layout_width(1, 5, true, None), width_for(2));
+    assert_eq!(layout_width(1, 5, true, Some(width_for(1))), width_for(2));
+    assert_eq!(layout_width(1, 5, true, Some(900.0)), 900.0);
+    // User-sized: the width stays exactly as dragged, however many agents
+    // there are, also past one screen; never under one room.
+    assert_eq!(layout_width(2, 2, false, Some(1000.0)), 1000.0, "Rounding must not shrink a resized widget");
+    assert_eq!(layout_width(8, 9, false, Some(3000.0)), 3000.0, "A widget across two screens keeps its width");
+    assert_eq!(layout_width(3, 9, false, Some(10.0)), width_for(1));
+    // User-sized: the height stays with the chat panel open or closed,
+    // whatever the agents need and past the screen, but never under one row.
+    let user = 777.0;
+    assert_eq!(layout_height(1, 4, chrome, Some(user), screen), user, "Few agents must not shrink a resized widget");
+    assert_eq!(layout_height(1, 4, chrome + PANEL_HEIGHT, Some(user), screen), user, "Opening the chat must not change a resized widget");
+    assert_eq!(layout_height(1, 4, chrome, Some(1500.0), 900.0), 1500.0, "The screen's height must not shrink a resized widget");
+    assert_eq!(layout_height(1, 1, chrome + PANEL_HEIGHT, Some(chrome + rows(1.0)), screen), chrome + PANEL_HEIGHT + ROW_H, "The chat needs a row of rooms above it");
+    // The chat panel's dragged height: a row of rooms stays above it, and
+    // it keeps its least height whatever the widget's.
+    assert_eq!(fit_panel(PANEL_HEIGHT, 1000.0, chrome), PANEL_HEIGHT);
+    assert_eq!(fit_panel(900.0, 1000.0, chrome), 1000.0 - chrome - ROW_H, "The chat must leave a row of rooms");
+    assert_eq!(fit_panel(900.0, 300.0, chrome), MIN_PANEL);
+    assert_eq!(fit_panel(10.0, 1000.0, chrome), MIN_PANEL);
+    // The columns and rows remembered for the next start: the nearest.
+    assert!(snap_columns(width_for(3)) == 3 && snap_columns(width_for(3) + 100.0) == 3 && snap_columns(width_for(3) + 130.0) == 4 && snap_columns(10.0) == 1 && snap_columns(9000.0) == 8);
+    assert!(snap_rows(chrome + rows(2.0), chrome) == 2 && snap_rows(chrome + rows(2.0) + 0.4 * (ROW_H + GAP), chrome) == 2 && snap_rows(chrome + rows(2.0) + 0.6 * (ROW_H + GAP), chrome) == 3 && snap_rows(chrome, chrome) == 1);
 }
 
 #[cfg(test)]

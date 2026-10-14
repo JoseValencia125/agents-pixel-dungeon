@@ -203,3 +203,9 @@ A banner over the rooms offers **Install Herdr** (its official installer, `curl 
 ## Support
 
 Agents Pixel Dungeon is made by [Diabolo Studio](https://diabolostudio.com/). If the dungeon is useful to you, you can [sponsor the project on GitHub](https://github.com/sponsors/JoseValencia125). Sponsorships help pay for the time spent drawing new heroes and rooms and keeping up with Herdr releases.
+
+### Codex permissions from the HP panel
+
+Right-click Codex in the bottom HP panel (collapsed or expanded), then choose **Codex settings**. Set filesystem access, approval policy, automatic or manual review, web search, and command network access. **Save** updates `config.toml` under `CODEX_HOME` (normally `~/.codex`) while preserving unrelated settings and comments. Changes apply to new CLI sessions; project, launcher, and managed policies can override them. Existing agents are not restarted.
+
+Workspace write keeps `.git` protected, so commits can fail with approvals set to Never. Automatic review may authorize actions beyond the workspace; full access removes the filesystem boundary. Custom permission profiles and granular approval policies must be edited in the configuration file.

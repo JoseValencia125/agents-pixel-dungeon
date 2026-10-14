@@ -4,6 +4,49 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.2.0...v2.3.0) (2026-10-13)
+
+
+### Added
+
+* demo data for the diff, PR and HP, and a full screen GIF in the README ([eb2be35](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/eb2be35eb1fbfc1186248868134f6daa17c60b2a))
+* drag the bar under the rooms to size the chat ([36a39c1](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/36a39c107f7704e697bf5d53ceb366682288978c))
+* keep the size you drag the widget to, and drag the bar to size the chat ([#7](https://github.com/JoseValencia125/agents-pixel-dungeon/issues/7), [#8](https://github.com/JoseValencia125/agents-pixel-dungeon/issues/8)) ([6b996ee](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/6b996ee284c32dd5d8b00026cad2637c7865f18d))
+* the demo shows a diff, a pull request and the guild's HP ([5aae935](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/5aae935ffde247470a328d79d0d3ddf4a96d71a2))
+
+
+### Fixed
+
+* keep the window size the user drags to ([019a169](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/019a1696eb841fc391bacc062983dcb5a887397b))
+
+## [2.2.0](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.1.2...v2.2.0) (2026-10-13)
+
+
+### Added
+
+* a warm palette for the app icon on its burgundy wall ([baf67c1](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/baf67c1e60fd341faa70eed4dcec7083f02c9da8))
+* each repo's guild, with its own emblem over its room ([881b40e](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/881b40e6eb9c4b568657604db1769706f2381ff2))
+* full screen keeps rooms in place and calls who waits for you ([64326bc](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/64326bcab8287dbd28bc5c3ec659249fc1ca5bfe))
+* full screen's column fits many more agents ([ea784c4](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/ea784c45c59358777ea18e519d98af5981419bae))
+* pick an emblem's second colour, and no button strip in full screen ([97a6d80](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/97a6d80f5ffeee3ff9913b722260662cd0696e54))
+* pick the size of full screen's rooms ([c5ad194](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/c5ad194b108b9d5807dc8dcec58c32bf50d13c10))
+* see an agent's changed files and pull request, and keep each repo's emblem ([74f1f0a](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/74f1f0a70ba5102fda0aa266f418b7e16262fb22))
+* the app icon's crystal orb stands on a wooden table ([8c6f795](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/8c6f79574e1d68bec5ccf74fde56a638446ad0c5))
+* the app is now Agents Pixel Dungeon ([f4e8a4a](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/f4e8a4a0047184739956c8244c39a634b5171420))
+* the crystal orb in the menu bar too, on a burgundy wall ([fc02b82](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/fc02b82070eff660044e2084697ce9cdd6b7c317))
+* the diff against the last commit, the remote or main ([28ec9ad](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/28ec9ad28cd47b9a39052e19459f74f31dea8152))
+* the waiting room is an inn's bedroom at night ([123425a](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/123425a08beb343209ba1a0780b1f24e3d617291))
+* the waiting room is an inn's, with timber walls and a board floor ([7dc4979](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/7dc49792070c5d5d0ba0f8b494ef556393b2b1e7))
+* the waiting room's hero reads in profile ([c32562b](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/c32562b979afc50768b6308139401d683512cee4))
+* the waiting room's reader sits with the hearth at its back ([43df539](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/43df539803bb2a44f27bf945be7f016efd526886))
+
+
+### Fixed
+
+* a sharp crystal orb in the menu bar ([26ed971](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/26ed97120aa2f113ca067a4e83536464be4a617c))
+* the chat header's buttons read Terminal, Diff, PR ([33b2fa9](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/33b2fa97d645a3acf9a8bd9fb3ec3e23ff3c44d5))
+* the chat header's buttons read Terminal, PR, Diff ([2e68816](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/2e688169ba4273696b1f33d58d5d7d2842f82793))
+
 ## [2.1.2] - 2026-10-13
 
 ### Added

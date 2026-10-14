@@ -18,11 +18,16 @@ pub struct Prefs {
     pub session: Option<String>,
     pub columns: usize,
     pub rows: usize,
+    /// The chat panel's height under the rooms, as its edge was last dragged.
+    pub panel_height: f32,
     pub on_top: bool,
     /// The window's top-right corner, in screen points.
     pub top_right: Option<(f32, f32)>,
     pub create_kind: String,
     pub create_folder: String,
+    /// Summon Kiro (and other harnesses that allow it) with every tool
+    /// pre-approved, so it stops asking permission for the same tools.
+    pub create_trust_all: bool,
     /// Open Herdr in a terminal when the app starts and its server is down.
     pub open_herdr_at_start: bool,
     /// Text size in the panels, as a factor (1.0 = normal).
@@ -68,10 +73,12 @@ impl Default for Prefs {
             session: None,
             columns: 2,
             rows: 4,
+            panel_height: crate::ui::PANEL_HEIGHT,
             on_top: true,
             top_right: None,
             create_kind: "claude".into(),
             create_folder: String::new(),
+            create_trust_all: false,
             open_herdr_at_start: false,
             text_scale: 1.0,
             console_scale: 1.0,
@@ -107,6 +114,7 @@ impl Prefs {
         let mut prefs = std::fs::read(&path).ok().and_then(|d| serde_json::from_slice::<Prefs>(&d).ok()).unwrap_or_default();
         prefs.columns = prefs.columns.max(1);
         prefs.rows = prefs.rows.max(1);
+        prefs.panel_height = prefs.panel_height.max(crate::ui::MIN_PANEL);
         prefs.text_scale = prefs.text_scale.clamp(0.7, 1.6);
         prefs.console_scale = prefs.console_scale.clamp(0.6, 2.5);
         prefs.path = Some(path);

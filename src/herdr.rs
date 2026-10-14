@@ -399,10 +399,11 @@ pub fn enrich(agents: Vec<Agent>) -> Vec<Agent> {
 }
 
 /// One classic RPG hero per harness. Any other harness gets the plain hero.
-pub const HERO_ORDER: [&str; 5] = ["claude", "codex", "kiro", "gemini", "hero"];
+pub const HERO_ORDER: [&str; 6] = ["claude", "codex", "kiro", "gemini", "cursor", "hero"];
 
 pub fn harness_for(agent: &str) -> &'static str {
     let name = agent.to_lowercase();
+    if name == "agent" { return "cursor"; }
     HERO_ORDER.iter().copied().find(|h| *h != "hero" && name.contains(h)).unwrap_or("hero")
 }
 
@@ -546,16 +547,35 @@ pub fn limit_in_tail(tail: &str) -> Option<Option<i64>> {
                     .map(|c| c.iter().filter_map(|b| str_of(b, "text")).collect::<Vec<_>>().join(" "))
                     .unwrap_or_default();
                 let api_error = row.get("isApiErrorMessage").and_then(Value::as_bool).unwrap_or(false);
-                if str_of(&row, "error") != Some("rate_limit") && !(api_error && is_limit_text(&text)) { return None; }
+                // A normal reply is not the end of the limit: in auto mode the
+                // agent keeps thinking, calling tools and retrying while it
+                // waits for the reset, writing ordinary rows after the refusal.
+                // Keep scanning back for the refusal itself; a reset already in
+                // the past is dropped by `session_limit`.
+                if str_of(&row, "error") != Some("rate_limit") && !(api_error && is_limit_text(&text)) { continue; }
                 let resets = row.get("quotaLimits").and_then(|q| q.get("resetsAt")).and_then(Value::as_i64)
                     .or_else(|| resets_from_text(&text, chrono::Local::now()));
                 return Some(resets);
             }
+            // A tool result is the agent's own turn, not you moving on; keep
+            // scanning. A real prompt you typed ends the limit.
+            Some("user") if user_is_only_tool_result(&row) => continue,
             Some("user") => return None,
             _ => continue,
         }
     }
     None
+}
+
+/// A `user` row that carries nothing but tool results (no text the user
+/// typed): the harness's own turn, not a prompt from you.
+fn user_is_only_tool_result(row: &Value) -> bool {
+    match row.get("message").and_then(|m| m.get("content")) {
+        Some(Value::Array(blocks)) if !blocks.is_empty() => {
+            blocks.iter().all(|b| str_of(b, "type") == Some("tool_result"))
+        }
+        _ => false,
+    }
 }
 
 /// The usage limit a Claude Code session is stuck on, if it has not reset yet.
@@ -677,6 +697,27 @@ pub fn connection_note(error: Option<&str>, updated: Option<Instant>, now: Insta
 /// Harnesses offered when creating an agent (all are `herdr agent start --kind` values).
 pub const CREATABLE_KINDS: [&str; 8] = ["claude", "codex", "gemini", "kiro", "opencode", "cursor", "copilot", "amp"];
 
+/// Extra arguments that launch a harness with every tool pre-approved, so
+/// it stops asking permission for the same tools over and over. Passed
+/// after `herdr agent start … --`, which forwards them to the harness's
+/// own command. Empty for a harness with no such flag, which is how
+/// `supports_trust_all` and the summon form know not to offer it.
+///
+/// kiro: `kiro-cli chat --trust-all-tools` ("Allows the model to use any
+/// tool to run commands without asking for confirmation").
+pub fn trust_all_args(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "kiro" => &["--trust-all-tools"],
+        _ => &[],
+    }
+}
+
+/// Whether a harness can be launched with full permissions (so the summon
+/// form shows the toggle only then).
+pub fn supports_trust_all(kind: &str) -> bool {
+    !trust_all_args(kind).is_empty()
+}
+
 /// The link in `text` around char `index`: a URL, or something path-like
 /// (has a `/`, starts with `~`, or is a `name.ext`), without the quotes,
 /// brackets and trailing punctuation around it.
@@ -758,8 +799,8 @@ pub fn installed_kinds() -> Vec<&'static str> {
     dirs.extend([".local/bin", ".cargo/bin", ".bun/bin", ".npm-global/bin", ".volta/bin", ".opencode/bin"].iter().map(|d| home.join(d)));
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].iter().map(PathBuf::from));
     let found: Vec<&'static str> = CREATABLE_KINDS.iter().copied().filter(|kind| {
-        let command = match *kind { "kiro" => "kiro-cli", "cursor" => "cursor-agent", other => other };
-        dirs.iter().any(|d| d.join(command).is_file())
+        let commands: &[&str] = match *kind { "kiro" => &["kiro-cli"], "cursor" => &["agent", "cursor-agent"], _ => std::slice::from_ref(kind) };
+        dirs.iter().any(|d| commands.iter().any(|command| d.join(command).is_file()))
     }).collect();
     if found.is_empty() { CREATABLE_KINDS.to_vec() } else { found }
 }

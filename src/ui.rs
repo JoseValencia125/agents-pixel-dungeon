@@ -13,7 +13,10 @@ use egui::{pos2, vec2, Align2, Color32, Context, CornerRadius, FontId, Frame, Ke
 use std::sync::mpsc::Receiver;
 
 pub const HUD_HEIGHT: f32 = 28.0;
+/// The chat panel's height under the rooms until its edge is dragged, and
+/// the least it can be dragged to (the console and the box still fit).
 pub const PANEL_HEIGHT: f32 = 232.0;
+pub const MIN_PANEL: f32 = 160.0;
 pub const PANEL_FILL: Color32 = Color32::from_rgb(23, 20, 28);
 pub const HUD_FILL: Color32 = Color32::from_rgb(19, 17, 23);
 const DIM: Color32 = Color32::from_rgb(150, 150, 155);
@@ -658,8 +661,8 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
         }
     }
 
-    // The panel fills what it is given: PANEL_HEIGHT under the rooms, the
-    // whole side in full screen.
+    // The panel fills what it is given: the height its edge was dragged to
+    // under the rooms, the whole side in full screen.
     let total = ui.available_height();
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 7.0);
@@ -1157,6 +1160,25 @@ pub struct ComposeAction {
     pub close: bool,
 }
 
+/// Whether the summon should launch the chosen harness with every tool
+/// pre-approved: the toggle's value, but only for a harness that supports
+/// it, so an old preference can never leak onto one that does not.
+fn trust_all_for(prefs: &Prefs) -> bool {
+    prefs.create_trust_all && crate::herdr::supports_trust_all(&prefs.create_kind)
+}
+
+/// A "Permiso completo" checkbox, shown only for a harness that can be
+/// launched with full permissions (kiro). It saves the preference, which
+/// `trust_all_for` reads back guarded by the same support check.
+fn trust_all_toggle(ui: &mut Ui, prefs: &mut Prefs, size: f32) {
+    if !crate::herdr::supports_trust_all(&prefs.create_kind) { return; }
+    let mut on = prefs.create_trust_all;
+    let changed = ui.checkbox(&mut on, mono(&tr("Permiso completo"), size))
+        .on_hover_text(tr("El agente usa cualquier herramienta sin pedir permiso cada vez."))
+        .changed();
+    if changed { prefs.create_trust_all = on; prefs.save(); }
+}
+
 /// Opens under the rooms from the + button: pick a harness, a folder (one
 /// of the agents' or any other) and an optional first prompt, and Herdr
 /// starts the agent in a new workspace there.
@@ -1187,6 +1209,7 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
             if kind != prefs.create_kind { prefs.create_kind = kind; prefs.save(); }
             folder_picker(ui, prefs, &known, 11.0);
         });
+        trust_all_toggle(ui, prefs, 11.0);
         Frame::new().fill(alpha(Color32::BLACK, 0.45)).corner_radius(CornerRadius::same(5)).inner_margin(Margin::same(3)).show(ui, |ui| {
             let height = total - 7.0 * 3.0 - 22.0 - 24.0 - 24.0;
             ui.set_width(ui.available_width());
@@ -1207,7 +1230,7 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
                 let can = !busy && !prefs.create_folder.is_empty();
                 if (ui.add_enabled(can, egui::Button::new(mono(&tr("Invocar"), 11.0))).on_hover_text(tr("Crear el agente (⌘⏎)")).clicked() || (shortcut && can)) && state.busy.is_none() {
                     state.note = None;
-                    state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt));
+                    state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt, trust_all_for(prefs)));
                 }
             });
         });
@@ -1307,6 +1330,7 @@ pub fn summon_form(ui: &mut Ui, monitor: &Monitor, assets: &crate::assets::Asset
     });
     ui.label(mono(&prefs.create_kind, 10.0).strong().color(green));
     ui.horizontal(|ui| folder_picker(ui, prefs, &known, 10.0));
+    trust_all_toggle(ui, prefs, 10.0);
     // A failure says what to do: it wraps above the button, and the prompt
     // gives up a row so the room still holds it.
     let note = state.note.clone().filter(|_| !busy);
@@ -1324,7 +1348,7 @@ pub fn summon_form(ui: &mut Ui, monitor: &Monitor, assets: &crate::assets::Asset
             let can = !busy && !prefs.create_folder.is_empty();
             if (ui.add_enabled(can, egui::Button::new(mono(&tr("Invocar"), 11.0).color(Color32::WHITE)).fill(alpha(green, 0.35))).on_hover_text(tr("Crear el agente (⌘⏎)")).clicked() || (shortcut && can)) && state.busy.is_none() {
                 state.note = None;
-                state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt));
+                state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt, trust_all_for(prefs)));
             }
         });
     });
@@ -1610,6 +1634,7 @@ fn hp_bar(ui: &mut Ui, hp: f32, height: f32, segments: usize, fill: Color32) {
 /// What was changed in the HP viewer: Kiro's plan, Claude's source.
 #[derive(Default)]
 pub struct UsagePick {
+    pub codex_settings: bool,
     pub kiro_plan: Option<u32>,
     pub claude_live: Option<bool>,
     /// The title was clicked: open or close the panel.
@@ -1645,9 +1670,16 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
         let painter = ui.painter();
         let mut x = painter.text(egui::pos2(line.min.x, line.center().y), Align2::LEFT_CENTER, "▸ HP", FontId::monospace(fs(10.0)), if response.hovered() { Color32::WHITE } else { DIM }).max.x + 10.0;
         for usage in usages {
+            let start_x = x;
             let (text, hp) = hp_short(usage, unix);
             crate::scene::draw_sprite(painter, assets.hero_frame(usage.harness, "idle", (now * 2.0) as usize), egui::pos2(x + 8.0, line.center().y), vec2(16.0, 16.0), false, 0.0, Color32::WHITE);
             x = painter.text(egui::pos2(x + 18.0, line.center().y), Align2::LEFT_CENTER, &text, FontId::monospace(fs(10.0)), hp.map(hp_color).unwrap_or(DIM)).max.x + 10.0;
+            if usage.harness == "codex" {
+                let target = egui::Rect::from_min_max(egui::pos2(start_x, line.min.y), egui::pos2(x, line.max.y));
+                let hit = ui.interact(target, ui.id().with("codex-hp-menu"), egui::Sense::click());
+                if hit.clicked() { picked.toggle_open = true; }
+                codex_settings_menu(&hit, &mut picked);
+            }
         }
         let tip = usages.iter().map(|u| format!("{} {}", u.harness, hp_short(u, unix).0)).collect::<Vec<_>>().join(" · ");
         if response.on_hover_text(format!("{}\n{tip}", tr("HP de la guild (uso restante)"))).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { picked.toggle_open = true; }
@@ -1664,7 +1696,7 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
         let health = usage.meters.iter().find(|m| m.window != "5h");
         let mana = usage.meters.iter().find(|m| m.window == "5h");
         let hp = health.map(|m| m.hp(unix));
-        ui.horizontal(|ui| {
+        let harness_row = ui.horizontal(|ui| {
             // A click on the hero or its name shows its options.
             let (icon, hero) = ui.allocate_exact_size(vec2(28.0, 40.0), if has_options(usage.harness) { egui::Sense::click() } else { egui::Sense::hover() });
             if hero.clicked() { toggled = Some(usage.harness); }
@@ -1743,7 +1775,11 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
                 let tip = usage.meters.iter().map(|m| trf("{}: {}% usado", &[&tr(m.window), &format!("{:.0}", m.used)])).collect::<Vec<_>>().join(" · ");
                 if !tip.is_empty() { row.on_hover_text(tip); }
             });
-        });
+        }).response;
+        if usage.harness == "codex" {
+            let hit = ui.interact(harness_row.rect, ui.id().with("codex-hp-menu"), egui::Sense::click());
+            codex_settings_menu(&hit, &mut picked);
+        }
     }
     if let Some(harness) = toggled {
         let next = (open.as_deref() != Some(harness)).then(|| harness.to_string());
@@ -1859,4 +1895,51 @@ pub fn emblem_editor(ctx: &Context, editor: &mut EmblemEditor) -> EditorOutcome 
     });
     if modal.should_close() && matches!(outcome, EditorOutcome::Open) { outcome = EditorOutcome::Cancel; }
     outcome
+}
+
+fn codex_settings_menu(response: &egui::Response, picked: &mut UsagePick) {
+    response.context_menu(|ui| {
+        if ui.button(tr("Configuraciones de Codex")).clicked() {
+            picked.codex_settings = true;
+            ui.close_menu();
+        }
+    });
+}
+
+#[cfg(test)]
+mod codex_hp_tests {
+    use super::*;
+    fn draw(ctx: &Context, assets: &crate::assets::Assets, open: bool, events: Vec<egui::Event>) -> (egui::FullOutput, bool) {
+        let mut picked = false;
+        let usage = crate::usage::HarnessUsage { harness: "codex", meters: vec![], credits: None };
+        let output = ctx.run(egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))), events, ..Default::default() }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                picked = usage_panel(ui, assets, &[usage.clone()], 0.0, false, open).codex_settings;
+            });
+        });
+        (output, picked)
+    }
+    fn click(pos: egui::Pos2, button: egui::PointerButton) -> Vec<egui::Event> {
+        vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button, pressed: true, modifiers: Default::default() }, egui::Event::PointerButton { pos, button, pressed: false, modifiers: Default::default() }]
+    }
+    #[test]
+    fn codex_context_menu_opens_settings_in_both_hp_layouts() {
+        for open in [false, true] {
+            let ctx = Context::default();
+            let assets = crate::assets::Assets::new(&ctx);
+            draw(&ctx, &assets, open, vec![]);
+            draw(&ctx, &assets, open, vec![]);
+            // Closed: first hero after the HP title. Open: hero below title.
+            let pos = if open { egui::pos2(20.0, 53.0) } else { egui::pos2(65.0, 23.0) };
+            draw(&ctx, &assets, open, click(pos, egui::PointerButton::Secondary));
+            let (output, _) = draw(&ctx, &assets, open, vec![]);
+            let label = tr("Configuraciones de Codex");
+            let button = output.shapes.iter().find_map(|s| match &s.shape {
+                egui::epaint::Shape::Text(t) if t.galley.text() == label => Some(t.pos + t.galley.rect.center().to_vec2()),
+                _ => None,
+            }).expect("Codex context menu is visible");
+            let (_, selected) = draw(&ctx, &assets, open, click(button, egui::PointerButton::Primary));
+            assert!(selected, "Settings action must reach the application (expanded={open})");
+        }
+    }
 }

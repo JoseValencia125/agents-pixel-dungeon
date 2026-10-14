@@ -1,6 +1,6 @@
 [package]
 name = "agents-pixel-dungeon"
-version = "2.1.2"
+version = "2.3.0"
 edition = "2021"
 description = "A native pixel-art guild for your live Herdr agents, for macOS and Linux."
 license = "MIT"
@@ -26,6 +26,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 toml = "0.8"
 sha2 = "0.10"
 ulid = "1"
+toml_edit = "=0.20.2"
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 egui = "0.31"
 egui_term = "=0.1.0"
