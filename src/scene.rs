@@ -2014,7 +2014,7 @@ mod tests {
     fn kept_emblems_are_used_and_new_ones_kept() {
         use crate::identity::{SavedEmblem, Symbol};
         let mut scene = Scene::new();
-        let kept = SavedEmblem { color: "pink".into(), metal: "ink".into(), symbol: Symbol::Moon, pattern: crate::identity::Pattern::Chief, shape: crate::identity::Shape::Kite, kind: crate::identity::Kind::Unknown };
+        let kept = SavedEmblem { color: "pink".into(), metal: "ink".into(), charge: None, symbol: Symbol::Moon, pattern: crate::identity::Pattern::Chief, shape: crate::identity::Shape::Kite, kind: crate::identity::Kind::Unknown };
         scene.emblems.insert("kept".into(), kept.clone());
         scene.sync(&[agent("kept", "idle"), agent("fresh", "idle")]);
         let id = scene.identity("kept").unwrap();

@@ -305,6 +305,7 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("Editar el escudo…", ["Edit the emblem…", "Modifier le blason…", "Modifica lo stemma…", "Editar o brasão…"]),
         ("Color principal", ["Main colour", "Couleur principale", "Colore principale", "Cor principal"]),
         ("Color secundario", ["Second colour", "Couleur secondaire", "Colore secondario", "Cor secundária"]),
+        ("Color del símbolo", ["Charge colour", "Couleur du meuble", "Colore del simbolo", "Cor do símbolo"]),
         ("Sin commit", ["Uncommitted", "Non commité", "Non committato", "Sem commit"]),
         ("Sin subir", ["Unpushed", "Non poussé", "Non inviato", "Sem push"]),
         ("Contra main", ["Against main", "Contre main", "Contro main", "Contra main"]),
