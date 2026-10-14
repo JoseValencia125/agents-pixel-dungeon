@@ -955,12 +955,12 @@ impl Room {
                     pos.y += if p < 0.42 { hop(p) } else if p < 0.84 { hop(p - 0.42) } else if p < 1.14 { small(p - 0.84) } else if p < 1.44 { small(p - 1.14) } else if p < 1.86 { hop(p - 1.44) } else { 0.0 };
                 }
                 "idle" if self.runner.is_none() => {
-                    // A page turns every few seconds; the hero nods with it.
+                    // The hero sits still; every few seconds the book alone
+                    // lifts a little and a page turns. Held out before it,
+                    // toward the window.
                     let p = rt % 4.2;
-                    let turning = p > 3.9;
-                    if turning { pos.y -= 1.0; }
-                    // Held out before it, toward the window.
-                    book = Some((if turning { "book_open_flipped" } else { "book_open" }, vec2(14.0, 9.0), pos2(-11.0, 2.0)));
+                    let turning = p > 3.8;
+                    book = Some((if turning { "book_open_flipped" } else { "book_open" }, vec2(14.0, 9.0), pos2(-11.0, if turning { 0.0 } else { 2.0 })));
                 }
                 _ => {}
             }
@@ -1201,7 +1201,8 @@ impl Room {
                 let back = assets.prop("chair_side_back");
                 draw_sprite(&clipped, back, pos2(seat.x + 9.0, seat.y - 1.0), back.px * 2.0, false, 0.0, Color32::WHITE);
             }
-            let sprite = assets.hero_frame(self.harness, kind, index);
+            // Seated, it holds one frame: no breathing bob in the chair.
+            let sprite = if seated { assets.hero_frame(self.harness, "idle", 0) } else { assets.hero_frame(self.harness, kind, index) };
             draw_sprite(&clipped, sprite, hero_at, vec2(HERO, HERO), if seated { true } else { self.facing < 0.0 }, 0.0, Color32::WHITE);
             if seated {
                 let front = assets.prop("chair_side_front");
