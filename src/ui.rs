@@ -921,7 +921,12 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
             ui.set_max_width(width);
             egui::ScrollArea::vertical().id_salt(("draft", agent.id.as_str())).max_height(input_height(rows, font, roomy) - 4.0).auto_shrink([false, true]).show(ui, |ui| ui.add(edit)).inner
         }).inner;
-        if state.focus { response.request_focus(); state.focus = false; }
+        // The click that opened the chat lands this same frame and takes the
+        // focus away again (a click elsewhere), so keep asking until it holds:
+        // ⏎ picks the agent's highlighted option only from the box.
+        if state.focus {
+            if response.has_focus() { state.focus = false; } else if !sending { response.request_focus(); ui.ctx().request_repaint(); }
+        }
         let submitted = response.has_focus() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
         if menu_open {
             let chosen = &matches[state.slash_choice].0;
