@@ -46,6 +46,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sys-locale",
+ "toml_edit 0.20.2",
  "tray-icon",
 ]
 

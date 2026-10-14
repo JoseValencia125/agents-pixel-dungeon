@@ -3,6 +3,7 @@
 //! that changes with its real Herdr status, in a small floating widget with
 //! a status item in the menu bar or tray.
 
+mod codex_settings;
 mod alerts;
 mod ansi;
 mod changes;
@@ -230,6 +231,7 @@ struct App {
     /// A repo's emblem being edited, and whether it is the demo's (edited
     /// on screen only, never kept).
     emblem_editor: Option<(ui::EmblemEditor, bool)>,
+    codex_settings: Option<codex_settings::Editor>,
 }
 
 /// The console's narrowest width in full screen; the rooms get whole
@@ -267,6 +269,7 @@ impl App {
             calls_seen: Default::default(),
             room_opened: false,
             emblem_editor: None,
+            codex_settings: None,
             prefs,
             sounds: Sounds::new(),
             notifier: Notifier::new(),
@@ -972,6 +975,7 @@ impl eframe::App for App {
                     ctx.request_repaint();
                 }
                 let picked = drawn.inner;
+                if picked.codex_settings { self.codex_settings = Some(codex_settings::Editor::load()); }
                 if picked.toggle_open { self.prefs.guild_hp_open = !self.prefs.guild_hp_open; self.prefs.save(); }
                 if let Some(plan) = picked.kiro_plan { self.prefs.kiro_plan = plan; self.prefs.save(); self.next_usage = 0.0; }
                 if let Some(live) = picked.claude_live { self.prefs.claude_usage_live = live; self.prefs.save(); self.next_usage = 0.0; }
@@ -1027,6 +1031,9 @@ impl eframe::App for App {
         });
 
         self.terminals.show(ctx);
+        if let Some(editor) = &mut self.codex_settings {
+            if !editor.show(ctx) { self.codex_settings = None; }
+        }
         self.edit_emblem(ctx);
 
         // Overlays.
