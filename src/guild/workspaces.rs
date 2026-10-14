@@ -192,6 +192,51 @@ pub fn ensure_integration_branch(project: &Project, quest: &Quest) -> GitResult<
 /// Squash the candidate onto the integration branch in a temporary
 /// checkout, with compare-and-swap on the branch. Returns the new sha, or
 /// an error naming the conflict.
+/// Commit what `write` puts into a temporary checkout onto `ref_name`,
+/// which starts from `base` when it does not exist yet. The user's
+/// checkout is never touched; the ref moves with compare-and-swap.
+/// Returns the new commit, or the old one when nothing changed.
+pub fn publish(project: &Project, ref_name: &str, base: &str, message: &str, write: impl FnOnce(&Path) -> std::io::Result<Vec<String>>) -> GitResult<(String, Vec<String>)> {
+    let repo = Path::new(&project.repo_path);
+    let expected = match rev_parse(repo, ref_name) {
+        Ok(sha) => sha,
+        Err(_) => {
+            let sha = rev_parse(repo, base)?;
+            git(repo, &["update-ref", ref_name, &sha])?;
+            sha
+        }
+    };
+    let tmp = crate::paths::worktrees_dir().join(&project.id).join(format!("publish-{}", short(ref_name)));
+    if tmp.exists() { let _ = git(repo, &["worktree", "remove", "--force", &tmp.display().to_string()]); }
+    let _ = git(repo, &["worktree", "prune"]);
+    git(repo, &["worktree", "add", "--detach", &tmp.display().to_string(), &expected])?;
+    let result = (|| -> GitResult<(String, Vec<String>)> {
+        let files = write(&tmp).map_err(|e| e.to_string())?;
+        git(&tmp, &["add", "-A"])?;
+        if git(&tmp, &["diff", "--cached", "--quiet"]).is_ok() { return Ok((expected.clone(), files)); }
+        git(&tmp, &["-c", "user.name=Guild", "-c", "user.email=guild@agents-pixel-dungeon", "commit", "-q", "-m", message])?;
+        let new_sha = rev_parse(&tmp, "HEAD")?;
+        git(repo, &["update-ref", ref_name, &new_sha, &expected])?;
+        Ok((new_sha, files))
+    })();
+    let _ = git(repo, &["worktree", "remove", "--force", &tmp.display().to_string()]);
+    let _ = git(repo, &["worktree", "prune"]);
+    result
+}
+
+/// Run `read` on a temporary checkout of `rev`; None when it does not exist.
+pub fn read_ref<T>(project: &Project, rev: &str, read: impl FnOnce(&Path) -> T) -> Option<T> {
+    let repo = Path::new(&project.repo_path);
+    let sha = rev_parse(repo, rev).ok()?;
+    let tmp = crate::paths::worktrees_dir().join(&project.id).join(format!("read-{}", short(&sha)));
+    if tmp.exists() { let _ = git(repo, &["worktree", "remove", "--force", &tmp.display().to_string()]); }
+    git(repo, &["worktree", "add", "--detach", &tmp.display().to_string(), &sha]).ok()?;
+    let out = read(&tmp);
+    let _ = git(repo, &["worktree", "remove", "--force", &tmp.display().to_string()]);
+    let _ = git(repo, &["worktree", "prune"]);
+    Some(out)
+}
+
 pub fn integrate(project: &Project, quest: &Quest, candidate: &Candidate, task: &Task) -> GitResult<String> {
     let repo = Path::new(&project.repo_path);
     let expected = ensure_integration_branch(project, quest)?;

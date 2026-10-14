@@ -13,35 +13,32 @@ fn one() -> u32 { 1 }
 
 pub fn now() -> String { chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true) }
 
-/// Which coding agent runs an attempt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HarnessKind { Kiro, Codex, Claude, Pane, Mock }
+/// Which harness runs an attempt: an open identifier, so the core never
+/// branches on a name. The registry maps it to an adapter ("kiro",
+/// "codex", "claude", "mock"…); anything the registry lacks is simply
+/// unavailable.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(transparent)]
+pub struct HarnessId(String);
 
-impl HarnessKind {
-    pub fn parse(s: &str) -> Option<HarnessKind> {
-        Some(match s.trim().to_ascii_lowercase().as_str() {
-            "kiro" => HarnessKind::Kiro,
-            "codex" => HarnessKind::Codex,
-            "claude" => HarnessKind::Claude,
-            "pane" | "herdr" => HarnessKind::Pane,
-            "mock" => HarnessKind::Mock,
-            _ => return None,
-        })
+/// The old name, kept for the code that grew up with it.
+pub type HarnessKind = HarnessId;
+
+impl HarnessId {
+    /// A lowercase slug: letters, digits, `-`, `_`.
+    pub fn parse(s: &str) -> Option<HarnessId> {
+        let t = s.trim().to_ascii_lowercase();
+        let t = if t == "herdr" { "pane".to_string() } else { t };
+        if t.is_empty() || !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return None; }
+        Some(HarnessId(t))
     }
-    pub fn as_str(self) -> &'static str {
-        match self {
-            HarnessKind::Kiro => "kiro",
-            HarnessKind::Codex => "codex",
-            HarnessKind::Claude => "claude",
-            HarnessKind::Pane => "pane",
-            HarnessKind::Mock => "mock",
-        }
-    }
+    /// An id known at compile time (adapters, tests).
+    pub fn named(s: &str) -> HarnessId { HarnessId::parse(s).unwrap_or_else(|| HarnessId("unknown".into())) }
+    pub fn as_str(&self) -> &str { &self.0 }
 }
 
-impl fmt::Display for HarnessKind {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str(self.as_str()) }
+impl fmt::Display for HarnessId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str(&self.0) }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -416,7 +413,7 @@ pub fn attempt_transition(from: AttemptState, to: AttemptState) -> Result<(), St
             | (Running, WaitingInput) | (Running, Submitted) | (Running, Failed) | (Running, Cancelled) | (Running, Lost) | (Running, TimedOut)
             | (WaitingInput, Running) | (WaitingInput, Cancelled) | (WaitingInput, Lost) | (WaitingInput, TimedOut) | (WaitingInput, Failed)
             | (Submitted, Verifying) | (Submitted, Passed) | (Submitted, Failed) | (Submitted, Cancelled)
-            | (Verifying, Passed) | (Verifying, Failed) | (Verifying, Cancelled)
+            | (Verifying, Passed) | (Verifying, Failed) | (Verifying, Cancelled) | (Verifying, Submitted)
     );
     if ok || from == to { Ok(()) } else { Err(format!("attempt cannot go from {from:?} to {to:?}")) }
 }

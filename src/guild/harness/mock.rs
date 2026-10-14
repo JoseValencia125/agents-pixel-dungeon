@@ -3,7 +3,7 @@
 //! a permission when told to, and ends how the script says.
 
 use super::*;
-use crate::domain::{HarnessKind, ModelOption, PermissionOption};
+use crate::domain::{HarnessId, HarnessKind, ModelOption, PermissionOption};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -45,7 +45,7 @@ impl MockHarness {
 }
 
 impl HarnessAdapter for MockHarness {
-    fn kind(&self) -> HarnessKind { HarnessKind::Mock }
+    fn kind(&self) -> HarnessKind { HarnessId::named("mock") }
 
     fn probe(&self) -> HarnessResult<Capabilities> {
         Ok(Capabilities {

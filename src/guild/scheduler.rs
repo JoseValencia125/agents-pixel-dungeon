@@ -76,13 +76,13 @@ mod tests {
 
     #[test]
     fn a_busy_member_is_skipped_and_a_named_one_is_honoured() {
-        let m = |id: &str, role: &str| Member { id: id.into(), name: id.into(), roles: vec![role.into()], harness: HarnessKind::Mock, model_id: None, mode: None, role_prompt: String::new(), enabled: true };
+        let m = |id: &str, role: &str| Member { id: id.into(), name: id.into(), roles: vec![role.into()], harness: HarnessId::named("mock"), model_id: None, mode: None, role_prompt: String::new(), enabled: true };
         let members = vec![m("a", "implementer"), m("b", "implementer"), m("r", "reviewer")];
         let t = task("t", &[], TaskState::Ready);
-        assert_eq!(pick_member(&t, &members, &["a".into()], &[HarnessKind::Mock]).unwrap().id, "b");
+        assert_eq!(pick_member(&t, &members, &["a".into()], &[HarnessId::named("mock")]).unwrap().id, "b");
         let mut named = t.clone();
         named.member_id = Some("r".into());
-        assert!(pick_member(&named, &members, &[], &[HarnessKind::Mock]).is_none());
-        assert!(pick_member(&t, &members, &[], &[HarnessKind::Kiro]).is_none());
+        assert!(pick_member(&named, &members, &[], &[HarnessId::named("mock")]).is_none());
+        assert!(pick_member(&t, &members, &[], &[HarnessId::named("kiro")]).is_none());
     }
 }

@@ -75,6 +75,9 @@ pub struct GameDesign {
     pub updated_at: String,
 }
 
+/// The branch the guild publishes a project's design to; the user merges it.
+pub fn design_ref(project_id: &str) -> String { format!("refs/heads/guild/design/{project_id}") }
+
 /// The names of the templates `template()` knows.
 pub const TEMPLATES: [&str; 2] = ["videogame", "blank"];
 

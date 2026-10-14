@@ -8,7 +8,7 @@
 
 use super::proc::{find_binary, scrub_env, LineProc};
 use super::*;
-use crate::domain::{HarnessKind, ModelOption, PermissionOption};
+use crate::domain::{HarnessId, HarnessKind, ModelOption, PermissionOption};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -210,7 +210,7 @@ fn handle_line(s: &Arc<ClaudeSession>, proc: &Arc<LineProc>, msg: &Value) {
 }
 
 impl HarnessAdapter for ClaudeStream {
-    fn kind(&self) -> HarnessKind { HarnessKind::Claude }
+    fn kind(&self) -> HarnessKind { HarnessId::named("claude") }
 
     fn probe(&self) -> HarnessResult<Capabilities> {
         let mut cmd = Command::new(&self.binary);

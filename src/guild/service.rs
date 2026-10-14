@@ -48,6 +48,8 @@ pub struct Service {
     adapters: Mutex<HashMap<HarnessKind, Arc<dyn HarnessAdapter>>>,
     harness_status: Mutex<Vec<HarnessStatus>>,
     subscribers: Mutex<Vec<Sender<Event>>>,
+    /// Events appended inside an open unit of work, sent on commit.
+    held: Mutex<Vec<Event>>,
     running: Mutex<HashMap<String, Running>>,
     pub settings: Settings,
     pub stop: Arc<AtomicBool>,
@@ -56,6 +58,9 @@ pub struct Service {
 }
 
 type Res<T> = Result<T, ApiError>;
+
+/// True right after `begin` opened the outermost unit of work.
+fn store_depth_is_one(store: &Store) -> bool { store.depth() == 1 }
 
 fn p_str<'a>(params: &'a Value, key: &str) -> Res<&'a str> {
     params.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()).ok_or_else(|| ApiError::invalid(format!("missing {key}")))
@@ -84,6 +89,7 @@ impl Service {
             adapters: Mutex::new(HashMap::new()),
             harness_status: Mutex::new(vec![]),
             subscribers: Mutex::new(vec![]),
+            held: Mutex::new(vec![]),
             running: Mutex::new(HashMap::new()),
             settings,
             stop: Arc::new(AtomicBool::new(false)),
@@ -132,7 +138,7 @@ impl Service {
     }
 
     fn available_harnesses(&self) -> Vec<HarnessKind> {
-        self.harness_status.lock().unwrap().iter().filter(|s| s.available).map(|s| s.kind).collect()
+        self.harness_status.lock().unwrap().iter().filter(|s| s.available).map(|s| s.kind.clone()).collect()
     }
 
     // ----- events -----
@@ -145,12 +151,42 @@ impl Service {
     fn emit_locked(&self, store: &Store, event: Event) -> Event {
         match store.append(event) {
             Ok(ev) => {
-                self.subscribers.lock().unwrap().retain(|s| s.send(ev.clone()).is_ok());
+                if store.in_transaction() {
+                    // Subscribers hear of it once it is durable.
+                    self.held.lock().unwrap().push(ev.clone());
+                } else {
+                    self.subscribers.lock().unwrap().retain(|s| s.send(ev.clone()).is_ok());
+                }
                 ev
             }
             Err(e) => {
                 self.log(&format!("cannot append event: {e}"));
                 Event::new("error", "guild")
+            }
+        }
+    }
+
+    /// State and its events change together: everything `f` writes
+    /// through `store` commits as one, or none of it does, and the events
+    /// reach subscribers only after the commit. Nests.
+    fn atomic<T>(&self, store: &Store, f: impl FnOnce() -> Res<T>) -> Res<T> {
+        store.begin()?;
+        let outer = !store.in_transaction() || store_depth_is_one(store);
+        match f() {
+            Ok(v) => {
+                store.commit()?;
+                if outer {
+                    let held: Vec<Event> = std::mem::take(&mut *self.held.lock().unwrap());
+                    if !held.is_empty() {
+                        self.subscribers.lock().unwrap().retain(|s| held.iter().all(|ev| s.send(ev.clone()).is_ok()));
+                    }
+                }
+                Ok(v)
+            }
+            Err(e) => {
+                store.rollback();
+                if outer { self.held.lock().unwrap().clear(); }
+                Err(e)
             }
         }
     }
@@ -168,6 +204,10 @@ impl Service {
 
     fn move_attempt(&self, id: &str, to: AttemptState, failure: Option<String>) -> Res<Attempt> {
         let store = self.store.lock().unwrap();
+        self.atomic(&store, || self.move_attempt_locked(&store, id, to, failure))
+    }
+
+    fn move_attempt_locked(&self, store: &Store, id: &str, to: AttemptState, failure: Option<String>) -> Res<Attempt> {
         let mut a = store.attempt(id)?.ok_or_else(|| ApiError::not_found(format!("attempt {id}")))?;
         if a.state == to { return Ok(a); }
         attempt_transition(a.state, to).map_err(ApiError::conflict)?;
@@ -224,6 +264,10 @@ impl Service {
     }
 
     fn move_task_locked(&self, store: &Store, id: &str, to: TaskState, reason: Option<String>) -> Res<Task> {
+        self.atomic(store, || self.move_task_inner(store, id, to, reason))
+    }
+
+    fn move_task_inner(&self, store: &Store, id: &str, to: TaskState, reason: Option<String>) -> Res<Task> {
         let mut t = store.task(id)?.ok_or_else(|| ApiError::not_found(format!("task {id}")))?;
         if t.state == to && t.block_reason == reason { return Ok(t); }
         task_transition(t.state, to).map_err(ApiError::conflict)?;
@@ -282,11 +326,14 @@ impl Service {
             let of_quest: Vec<&Task> = tasks.iter().filter(|t| t.quest_id == q.id).collect();
             if !of_quest.is_empty() && of_quest.iter().all(|t| t.state == TaskState::Completed) {
                 let store = self.store.lock().unwrap();
-                let mut q = q.clone();
-                q.state = QuestState::Completed;
-                q.updated_at = now();
-                store.put_quest(&q)?;
-                self.emit_locked(&store, Event::new("quest.completed", "guild").about_quest(&q).with(json!({"title": q.title})));
+                self.atomic(&store, || {
+                    let mut q = q.clone();
+                    q.state = QuestState::Completed;
+                    q.updated_at = now();
+                    store.put_quest(&q)?;
+                    self.emit_locked(&store, Event::new("quest.completed", "guild").about_quest(&q).with(json!({"title": q.title})));
+                    Ok(())
+                })?;
             }
         }
         // Dispatch.
@@ -308,7 +355,7 @@ impl Service {
             let active = self.running.lock().unwrap().len();
             if active >= self.settings.concurrency { break; }
             let attempt = {
-                let mut store = self.store.lock().unwrap();
+                let store = self.store.lock().unwrap();
                 let members = store.members()?;
                 // Runners of one race never share a member; a retry may reuse one.
                 let mut busy: Vec<String> = store.active_attempts()?.into_iter().map(|a| a.member_id).collect();
@@ -332,7 +379,7 @@ impl Service {
                     quest_id: quest.id.clone(),
                     project_id: quest.project_id.clone(),
                     member_id: member.id.clone(),
-                    harness: member.harness,
+                    harness: member.harness.clone(),
                     model_requested: model,
                     model_effective: None,
                     state: AttemptState::Queued,
@@ -352,18 +399,17 @@ impl Service {
                     created_at: now(),
                     updated_at: now(),
                 };
-                let created = store.transaction(|s| {
+                self.atomic(&store, || {
                     let mut t = t.clone();
                     t.state = TaskState::Running;
                     t.attempts_made += 1;
                     t.updated_at = now();
-                    s.put_task(&t)?;
-                    s.put_attempt(&attempt)?;
+                    store.put_task(&t)?;
+                    store.put_attempt(&attempt)?;
+                    if !racing_more { self.emit_locked(&store, Event::new("task.running", "guild").about_task(&t, &quest.project_id).with(json!({"state": "running", "title": t.title, "candidates": t.candidates}))); }
+                    self.emit_locked(&store, Event::new("attempt.started", "guild").about_attempt(&attempt).with(json!({"member": member.name, "harness": member.harness, "model": attempt.model_requested, "task": t.title, "runner": t.attempts_made, "candidates": t.candidates})));
                     Ok(())
-                });
-                created?;
-                if !racing_more { self.emit_locked(&store, Event::new("task.running", "guild").about_task(&t, &quest.project_id).with(json!({"state": "running", "title": t.title, "candidates": t.candidates}))); }
-                self.emit_locked(&store, Event::new("attempt.started", "guild").about_attempt(&attempt).with(json!({"member": member.name, "harness": member.harness, "model": attempt.model_requested, "task": t.title, "runner": t.attempts_made + 1, "candidates": t.candidates})));
+                })?;
                 attempt
             };
             self.spawn_driver(attempt.id.clone());
@@ -407,32 +453,32 @@ impl Service {
 
     /// Accept one candidate of a task and reject its rivals.
     fn select_candidate(&self, task_id: &str, attempt_id: &str, by: &str) -> Res<Attempt> {
-        let attempts = self.store.lock().unwrap().attempts_of_task(task_id)?;
-        let winner = attempts.iter().find(|a| a.id == attempt_id).ok_or_else(|| ApiError::not_found("attempt"))?.clone();
-        if !matches!(winner.state, AttemptState::Submitted | AttemptState::Verifying) { return Err(ApiError::conflict(format!("attempt is {:?}, not submitted", winner.state))); }
-        for rival in attempts.iter().filter(|a| a.id != attempt_id && matches!(a.state, AttemptState::Submitted | AttemptState::Verifying)) {
-            let member = self.store.lock().unwrap().member(&winner.member_id)?.map(|m| m.name).unwrap_or_default();
-            self.move_attempt(&rival.id, AttemptState::Failed, Some(format!("not selected: {member}'s candidate won")))?;
-            self.emit(Event::new("candidate.rejected", by).about_attempt(rival).with(json!({"reason": "another candidate was selected", "winner": attempt_id})));
-        }
-        self.move_attempt(attempt_id, AttemptState::Passed, None)?;
-        {
-            let store = self.store.lock().unwrap();
+        let store = self.store.lock().unwrap();
+        self.atomic(&store, || {
+            let attempts = store.attempts_of_task(task_id)?;
+            let winner = attempts.iter().find(|a| a.id == attempt_id).ok_or_else(|| ApiError::not_found("attempt"))?.clone();
+            if !matches!(winner.state, AttemptState::Submitted | AttemptState::Verifying) { return Err(ApiError::conflict(format!("attempt is {:?}, not submitted", winner.state))); }
+            let member = store.member(&winner.member_id)?.map(|m| m.name).unwrap_or_default();
+            for rival in attempts.iter().filter(|a| a.id != attempt_id && matches!(a.state, AttemptState::Submitted | AttemptState::Verifying)) {
+                self.move_attempt_locked(&store, &rival.id, AttemptState::Failed, Some(format!("not selected: {member}'s candidate won")))?;
+                self.emit_locked(&store, Event::new("candidate.rejected", by).about_attempt(rival).with(json!({"reason": "another candidate was selected", "winner": attempt_id})));
+            }
+            self.move_attempt_locked(&store, attempt_id, AttemptState::Passed, None)?;
             let mut t = store.task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
             t.winner_attempt_id = Some(attempt_id.into());
             t.updated_at = now();
             store.put_task(&t)?;
-        }
-        self.move_task(task_id, TaskState::Accepted, None)?;
-        self.emit(Event::new("candidate.selected", by).about_attempt(&winner).with(json!({"by": by, "candidates": attempts.len()})));
-        Ok(winner)
+            self.move_task_locked(&store, task_id, TaskState::Accepted, None)?;
+            self.emit_locked(&store, Event::new("candidate.selected", by).about_attempt(&winner).with(json!({"by": by, "candidates": attempts.len()})));
+            Ok(winner)
+        })
     }
 
     fn spawn_driver(self: &Arc<Service>, attempt_id: String) {
         // Reserve the slot before the thread starts, so the next tick counts it.
         self.running.lock().unwrap().insert(
             attempt_id.clone(),
-            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessKind::Mock, cancel_requested: false, interrupt_requested: false, started: Instant::now() },
+            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now() },
         );
         let service = self.clone();
         std::thread::Builder::new()
@@ -442,7 +488,8 @@ impl Service {
                 service.running.lock().unwrap().remove(&attempt_id);
                 if let Err(e) = outcome {
                     service.log(&format!("attempt {attempt_id}: {e}"));
-                    let _ = service.finish_attempt(&attempt_id, TurnOutcome::Failed { reason: e.to_string() });
+                    let generation = service.store.lock().unwrap().attempt(&attempt_id).ok().flatten().map(|a| a.generation).unwrap_or(0);
+                    let _ = service.finish_attempt_of(&attempt_id, generation, TurnOutcome::Failed { reason: e.to_string() });
                 }
                 service.tick();
             })
@@ -454,7 +501,7 @@ impl Service {
     fn spawn_resumer(self: &Arc<Service>, attempt_id: String, native_id: String) {
         self.running.lock().unwrap().insert(
             attempt_id.clone(),
-            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessKind::Mock, cancel_requested: false, interrupt_requested: false, started: Instant::now() },
+            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now() },
         );
         let service = self.clone();
         std::thread::Builder::new()
@@ -505,7 +552,7 @@ impl Service {
             }
         }
         if self.cancel_requested(attempt_id) { return self.finish_attempt(attempt_id, TurnOutcome::Cancelled); }
-        let adapter = self.adapter(member.harness)?;
+        let adapter = self.adapter(member.harness.clone())?;
         let role_prompt = if member.role_prompt.trim().is_empty() { config::default_role_prompt(&task.role) } else { member.role_prompt.clone() };
         let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_requested.clone(), mode: member.mode.clone(), role_prompt: role_prompt.clone() };
         let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
@@ -526,12 +573,12 @@ impl Service {
             (a, t, m, w)
         };
         if !Path::new(&workspace.path).exists() { return Err(ApiError::conflict("the worktree is gone")); }
-        let adapter = self.adapter(member.harness)?;
+        let adapter = self.adapter(member.harness.clone())?;
         let role_prompt = if member.role_prompt.trim().is_empty() { config::default_role_prompt(&task.role) } else { member.role_prompt.clone() };
         let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_effective.clone().or(attempt.model_requested.clone()), mode: member.mode.clone(), role_prompt };
         let session = adapter.resume_session(&options, native_id).map_err(|e| ApiError::new("harness", e.to_string()))?;
         self.update_attempt(attempt_id, |a| a.resumed += 1)?;
-        self.emit(Event::new("session.resumed", "harness").about_attempt(&attempt).with(json!({"nativeId": native_id, "harness": member.harness})));
+        self.emit(Event::new("session.resumed", "harness").about_attempt(&attempt).with(json!({"nativeId": native_id, "harness": member.harness.clone()})));
         let prompt = "The guild restarted while you were working. Your worktree is as you left it. Continue the task from where you stopped; if it was already complete, say so and finish with the summary.".to_string();
         self.run_turn(attempt_id, &attempt, &member, &adapter, session, &prompt)
     }
@@ -540,24 +587,26 @@ impl Service {
     /// session and finish the attempt. Shared by first runs and resumes.
     fn run_turn(self: &Arc<Service>, attempt_id: &str, attempt: &Attempt, member: &Member, adapter: &Arc<dyn HarnessAdapter>, session: SessionRef, prompt: &str) -> Res<()> {
         let runtime_version = self.harness_status.lock().unwrap().iter().find(|s| s.kind == member.harness).map(|s| s.runtime_version.clone()).unwrap_or_default();
-        let session_row = Session { id: session.id.clone(), attempt_id: attempt_id.into(), harness: member.harness, native_id: session.native_id.clone(), runtime_version, state: "running".into(), created_at: now(), updated_at: now() };
+        let session_row = Session { id: session.id.clone(), attempt_id: attempt_id.into(), harness: member.harness.clone(), native_id: session.native_id.clone(), runtime_version, state: "running".into(), created_at: now(), updated_at: now() };
         {
             let store = self.store.lock().unwrap();
             store.put_session(&session_row)?;
             self.emit_locked(&store, Event::new("session.started", "harness").about_attempt(attempt).with(json!({"sessionId": session.id, "nativeId": session.native_id, "harness": member.harness})));
         }
         let effective = attempt.model_effective.clone().or(attempt.model_requested.clone());
-        self.update_attempt(attempt_id, |a| {
+        let attempt = self.update_attempt(attempt_id, |a| {
             a.session_id = Some(session.id.clone());
             a.model_effective = effective;
             a.turns += 1;
+            a.generation += 1;
             a.pending_permission = None;
         })?;
+        let attempt = &attempt;
         {
             let mut running = self.running.lock().unwrap();
-            let slot = running.entry(attempt_id.to_string()).or_insert(Running { session: session.clone(), harness: member.harness, cancel_requested: false, interrupt_requested: false, started: Instant::now() });
+            let slot = running.entry(attempt_id.to_string()).or_insert(Running { session: session.clone(), harness: member.harness.clone(), cancel_requested: false, interrupt_requested: false, started: Instant::now() });
             slot.session = session.clone();
-            slot.harness = member.harness;
+            slot.harness = member.harness.clone();
         }
         self.move_attempt(attempt_id, AttemptState::Running, None)?;
         let handle = adapter.prompt(&session, attempt_id, prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
@@ -565,6 +614,21 @@ impl Service {
         let outcome = self.follow_turn(attempt_id, attempt, adapter, &session, handle);
         let stopped = adapter.stop(&session).unwrap_or(false);
         self.emit(Event::new("session.closed", "harness").about_attempt(attempt).with(json!({"confirmed": stopped})));
+        self.finish_attempt_of(attempt_id, attempt.generation, outcome)
+    }
+
+    /// A result from a driver that was superseded (the attempt was resumed
+    /// by a newer generation) must not touch the attempt.
+    fn finish_attempt_of(self: &Arc<Service>, attempt_id: &str, generation: u32, outcome: TurnOutcome) -> Res<()> {
+        let current = self.store.lock().unwrap().attempt(attempt_id)?.map(|a| a.generation).unwrap_or(0);
+        if current != generation {
+            self.log(&format!("attempt {attempt_id}: result of generation {generation} ignored, now at {current}"));
+            let stale = self.store.lock().unwrap().attempt(attempt_id).ok().flatten();
+            if let Some(a) = stale {
+                self.emit(Event::new("attempt.stale_result", "guild").about_attempt(&a).with(json!({"generation": generation, "current": current, "outcome": format!("{outcome:?}")})));
+            }
+            return Ok(());
+        }
         self.finish_attempt(attempt_id, outcome)
     }
 
@@ -748,27 +812,38 @@ impl Service {
                     }
                     None => None,
                 };
-                if let Some(c) = &candidate {
-                    self.emit(Event::new("candidate.committed", "guild").about_attempt(&attempt).with(json!({"baseSha": c.base_sha, "headSha": c.head_sha, "filesChanged": c.files_changed, "insertions": c.insertions, "deletions": c.deletions})));
-                } else {
-                    self.emit(Event::new("candidate.empty", "guild").about_attempt(&attempt).with(json!({"note": "the attempt left no changes"})));
+                {
+                    let store = self.store.lock().unwrap();
+                    self.atomic(&store, || {
+                        let mut a = store.attempt(attempt_id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
+                        a.candidate = candidate.clone();
+                        a.action = None;
+                        a.pending_permission = None;
+                        a.updated_at = now();
+                        store.put_attempt(&a)?;
+                        if let Some(c) = &candidate {
+                            self.emit_locked(&store, Event::new("candidate.committed", "guild").about_attempt(&attempt).with(json!({"baseSha": c.base_sha, "headSha": c.head_sha, "filesChanged": c.files_changed, "insertions": c.insertions, "deletions": c.deletions})));
+                        } else {
+                            self.emit_locked(&store, Event::new("candidate.empty", "guild").about_attempt(&attempt).with(json!({"note": "the attempt left no changes"})));
+                        }
+                        self.move_attempt_locked(&store, attempt_id, AttemptState::Submitted, None)?;
+                        if task.candidates <= 1 { self.move_task_locked(&store, &task.id, TaskState::Verifying, None)?; }
+                        Ok(())
+                    })?;
                 }
-                self.update_attempt(attempt_id, |a| { a.candidate = candidate.clone(); a.action = None; a.pending_permission = None; })?;
-                self.move_attempt(attempt_id, AttemptState::Submitted, None)?;
-                if task.candidates <= 1 { self.move_task(&task.id, TaskState::Verifying, None)?; }
                 if let (Some(ws), Some(p), Some(_)) = (&workspace, &project, &candidate) {
                     if !p.verifiers.is_empty() {
                         self.move_attempt(attempt_id, AttemptState::Verifying, None)?;
                         let results = self.run_verifiers(attempt_id, &attempt, p, ws);
                         let all_required_pass = results.iter().filter(|r| r.required).all(|r| r.status == "passed");
                         self.update_attempt(attempt_id, |a| a.verifier_results = results.clone())?;
-                        // Back to submitted: acceptance is the user's in V0, with the results in view.
+                        // Back to submitted: acceptance is a decision, with the results in view.
                         let store = self.store.lock().unwrap();
-                        let mut a = store.attempt(attempt_id)?.unwrap();
-                        a.state = AttemptState::Submitted;
-                        a.updated_at = now();
-                        store.put_attempt(&a)?;
-                        self.emit_locked(&store, Event::new("verification.finished", "verifier").about_attempt(&attempt).with(json!({"requiredPassed": all_required_pass, "results": results})));
+                        self.atomic(&store, || {
+                            self.move_attempt_locked(&store, attempt_id, AttemptState::Submitted, None)?;
+                            self.emit_locked(&store, Event::new("verification.finished", "verifier").about_attempt(&attempt).with(json!({"requiredPassed": all_required_pass, "results": results})));
+                            Ok(())
+                        })?;
                     }
                 }
                 if task.candidates > 1 { self.settle_race(&task.id)?; }
@@ -826,6 +901,15 @@ impl Service {
     /// After a restart: attempts the store thinks are active have no
     /// driver. Adopt a candidate their worktree holds, or mark them lost.
     pub fn reconcile(self: &Arc<Service>) {
+        // An integration the service died in the middle of: do it again; the
+        // squash finds nothing new when it had already landed.
+        let integrating: Vec<Task> = self.store.lock().unwrap().tasks().unwrap_or_default().into_iter().filter(|t| t.state == TaskState::Integrating).collect();
+        for t in integrating {
+            self.log(&format!("reconciling integration of task {}", t.id));
+            if self.move_task(&t.id, TaskState::Accepted, None).is_ok() {
+                if let Err(e) = self.task_integrate(&t.id) { self.log(&format!("task {}: integration after restart failed: {}", t.id, e.message)); }
+            }
+        }
         let active = self.store.lock().unwrap().active_attempts().unwrap_or_default();
         for a in active {
             if self.running.lock().unwrap().contains_key(&a.id) { continue; }
@@ -846,8 +930,11 @@ impl Service {
             let task = self.store.lock().unwrap().task(&a.task_id).ok().flatten();
             match (recovered, a.state) {
                 (_, AttemptState::Submitted) | (_, AttemptState::Verifying) => {
-                    // Already a candidate; it only needs the user's decision.
+                    // Already a candidate; it only needs a decision, and its task must say so.
                     let _ = self.move_attempt(&a.id, AttemptState::Submitted, None);
+                    if let Some(t) = &task {
+                        if t.candidates <= 1 && t.state == TaskState::Running { let _ = self.move_task(&t.id, TaskState::Verifying, None); }
+                    }
                 }
                 (Some(candidate), _) => {
                     let _ = self.update_attempt(&a.id, |x| { x.candidate = Some(candidate.clone()); x.failure = Some("recovered after a restart".into()); });
@@ -866,12 +953,13 @@ impl Service {
     /// state for the next start to resume.
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::Relaxed);
-        let live: Vec<(String, HarnessKind, SessionRef)> = self.running.lock().unwrap().iter().map(|(id, r)| (id.clone(), r.harness, r.session.clone())).collect();
+        let live: Vec<(String, HarnessKind, SessionRef)> = self.running.lock().unwrap().iter().map(|(id, r)| (id.clone(), r.harness.clone(), r.session.clone())).collect();
         for (attempt_id, harness, session) in live {
             if session.id.is_empty() { continue; }
             let Ok(adapter) = self.adapter(harness) else { continue };
             let _ = adapter.stop(&session);
-            if let Ok(Some(a)) = self.store.lock().unwrap().attempt(&attempt_id) {
+            let closing = self.store.lock().unwrap().attempt(&attempt_id).ok().flatten();
+            if let Some(a) = closing {
                 self.emit(Event::new("session.closed", "guild").about_attempt(&a).with(json!({"confirmed": true, "reason": "service stopping"})));
             }
         }
@@ -897,7 +985,7 @@ impl Service {
             "harness.probe" => Ok(serde_json::to_value(self.probe_harnesses()).unwrap()),
             "models.list" => {
                 let kind = HarnessKind::parse(p_str(params, "harness")?).ok_or_else(|| ApiError::invalid("unknown harness"))?;
-                let adapter = self.adapter(kind)?;
+                let adapter = self.adapter(kind.clone())?;
                 let models = adapter.list_models(None).map_err(|e| ApiError::new("harness", e.to_string()))?;
                 let mut statuses = self.harness_status.lock().unwrap();
                 if let Some(s) = statuses.iter_mut().find(|s| s.kind == kind) { s.models = models.clone(); }
@@ -942,9 +1030,12 @@ impl Service {
                 let store = self.store.lock().unwrap();
                 let project = store.project(id)?.ok_or_else(|| ApiError::not_found(format!("project {id}")))?;
                 let d = store.design(id)?.ok_or_else(|| ApiError::not_found("the project has no design yet"))?;
-                let files = crate::design::export(Path::new(&project.repo_path), &d).map_err(|e| ApiError::internal(e.to_string()))?;
-                self.emit_locked(&store, Event::new("design.exported", "user").with(json!({"projectId": id, "files": files.len(), "path": format!("{}/game-design", project.repo_path)})));
-                Ok(json!({"files": files}))
+                // Never the user's checkout: a managed branch the user merges when ready.
+                let ref_name = crate::design::design_ref(&project.id);
+                let (sha, files) = workspaces::publish(&project, &ref_name, &project.target_ref, &format!("guild: game design v{}", d.version), |dir| crate::design::export(dir, &d)).map_err(ApiError::internal)?;
+                let files: Vec<String> = files.iter().map(|f| f.rsplit("game-design/").next().map(|r| format!("game-design/{r}")).unwrap_or_else(|| f.clone())).collect();
+                self.emit_locked(&store, Event::new("design.exported", "user").with(json!({"projectId": id, "files": files.len(), "ref": ref_name, "sha": sha})));
+                Ok(json!({"files": files, "ref": ref_name, "sha": sha}))
             }
             "member.add" => self.member_add(params),
             "member.remove" => {
@@ -1015,10 +1106,12 @@ impl Service {
                 members += 1;
             }
         }
-        // A design kept in the repo comes along, unless the guild already has one.
+        // A design kept in the repo comes along, unless the guild already has one:
+        // the guild's own design branch first, then the checkout's game-design/.
         let mut design_imported = false;
         if store.design(&project.id)?.is_none() {
-            if let Some(d) = crate::design::import(&repo, &project.id) {
+            let from_branch = workspaces::read_ref(&project, &crate::design::design_ref(&project.id), |dir| crate::design::import(dir, &project.id)).flatten();
+            if let Some(d) = from_branch.or_else(|| crate::design::import(&repo, &project.id)) {
                 store.put_design(&d)?;
                 design_imported = true;
             }
@@ -1107,8 +1200,11 @@ impl Service {
             enabled: true,
         };
         let store = self.store.lock().unwrap();
-        store.put_member(&member)?;
-        self.emit_locked(&store, Event::new("member.added", "user").with(json!({"memberId": member.id, "harness": member.harness, "model": member.model_id})));
+        self.atomic(&store, || {
+            store.put_member(&member)?;
+            self.emit_locked(&store, Event::new("member.added", "user").with(json!({"memberId": member.id, "harness": member.harness, "model": member.model_id})));
+            Ok(())
+        })?;
         Ok(serde_json::to_value(member).unwrap())
     }
 
@@ -1129,8 +1225,11 @@ impl Service {
             created_at: now(),
             updated_at: now(),
         };
-        store.put_quest(&quest)?;
-        self.emit_locked(&store, Event::new("quest.created", "user").about_quest(&quest).with(json!({"title": quest.title})));
+        self.atomic(&store, || {
+            store.put_quest(&quest)?;
+            self.emit_locked(&store, Event::new("quest.created", "user").about_quest(&quest).with(json!({"title": quest.title})));
+            Ok(())
+        })?;
         Ok(serde_json::to_value(quest).unwrap())
     }
 
@@ -1180,8 +1279,11 @@ impl Service {
         all.retain(|t| t.id != task.id);
         all.push(task.clone());
         validate_dag(&all).map_err(ApiError::invalid)?;
-        store.put_task(&task)?;
-        self.emit_locked(&store, Event::new("task.created", "user").about_task(&task, &quest.project_id).with(json!({"title": task.title, "dependsOn": task.depends_on})));
+        self.atomic(&store, || {
+            store.put_task(&task)?;
+            self.emit_locked(&store, Event::new("task.created", "user").about_task(&task, &quest.project_id).with(json!({"title": task.title, "dependsOn": task.depends_on})));
+            Ok(())
+        })?;
         Ok(serde_json::to_value(task).unwrap())
     }
 
@@ -1198,14 +1300,17 @@ impl Service {
             validate_dag(&tasks).map_err(ApiError::invalid)?;
             let project = store.project(&quest.project_id)?.ok_or_else(|| ApiError::not_found("project"))?;
             let base = workspaces::ensure_integration_branch(&project, &quest).map_err(ApiError::internal)?;
-            quest.base_sha = Some(base.clone());
-            quest.state = QuestState::Running;
-            quest.updated_at = now();
-            store.put_quest(&quest)?;
-            for t in tasks.iter().filter(|t| t.state == TaskState::Draft) {
-                self.move_task_locked(&store, &t.id, TaskState::Pending, None)?;
-            }
-            self.emit_locked(&store, Event::new("quest.started", "user").about_quest(&quest).with(json!({"title": quest.title, "baseSha": base, "tasks": tasks.len()})));
+            self.atomic(&store, || {
+                quest.base_sha = Some(base.clone());
+                quest.state = QuestState::Running;
+                quest.updated_at = now();
+                store.put_quest(&quest)?;
+                for t in tasks.iter().filter(|t| t.state == TaskState::Draft) {
+                    self.move_task_locked(&store, &t.id, TaskState::Pending, None)?;
+                }
+                self.emit_locked(&store, Event::new("quest.started", "user").about_quest(&quest).with(json!({"title": quest.title, "baseSha": base, "tasks": tasks.len()})));
+                Ok(())
+            })?;
         }
         self.tick();
         Ok(serde_json::to_value(self.store.lock().unwrap().quest(quest_id)?).unwrap())
@@ -1216,11 +1321,14 @@ impl Service {
         let store = self.store.lock().unwrap();
         let mut quest = store.quest(quest_id)?.ok_or_else(|| ApiError::not_found(format!("quest {quest_id}")))?;
         if !from.contains(&quest.state) { return Err(ApiError::conflict(format!("quest is {:?}", quest.state))); }
-        quest.state = to;
-        quest.updated_at = now();
-        store.put_quest(&quest)?;
-        let kind = if to == QuestState::Paused { "quest.paused" } else { "quest.resumed" };
-        self.emit_locked(&store, Event::new(kind, "user").about_quest(&quest).with(json!({"title": quest.title})));
+        self.atomic(&store, || {
+            quest.state = to;
+            quest.updated_at = now();
+            store.put_quest(&quest)?;
+            let kind = if to == QuestState::Paused { "quest.paused" } else { "quest.resumed" };
+            self.emit_locked(&store, Event::new(kind, "user").about_quest(&quest).with(json!({"title": quest.title})));
+            Ok(())
+        })?;
         Ok(serde_json::to_value(quest).unwrap())
     }
 
@@ -1229,10 +1337,13 @@ impl Service {
         let (tasks, active) = {
             let store = self.store.lock().unwrap();
             let mut quest = store.quest(quest_id)?.ok_or_else(|| ApiError::not_found(format!("quest {quest_id}")))?;
-            quest.state = QuestState::Cancelled;
-            quest.updated_at = now();
-            store.put_quest(&quest)?;
-            self.emit_locked(&store, Event::new("quest.cancelled", "user").about_quest(&quest).with(json!({"title": quest.title})));
+            self.atomic(&store, || {
+                quest.state = QuestState::Cancelled;
+                quest.updated_at = now();
+                store.put_quest(&quest)?;
+                self.emit_locked(&store, Event::new("quest.cancelled", "user").about_quest(&quest).with(json!({"title": quest.title})));
+                Ok(())
+            })?;
             (store.tasks_of_quest(quest_id)?, store.active_attempts()?)
         };
         for a in active.iter().filter(|a| a.quest_id == quest_id) {
@@ -1252,11 +1363,14 @@ impl Service {
             if !matches!(task.state, TaskState::Failed | TaskState::Blocked | TaskState::Cancelled | TaskState::Verifying | TaskState::Accepted) {
                 return Err(ApiError::conflict(format!("task is {:?}", task.state)));
             }
-            if task.attempts_made >= task.max_attempts { task.max_attempts = task.attempts_made + 1; }
-            task.version += 1;
-            task.updated_at = now();
-            store.put_task(&task)?;
-            self.move_task_locked(&store, task_id, TaskState::Ready, None)?;
+            self.atomic(&store, || {
+                if task.attempts_made >= task.max_attempts { task.max_attempts = task.attempts_made + 1; }
+                task.version += 1;
+                task.updated_at = now();
+                store.put_task(&task)?;
+                self.move_task_locked(&store, task_id, TaskState::Ready, None)?;
+                Ok(())
+            })?;
         }
         self.tick();
         Ok(serde_json::to_value(self.store.lock().unwrap().task(task_id)?).unwrap())
@@ -1320,13 +1434,20 @@ impl Service {
         let (session, harness) = {
             let running = self.running.lock().unwrap();
             let r = running.get(attempt_id).ok_or_else(|| ApiError::conflict("the attempt is not running"))?;
-            (r.session.clone(), r.harness)
+            (r.session.clone(), r.harness.clone())
         };
         let adapter = self.adapter(harness)?;
         adapter.respond_permission(&session, request_id, option.as_deref()).map_err(|e| ApiError::new("harness", e.to_string()))?;
-        let attempt = self.update_attempt(attempt_id, |a| a.pending_permission = None)?;
-        let _ = self.move_attempt(attempt_id, AttemptState::Running, None);
-        self.emit(Event::new("permission.resolved", "user").about_attempt(&attempt).with(json!({"requestId": request_id, "optionId": option})));
+        let store = self.store.lock().unwrap();
+        self.atomic(&store, || {
+            let mut a = store.attempt(attempt_id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
+            a.pending_permission = None;
+            a.updated_at = now();
+            store.put_attempt(&a)?;
+            let _ = self.move_attempt_locked(&store, attempt_id, AttemptState::Running, None);
+            self.emit_locked(&store, Event::new("permission.resolved", "user").about_attempt(&a).with(json!({"requestId": request_id, "optionId": option})));
+            Ok(())
+        })?;
         Ok(json!({"responded": request_id}))
     }
 
@@ -1387,14 +1508,24 @@ impl Service {
         self.emit(Event::new("merge.started", "guild").about_attempt(&attempt).with(json!({"integrationRef": quest.integration_ref, "headSha": candidate.head_sha})));
         match workspaces::integrate(&project, &quest, candidate, &task) {
             Ok(sha) => {
-                self.emit(Event::new("merge.completed", "guild").about_attempt(&attempt).with(json!({"integrationRef": quest.integration_ref, "sha": sha})));
-                self.move_task(task_id, TaskState::Completed, None)?;
+                {
+                    let store = self.store.lock().unwrap();
+                    self.atomic(&store, || {
+                        self.emit_locked(&store, Event::new("merge.completed", "guild").about_attempt(&attempt).with(json!({"integrationRef": quest.integration_ref, "sha": sha})));
+                        self.move_task_locked(&store, task_id, TaskState::Completed, None)?;
+                        Ok(())
+                    })?;
+                }
                 self.tick();
                 Ok(json!({"completed": task_id, "integrated": true, "sha": sha}))
             }
             Err(e) => {
-                self.emit(Event::new("merge.blocked", "guild").about_attempt(&attempt).with(json!({"reason": e})));
-                self.move_task(task_id, TaskState::Blocked, Some(format!("merge blocked: {e}")))?;
+                let store = self.store.lock().unwrap();
+                self.atomic(&store, || {
+                    self.emit_locked(&store, Event::new("merge.blocked", "guild").about_attempt(&attempt).with(json!({"reason": e})));
+                    self.move_task_locked(&store, task_id, TaskState::Blocked, Some(format!("merge blocked: {e}")))?;
+                    Ok(())
+                })?;
                 Err(ApiError::conflict(e))
             }
         }
@@ -1696,9 +1827,14 @@ mod tests {
         // Export writes TOML into the repo, and a fresh project add reads it back.
         let exported = service.handle("design.export", &json!({"projectId": design.project_id})).unwrap();
         assert!(exported["files"].as_array().unwrap().len() >= 9);
-        assert!(repo.join("game-design/loops/03-loop-3.toml").exists());
+        assert!(!repo.join("game-design").exists(), "the user's checkout is untouched");
+        let listed = workspaces::git(&repo, &["ls-tree", "-r", "--name-only", &crate::design::design_ref(&design.project_id)]).unwrap();
+        assert!(listed.contains("game-design/loops/03-loop-3.toml"), "{listed}");
+        // Exporting again without changes keeps the commit.
+        let again = service.handle("design.export", &json!({"projectId": design.project_id})).unwrap();
+        assert_eq!(again["sha"], exported["sha"]);
         let other = Service::new(Store::open_in_memory().unwrap(), Settings::default());
-        let added = other.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "again"})).unwrap();
+        let added = other.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": design.project_id})).unwrap();
         assert_eq!(added["designImported"], true);
         assert_eq!(other.snapshot().unwrap().designs[0].loops.len(), 3);
     }
@@ -1735,6 +1871,247 @@ mod tests {
         assert_eq!(kinds.iter().filter(|k| *k == "candidate.rejected").count(), 2);
         assert!(kinds.contains(&"race.finished".to_string()));
         assert!(workspaces::git(&repo, &["ls-tree", "--name-only", &snap.quests[0].integration_ref]).unwrap().contains("hello.txt"));
+    }
+
+    #[test]
+    fn a_failed_unit_of_work_leaves_neither_state_nor_event() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Hang);
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Atomic"})).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        service.subscribers.lock().unwrap().push(tx);
+        let store = service.store.lock().unwrap();
+        let before = store.events_after(0, 10_000).unwrap().len();
+        let failed: Res<()> = service.atomic(&store, || {
+            service.move_task_locked(&store, "t1", TaskState::Pending, None)?;
+            service.emit_locked(&store, Event::new("test.boom", "test"));
+            Err(ApiError::internal("boom"))
+        });
+        assert!(failed.is_err());
+        assert!(!store.in_transaction());
+        assert_eq!(store.task("t1").unwrap().unwrap().state, TaskState::Draft, "state rolled back");
+        assert_eq!(store.events_after(0, 10_000).unwrap().len(), before, "events rolled back");
+        assert!(rx.try_recv().is_err(), "subscribers heard nothing");
+        // The same change, committed: state and event together, then the subscriber hears it.
+        service.atomic(&store, || { service.move_task_locked(&store, "t1", TaskState::Pending, None)?; Ok(()) }).unwrap();
+        assert_eq!(store.task("t1").unwrap().unwrap().state, TaskState::Pending);
+        let events = store.events_after(0, 10_000).unwrap();
+        assert_eq!(events.len(), before + 1);
+        assert_eq!(events.last().unwrap().kind, "task.pending");
+        assert_eq!(rx.try_recv().unwrap().kind, "task.pending");
+        // Nested units: an inner failure inside an outer success rolls back only the inner part.
+        let nested: Res<()> = service.atomic(&store, || {
+            service.move_task_locked(&store, "t1", TaskState::Ready, None)?;
+            let inner: Res<()> = service.atomic(&store, || { service.move_task_locked(&store, "t1", TaskState::Running, None)?; Err(ApiError::internal("inner")) });
+            assert!(inner.is_err());
+            Ok(())
+        });
+        nested.unwrap();
+        assert_eq!(store.task("t1").unwrap().unwrap().state, TaskState::Ready);
+        assert!(!store.in_transaction());
+    }
+
+    /// A guild with a project, three mock members and one started quest whose
+    /// task waits for attempts: no adapter is registered, so nothing runs
+    /// until a second service over the same database takes over.
+    fn seed(home: &TempHome, db: &Path, candidates: u32, auto_integrate: bool) -> (Arc<Service>, String) {
+        let repo = home.repo();
+        let service = Service::new(Store::open(db).unwrap(), Settings { concurrency: 3, ..Settings::default() });
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        for id in ["aria", "bram", "cora"] {
+            service.handle("member.add", &json!({"id": id, "harness": "mock", "roles": ["implementer"], "model": "mock-fast"})).unwrap();
+        }
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Survive"})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Keep going", "candidates": candidates, "autoIntegrate": auto_integrate})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        service.tick();
+        assert_eq!(service.snapshot().unwrap().tasks[0].state, TaskState::Ready, "nothing dispatched without an adapter");
+        (service, quest_id)
+    }
+
+    /// An attempt as the service would have left it when it died in `state`.
+    fn seed_attempt(service: &Arc<Service>, member: &str, state: AttemptState, with_session: bool, change: Option<(&str, &str)>, generation: u32) -> Attempt {
+        let store = service.store.lock().unwrap();
+        let task = store.task("t1").unwrap().unwrap();
+        let quest = store.quest(&task.quest_id).unwrap().unwrap();
+        let project = store.project(&quest.project_id).unwrap().unwrap();
+        let id = new_id();
+        let base = workspaces::ensure_integration_branch(&project, &quest).unwrap();
+        let ws = workspaces::provision(&project, &quest.id, &task.id, &id, &base).unwrap();
+        store.put_workspace(&ws).unwrap();
+        let candidate = change.map(|(file, content)| {
+            std::fs::write(Path::new(&ws.path).join(file), content).unwrap();
+            workspaces::commit_candidate(&ws, "seeded candidate").unwrap().unwrap()
+        });
+        let session_id = with_session.then(|| {
+            let sid = new_id();
+            store.put_session(&Session { id: sid.clone(), attempt_id: id.clone(), harness: HarnessId::named("mock"), native_id: Some(format!("mock-{sid}")), runtime_version: "mock".into(), state: "running".into(), created_at: now(), updated_at: now() }).unwrap();
+            sid
+        });
+        let verified = candidate.is_some() && matches!(state, AttemptState::Submitted | AttemptState::Passed);
+        let attempt = Attempt {
+            id: id.clone(), task_id: task.id.clone(), task_version: task.version, quest_id: quest.id.clone(), project_id: project.id.clone(), member_id: member.into(),
+            harness: HarnessId::named("mock"), model_requested: Some("mock-fast".into()), model_effective: Some("mock-fast".into()), state, workspace_id: Some(ws.id.clone()),
+            session_id, generation, candidate, summary: String::new(), action: None, pending_permission: None, failure: None,
+            verifier_results: if verified { vec![VerifierResult { id: "v".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1, log_artifact_id: None, tail: String::new() }] } else { vec![] },
+            turns: 1, resumed: 0, started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
+        };
+        store.put_attempt(&attempt).unwrap();
+        let mut t = task;
+        t.state = TaskState::Running;
+        t.attempts_made += 1;
+        store.put_task(&t).unwrap();
+        attempt
+    }
+
+    fn takeover(db: &Path, behaviour: MockBehaviour) -> (Arc<Service>, Arc<MockHarness>) {
+        let service = Service::new(Store::open(db).unwrap(), Settings { concurrency: 3, ..Settings::default() });
+        let mock = Arc::new(MockHarness::new(behaviour));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.reconcile();
+        (service, mock)
+    }
+
+    #[test]
+    fn dying_while_provisioning_loses_the_attempt_and_retries_the_task() {
+        let home = TempHome::new();
+        let db = home.0.join("guild.db");
+        let (first, _q) = seed(&home, &db, 1, false);
+        let a = seed_attempt(&first, "aria", AttemptState::Provisioning, false, None, 1);
+        drop(first);
+        let (second, _) = takeover(&db, MockBehaviour::Succeed { file: "done.txt".into(), content: "ok\n".into() });
+        let snap = wait_for(&second, "retried and submitted", |s| s.attempts.len() == 2 && s.attempts.iter().any(|x| x.state == AttemptState::Submitted));
+        let lost = snap.attempts.iter().find(|x| x.id == a.id).unwrap();
+        assert_eq!(lost.state, AttemptState::Lost);
+        assert_eq!(snap.tasks[0].state, TaskState::Verifying);
+        assert_eq!(snap.tasks[0].attempts_made, 2);
+    }
+
+    #[test]
+    fn dying_while_a_permission_waits_resumes_the_session() {
+        let home = TempHome::new();
+        let db = home.0.join("guild.db");
+        let (first, _q) = seed(&home, &db, 1, false);
+        let a = seed_attempt(&first, "aria", AttemptState::WaitingInput, true, None, 1);
+        drop(first);
+        let (second, mock) = takeover(&db, MockBehaviour::Succeed { file: "done.txt".into(), content: "ok\n".into() });
+        let snap = wait_for(&second, "resumed", |s| s.attempts[0].state == AttemptState::Submitted);
+        assert_eq!(snap.attempts.len(), 1, "the same attempt went on");
+        assert_eq!(snap.attempts[0].id, a.id);
+        assert_eq!(snap.attempts[0].resumed, 1);
+        assert_eq!(snap.attempts[0].generation, 2);
+        assert_eq!(mock.resumed().len(), 1);
+        assert!(snap.attempts[0].pending_permission.is_none());
+    }
+
+    #[test]
+    fn dying_while_verifying_keeps_the_candidate_for_the_user() {
+        let home = TempHome::new();
+        let db = home.0.join("guild.db");
+        let (first, _q) = seed(&home, &db, 1, false);
+        seed_attempt(&first, "aria", AttemptState::Verifying, true, Some(("done.txt", "ok\n")), 1);
+        drop(first);
+        let (second, mock) = takeover(&db, MockBehaviour::Fail("must not run".into()));
+        let snap = second.snapshot().unwrap();
+        assert_eq!(snap.attempts[0].state, AttemptState::Submitted);
+        assert_eq!(snap.tasks[0].state, TaskState::Verifying, "a submitted candidate puts its task up for a decision");
+        assert!(mock.resumed().is_empty(), "nothing was resumed");
+        second.handle("task.accept", &json!({"taskId": "t1", "integrate": true})).unwrap();
+        assert_eq!(second.snapshot().unwrap().tasks[0].state, TaskState::Completed);
+    }
+
+    #[test]
+    fn dying_while_integrating_finishes_the_integration_once() {
+        let home = TempHome::new();
+        let db = home.0.join("guild.db");
+        let (first, _q) = seed(&home, &db, 1, false);
+        let a = seed_attempt(&first, "aria", AttemptState::Passed, false, Some(("done.txt", "ok\n")), 1);
+        {
+            let store = first.store.lock().unwrap();
+            let mut t = store.task("t1").unwrap().unwrap();
+            t.state = TaskState::Integrating;
+            t.winner_attempt_id = Some(a.id.clone());
+            store.put_task(&t).unwrap();
+        }
+        let repo = home.repo_path();
+        drop(first);
+        let (second, _) = takeover(&db, MockBehaviour::Hang);
+        let snap = second.snapshot().unwrap();
+        assert_eq!(snap.tasks[0].state, TaskState::Completed);
+        let tree = workspaces::git(&repo, &["ls-tree", "--name-only", &snap.quests[0].integration_ref]).unwrap();
+        assert!(tree.contains("done.txt"));
+        let sha = workspaces::rev_parse(&repo, &snap.quests[0].integration_ref).unwrap();
+        // A third life finds nothing left to do and moves nothing.
+        let (third, _) = takeover(&db, MockBehaviour::Hang);
+        assert_eq!(third.snapshot().unwrap().tasks[0].state, TaskState::Completed);
+        assert_eq!(workspaces::rev_parse(&repo, &snap.quests[0].integration_ref).unwrap(), sha);
+        let merges = second.store.lock().unwrap().events_after(0, 10_000).unwrap().into_iter().filter(|e| e.kind == "merge.completed").count();
+        assert_eq!(merges, 1);
+    }
+
+    fn race_after_restart(submitted: usize) -> Snapshot {
+        let home = TempHome::new();
+        let db = home.0.join("guild.db");
+        let (first, _q) = seed(&home, &db, 3, true);
+        let members = ["aria", "bram", "cora"];
+        for (i, m) in members.iter().enumerate() {
+            if i < submitted {
+                seed_attempt(&first, m, AttemptState::Submitted, false, Some(("done.txt", &format!("{m}\n"))), 1);
+            } else {
+                // Running, but its session and worktree changes are gone with the crash.
+                seed_attempt(&first, m, AttemptState::Running, false, None, 1);
+            }
+        }
+        drop(first);
+        let (second, _) = takeover(&db, MockBehaviour::Hang);
+        wait_for(&second, "race settled", |s| s.tasks[0].state.is_terminal())
+    }
+
+    #[test]
+    fn a_race_losing_runners_in_a_crash_settles_with_what_survived() {
+        let snap = race_after_restart(2);
+        assert_eq!(snap.tasks[0].state, TaskState::Completed);
+        assert_eq!(snap.attempts.iter().filter(|a| a.state == AttemptState::Passed).count(), 1);
+        assert_eq!(snap.attempts.iter().filter(|a| a.state == AttemptState::Lost).count(), 1);
+        let snap = race_after_restart(1);
+        assert_eq!(snap.tasks[0].state, TaskState::Completed);
+        assert_eq!(snap.attempts.iter().filter(|a| a.state == AttemptState::Lost).count(), 2);
+        let snap = race_after_restart(0);
+        assert_eq!(snap.tasks[0].state, TaskState::Failed);
+        assert!(snap.attempts.iter().all(|a| a.state == AttemptState::Lost));
+    }
+
+    #[test]
+    fn a_stale_result_after_a_resume_is_ignored() {
+        let home = TempHome::new();
+        let db = home.0.join("guild.db");
+        let (first, _q) = seed(&home, &db, 1, false);
+        let a = seed_attempt(&first, "aria", AttemptState::Running, true, None, 2);
+        first.finish_attempt_of(&a.id, 1, TurnOutcome::Completed { stop_reason: "late".into() }).unwrap();
+        let snap = first.snapshot().unwrap();
+        assert_eq!(snap.attempts[0].state, AttemptState::Running, "generation 1 may not finish generation 2");
+        let kinds: Vec<String> = first.store.lock().unwrap().events_after(0, 1000).unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&"attempt.stale_result".to_string()));
+        first.finish_attempt_of(&a.id, 2, TurnOutcome::Completed { stop_reason: "now".into() }).unwrap();
+        assert_eq!(first.snapshot().unwrap().attempts[0].state, AttemptState::Submitted);
+    }
+
+    #[test]
+    fn restarting_several_times_resumes_each_time() {
+        let home = TempHome::new();
+        let db = home.0.join("guild.db");
+        let (first, _q) = seed(&home, &db, 1, false);
+        let a = seed_attempt(&first, "aria", AttemptState::Running, true, None, 1);
+        drop(first);
+        let (second, _) = takeover(&db, MockBehaviour::Hang);
+        wait_for(&second, "resumed once", |s| s.attempts[0].resumed == 1 && s.attempts[0].state == AttemptState::Running);
+        let (third, _) = takeover(&db, MockBehaviour::Succeed { file: "done.txt".into(), content: "ok\n".into() });
+        let snap = wait_for(&third, "resumed twice and done", |s| s.attempts[0].state == AttemptState::Submitted);
+        assert_eq!(snap.attempts[0].id, a.id);
+        assert_eq!(snap.attempts[0].resumed, 2);
+        assert_eq!(snap.attempts[0].generation, 3);
+        let _ = second.handle("attempt.cancel", &json!({"attemptId": a.id}));
     }
 
     #[test]

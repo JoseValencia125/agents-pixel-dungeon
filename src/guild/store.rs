@@ -10,6 +10,8 @@ use std::path::Path;
 
 pub struct Store {
     conn: Connection,
+    /// Open savepoints: state and its events commit together at depth 0.
+    depth: std::cell::Cell<u32>,
 }
 
 pub type StoreResult<T> = Result<T, String>;
@@ -49,7 +51,7 @@ impl Store {
         conn.pragma_update(None, "busy_timeout", 5000).ok();
         conn.execute_batch(SCHEMA).map_err(e)?;
         conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?1)", params![SCHEMA_VERSION.to_string()]).map_err(e)?;
-        Ok(Store { conn })
+        Ok(Store { conn, depth: std::cell::Cell::new(0) })
     }
 
     // ----- generic helpers -----
@@ -216,18 +218,41 @@ impl Store {
     // ----- transactions -----
 
     pub fn transaction<T>(&mut self, f: impl FnOnce(&Store) -> StoreResult<T>) -> StoreResult<T> {
-        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(e)?;
+        self.begin()?;
         match f(self) {
-            Ok(v) => {
-                self.conn.execute_batch("COMMIT").map_err(e)?;
-                Ok(v)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
+            Ok(v) => { self.commit()?; Ok(v) }
+            Err(err) => { self.rollback(); Err(err) }
         }
     }
+
+    /// Open a unit of work; nested calls become savepoints, so a helper
+    /// that is atomic on its own stays part of a larger atomic change.
+    pub fn begin(&self) -> StoreResult<()> {
+        let d = self.depth.get();
+        let sql = if d == 0 { "BEGIN IMMEDIATE".to_string() } else { format!("SAVEPOINT sp{d}") };
+        self.conn.execute_batch(&sql).map_err(e)?;
+        self.depth.set(d + 1);
+        Ok(())
+    }
+
+    pub fn commit(&self) -> StoreResult<()> {
+        let d = self.depth.get().saturating_sub(1);
+        let sql = if d == 0 { "COMMIT".to_string() } else { format!("RELEASE sp{d}") };
+        self.conn.execute_batch(&sql).map_err(e)?;
+        self.depth.set(d);
+        Ok(())
+    }
+
+    pub fn rollback(&self) {
+        let d = self.depth.get().saturating_sub(1);
+        let sql = if d == 0 { "ROLLBACK".to_string() } else { format!("ROLLBACK TO sp{d}; RELEASE sp{d}") };
+        let _ = self.conn.execute_batch(&sql);
+        self.depth.set(d);
+    }
+
+    /// True while a unit of work is open.
+    pub fn in_transaction(&self) -> bool { self.depth.get() > 0 }
+    pub fn depth(&self) -> u32 { self.depth.get() }
 
     pub fn snapshot(&self, service_version: &str, harnesses: Vec<HarnessStatus>) -> StoreResult<Snapshot> {
         Ok(Snapshot {
@@ -272,7 +297,7 @@ mod tests {
     fn a_failed_transaction_rolls_back_the_entity_and_the_event() {
         let mut store = Store::open_in_memory().unwrap();
         let result: StoreResult<()> = store.transaction(|s| {
-            s.put_member(&Member { id: "m".into(), name: "M".into(), roles: vec![], harness: HarnessKind::Mock, model_id: None, mode: None, role_prompt: String::new(), enabled: true })?;
+            s.put_member(&Member { id: "m".into(), name: "M".into(), roles: vec![], harness: HarnessId::named("mock"), model_id: None, mode: None, role_prompt: String::new(), enabled: true })?;
             s.append(Event::new("x", "guild"))?;
             Err("boom".into())
         });

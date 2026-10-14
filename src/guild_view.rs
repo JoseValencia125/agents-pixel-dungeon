@@ -836,15 +836,15 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         started_at: Some(t.clone()), finished_at: None, created_at: t.clone(), updated_at: t.clone(),
     };
     let workspace = |id: &str, branch: &str| Workspace { id: format!("w-{id}"), project_id: "verbrawl".into(), attempt_id: id.into(), path: format!("~/demo/verbrawl/worktrees/{id}"), branch: branch.into(), base_sha: "490acd6".into(), state: WorkspaceState::Active, created_at: t.clone(), updated_at: t.clone() };
-    let mut a2 = attempt("a2", "t2", "aria", HarnessKind::Kiro, "claude-sonnet-5.5", AttemptState::Running);
+    let mut a2 = attempt("a2", "t2", "aria", HarnessId::named("kiro"), "claude-sonnet-5.5", AttemptState::Running);
     a2.action = Some(["forge", "read", "brew", "type"][(tick / 3) % 4].into());
     a2.summary = tr("Añadiendo el tick de veneno al combate");
-    let mut a3 = attempt("a3", "t3", "orin", HarnessKind::Codex, "gpt-5.5", AttemptState::WaitingInput);
+    let mut a3 = attempt("a3", "t3", "orin", HarnessId::named("codex"), "gpt-5.5", AttemptState::WaitingInput);
     a3.pending_permission = Some(PermissionRequest { request_id: "perm-1".into(), title: "Run Command".into(), detail: "pnpm test --run".into(), options: vec![
         PermissionOption { id: "accept".into(), name: "Accept".into(), kind: "allow_once".into() },
         PermissionOption { id: "reject".into(), name: "Reject".into(), kind: "reject_once".into() },
     ], asked_at: t.clone() });
-    let mut a4 = attempt("a4", "t4", "lira", HarnessKind::Claude, "claude-opus-5.5", AttemptState::Submitted);
+    let mut a4 = attempt("a4", "t4", "lira", HarnessId::named("claude"), "claude-opus-5.5", AttemptState::Submitted);
     a4.candidate = Some(Candidate { base_sha: "490acd6".into(), head_sha: "dcdbee6".into(), tree_sha: "e3b0c44".into(), files_changed: 3, insertions: 48, deletions: 6, diff_artifact_id: Some("art-demo".into()) });
     a4.verifier_results = vec![VerifierResult { id: "unit".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1840, log_artifact_id: None, tail: "12 passed".into() }];
     a4.summary = tr("Fixtures y pruebas del contrato listos");
@@ -870,9 +870,9 @@ fn demo_snapshot(tick: usize) -> Snapshot {
             task("t5", "Integración y QA visual", TaskState::Pending, &["t2", "t3", "t4"]),
         ],
         members: vec![
-            member("aria", "Aria", HarnessKind::Kiro, "claude-sonnet-5.5", "implementer"),
-            member("orin", "Orin", HarnessKind::Codex, "gpt-5.5", "implementer"),
-            member("lira", "Lira", HarnessKind::Claude, "claude-opus-5.5", "tester"),
+            member("aria", "Aria", HarnessId::named("kiro"), "claude-sonnet-5.5", "implementer"),
+            member("orin", "Orin", HarnessId::named("codex"), "gpt-5.5", "implementer"),
+            member("lira", "Lira", HarnessId::named("claude"), "claude-opus-5.5", "tester"),
         ],
         attempts: vec![a2, a3, a4],
         workspaces: vec![workspace("a2", "guild/q1/t2/a2"), workspace("a3", "guild/q1/t3/a3"), workspace("a4", "guild/q1/t4/a4")],

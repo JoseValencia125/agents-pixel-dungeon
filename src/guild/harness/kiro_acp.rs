@@ -6,7 +6,7 @@
 //! with `model`, and the model changes with `session/set_config_option`.
 
 use super::*;
-use crate::domain::{HarnessKind, ModelOption, PermissionOption};
+use crate::domain::{HarnessId, HarnessKind, ModelOption, PermissionOption};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -393,7 +393,7 @@ impl KiroAcp {
 }
 
 impl HarnessAdapter for KiroAcp {
-    fn kind(&self) -> HarnessKind { HarnessKind::Kiro }
+    fn kind(&self) -> HarnessKind { HarnessId::named("kiro") }
 
     fn probe(&self) -> HarnessResult<Capabilities> {
         if !self.binary.exists() {

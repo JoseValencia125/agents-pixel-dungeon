@@ -9,7 +9,7 @@
 
 use super::proc::{command_title, find_binary, scrub_env, LineProc};
 use super::*;
-use crate::domain::{HarnessKind, ModelOption};
+use crate::domain::{HarnessId, HarnessKind, ModelOption};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -101,7 +101,7 @@ fn item_event(item: &Value, completed: bool, last_error: &mut Option<String>) ->
 }
 
 impl HarnessAdapter for CodexExec {
-    fn kind(&self) -> HarnessKind { HarnessKind::Codex }
+    fn kind(&self) -> HarnessKind { HarnessId::named("codex") }
 
     fn probe(&self) -> HarnessResult<Capabilities> {
         let output = Command::new(&self.binary).arg("--version").output().map_err(|e| HarnessError::RuntimeFailed(format!("codex not found ({}): {e}", self.binary.display())))?;

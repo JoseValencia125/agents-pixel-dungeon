@@ -92,7 +92,7 @@ impl MemberSection {
             id: self.id.clone(),
             name: self.name.clone().unwrap_or_else(|| self.id.clone()),
             roles: self.roles.clone(),
-            harness: HarnessKind::parse(&self.harness).unwrap_or(HarnessKind::Mock),
+            harness: HarnessKind::parse(&self.harness).unwrap_or(HarnessId::named("mock")),
             model_id: self.model.clone(),
             mode: self.mode.clone(),
             role_prompt: self.prompt.clone(),
@@ -171,7 +171,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(file.guild.concurrency, 2);
-        assert_eq!(file.members[0].to_member().harness, HarnessKind::Kiro);
+        assert_eq!(file.members[0].to_member().harness, HarnessId::named("kiro"));
         assert!(file.verifiers[0].to_verifier().required);
     }
 }
