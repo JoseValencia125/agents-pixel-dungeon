@@ -12,6 +12,7 @@ name = "agents-pixel-dungeon"
 path = "src/main.rs"
 
 [dependencies]
+toml_edit = "=0.20.2"
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 egui = "0.31"
 egui_term = "=0.1.0"

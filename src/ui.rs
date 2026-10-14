@@ -1634,6 +1634,7 @@ fn hp_bar(ui: &mut Ui, hp: f32, height: f32, segments: usize, fill: Color32) {
 /// What was changed in the HP viewer: Kiro's plan, Claude's source.
 #[derive(Default)]
 pub struct UsagePick {
+    pub codex_settings: bool,
     pub kiro_plan: Option<u32>,
     pub claude_live: Option<bool>,
     /// The title was clicked: open or close the panel.
@@ -1669,9 +1670,16 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
         let painter = ui.painter();
         let mut x = painter.text(egui::pos2(line.min.x, line.center().y), Align2::LEFT_CENTER, "▸ HP", FontId::monospace(fs(10.0)), if response.hovered() { Color32::WHITE } else { DIM }).max.x + 10.0;
         for usage in usages {
+            let start_x = x;
             let (text, hp) = hp_short(usage, unix);
             crate::scene::draw_sprite(painter, assets.hero_frame(usage.harness, "idle", (now * 2.0) as usize), egui::pos2(x + 8.0, line.center().y), vec2(16.0, 16.0), false, 0.0, Color32::WHITE);
             x = painter.text(egui::pos2(x + 18.0, line.center().y), Align2::LEFT_CENTER, &text, FontId::monospace(fs(10.0)), hp.map(hp_color).unwrap_or(DIM)).max.x + 10.0;
+            if usage.harness == "codex" {
+                let target = egui::Rect::from_min_max(egui::pos2(start_x, line.min.y), egui::pos2(x, line.max.y));
+                let hit = ui.interact(target, ui.id().with("codex-hp-menu"), egui::Sense::click());
+                if hit.clicked() { picked.toggle_open = true; }
+                codex_settings_menu(&hit, &mut picked);
+            }
         }
         let tip = usages.iter().map(|u| format!("{} {}", u.harness, hp_short(u, unix).0)).collect::<Vec<_>>().join(" · ");
         if response.on_hover_text(format!("{}\n{tip}", tr("HP de la guild (uso restante)"))).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { picked.toggle_open = true; }
@@ -1688,7 +1696,7 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
         let health = usage.meters.iter().find(|m| m.window != "5h");
         let mana = usage.meters.iter().find(|m| m.window == "5h");
         let hp = health.map(|m| m.hp(unix));
-        ui.horizontal(|ui| {
+        let harness_row = ui.horizontal(|ui| {
             // A click on the hero or its name shows its options.
             let (icon, hero) = ui.allocate_exact_size(vec2(28.0, 40.0), if has_options(usage.harness) { egui::Sense::click() } else { egui::Sense::hover() });
             if hero.clicked() { toggled = Some(usage.harness); }
@@ -1767,7 +1775,11 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
                 let tip = usage.meters.iter().map(|m| trf("{}: {}% usado", &[&tr(m.window), &format!("{:.0}", m.used)])).collect::<Vec<_>>().join(" · ");
                 if !tip.is_empty() { row.on_hover_text(tip); }
             });
-        });
+        }).response;
+        if usage.harness == "codex" {
+            let hit = ui.interact(harness_row.rect, ui.id().with("codex-hp-menu"), egui::Sense::click());
+            codex_settings_menu(&hit, &mut picked);
+        }
     }
     if let Some(harness) = toggled {
         let next = (open.as_deref() != Some(harness)).then(|| harness.to_string());
@@ -1870,4 +1882,51 @@ pub fn emblem_editor(ctx: &Context, editor: &mut EmblemEditor) -> EditorOutcome 
     });
     if modal.should_close() && matches!(outcome, EditorOutcome::Open) { outcome = EditorOutcome::Cancel; }
     outcome
+}
+
+fn codex_settings_menu(response: &egui::Response, picked: &mut UsagePick) {
+    response.context_menu(|ui| {
+        if ui.button(tr("Configuraciones de Codex")).clicked() {
+            picked.codex_settings = true;
+            ui.close_menu();
+        }
+    });
+}
+
+#[cfg(test)]
+mod codex_hp_tests {
+    use super::*;
+    fn draw(ctx: &Context, assets: &crate::assets::Assets, open: bool, events: Vec<egui::Event>) -> (egui::FullOutput, bool) {
+        let mut picked = false;
+        let usage = crate::usage::HarnessUsage { harness: "codex", meters: vec![], credits: None };
+        let output = ctx.run(egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))), events, ..Default::default() }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                picked = usage_panel(ui, assets, &[usage.clone()], 0.0, false, open).codex_settings;
+            });
+        });
+        (output, picked)
+    }
+    fn click(pos: egui::Pos2, button: egui::PointerButton) -> Vec<egui::Event> {
+        vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button, pressed: true, modifiers: Default::default() }, egui::Event::PointerButton { pos, button, pressed: false, modifiers: Default::default() }]
+    }
+    #[test]
+    fn codex_context_menu_opens_settings_in_both_hp_layouts() {
+        for open in [false, true] {
+            let ctx = Context::default();
+            let assets = crate::assets::Assets::new(&ctx);
+            draw(&ctx, &assets, open, vec![]);
+            draw(&ctx, &assets, open, vec![]);
+            // Closed: first hero after the HP title. Open: hero below title.
+            let pos = if open { egui::pos2(20.0, 53.0) } else { egui::pos2(65.0, 23.0) };
+            draw(&ctx, &assets, open, click(pos, egui::PointerButton::Secondary));
+            let (output, _) = draw(&ctx, &assets, open, vec![]);
+            let label = tr("Configuraciones de Codex");
+            let button = output.shapes.iter().find_map(|s| match &s.shape {
+                egui::epaint::Shape::Text(t) if t.galley.text() == label => Some(t.pos + t.galley.rect.center().to_vec2()),
+                _ => None,
+            }).expect("Codex context menu is visible");
+            let (_, selected) = draw(&ctx, &assets, open, click(button, egui::PointerButton::Primary));
+            assert!(selected, "Settings action must reach the application (expanded={open})");
+        }
+    }
 }
