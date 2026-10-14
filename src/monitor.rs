@@ -48,6 +48,7 @@ enum Inbox {
     Stream(u64, StreamMessage),
     Sessions(Vec<HerdrSession>),
     Log(GuildEvent),
+    Acknowledged(u64),
     Created { failure: Option<String>, waiting: Option<(String, String, String, String)>, log: Option<GuildEvent> },
 }
 
@@ -344,7 +345,6 @@ impl Monitor {
                                 self.base = agents;
                                 self.names = names;
                                 self.last_snapshot = Some(Instant::now());
-                                self.needs_snapshot = false;
                             }
                             let demo = self.demo;
                             self.apply(shown);
@@ -408,6 +408,12 @@ impl Monitor {
                     if self.sessions != sessions { self.sessions = sessions; self.changed = true; }
                 }
                 Inbox::Log(event) => { self.events.insert(0, event); self.events.truncate(40); }
+                Inbox::Acknowledged(generation) => {
+                    if generation == self.generation {
+                        self.needs_snapshot = true;
+                        self.refresh();
+                    }
+                }
                 Inbox::Created { failure, waiting, log } => {
                     if let Some(log) = log { self.events.insert(0, log); self.events.truncate(40); }
                     if let Some((pane, name, project, text)) = waiting {
@@ -445,6 +451,8 @@ impl Monitor {
         let session = self.session.clone();
         let reconcile = self.last_snapshot.map(|t| t.elapsed() > RECONCILE_EVERY).unwrap_or(true);
         let snapshot = !demo && (self.needs_snapshot || !self.stream_up || reconcile);
+        // Consume this request now so a newer request survives an in-flight result.
+        if snapshot { self.needs_snapshot = false; }
         let herdr_now = self.herdr;
         let try_herdr = herdr_now == HerdrState::Up || herdr_now == HerdrState::Unknown || Instant::now() >= self.next_herdr_try;
         let known = self.base.clone();
@@ -689,6 +697,23 @@ impl Monitor {
     /// Bring the agent's pane to the front inside Herdr.
     pub fn focus(&self, agent: &Agent) -> Receiver<Option<String>> {
         self.act(vec![Monitor::args(&["agent", "focus", &agent.id])])
+    }
+
+    /// Herdr marks a completion seen when explicitly focused. Reconcile
+    /// immediately, even if the stream does not emit a status event.
+    pub fn acknowledge(&self, agent: &Agent) -> Receiver<Option<String>> {
+        let focused = self.focus(agent);
+        let (tx, rx) = channel();
+        let sender = self.outbox.clone();
+        let generation = self.generation;
+        let wake = self.wake.clone();
+        std::thread::spawn(move || {
+            let failure = focused.recv().unwrap_or_else(|_| Some(tr("Herdr rechazó la acción. Revisa el panel del agente.")));
+            if failure.is_none() { let _ = sender.send(Inbox::Acknowledged(generation)); }
+            let _ = tx.send(failure);
+            wake();
+        });
+        rx
     }
 
     /// Submit a prompt with `herdr agent prompt`. Herdr only reports

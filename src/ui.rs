@@ -714,6 +714,16 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
             });
         });
         let asking = agent.status == "blocked" && !state.lines.is_empty();
+        let acknowledgement_height = if agent.status == "done" && !standalone {
+            let row = ui.horizontal(|ui| {
+                if ui.add_enabled(!sending && !monitor.demo, egui::Button::new(tr("Marcar en espera")))
+                    .on_hover_text(tr("Marcar la respuesta como vista y seleccionar el agente en Herdr"))
+                    .clicked() {
+                    state.run(monitor.acknowledge(agent));
+                }
+            });
+            row.response.rect.height() + ui.spacing().item_spacing.y
+        } else { 0.0 };
         // Full screen: the box to type in sits on the terminal's own prompt
         // line (❯, ›), where typing happens in the terminal; without one in
         // sight it stays under the console.
@@ -722,7 +732,7 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
         // The box under the console grows to three rows with what is typed.
         let box_height = input_height(draft_rows(&state.draft, (ui.available_width() / (fs(13.0) * 0.62)) as usize), fs(13.0), true) + 10.0;
         let strip = shells_strip(ui, agent, state, now);
-        let body_height = total - 7.0 * 2.0 - 22.0 - strip - if standalone { 14.0 } else if inline { 0.0 } else { box_height } - if state.note.is_some() { 16.0 } else { 0.0 };
+        let body_height = total - 7.0 * 2.0 - 22.0 - strip - acknowledgement_height - if standalone { 14.0 } else if inline { 0.0 } else { box_height } - if state.note.is_some() { 16.0 } else { 0.0 };
         Frame::new().fill(alpha(Color32::BLACK, 0.45)).corner_radius(CornerRadius::same(5)).inner_margin(Margin::same(6)).show(ui, |ui| {
             ui.set_min_height(body_height.max(40.0));
             ui.set_max_height(body_height.max(40.0));

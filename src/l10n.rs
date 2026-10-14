@@ -81,6 +81,8 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("Necesita atención", ["Needs attention", "Demande ton attention", "Richiede attenzione", "Precisa de atenção"]),
         ("En espera", ["Waiting", "En attente", "In attesa", "Em espera"]),
         ("Listo", ["Done", "Terminé", "Fatto", "Pronto"]),
+        ("Marcar en espera", ["Mark as waiting", "Marquer en attente", "Segna in attesa", "Marcar como em espera"]),
+        ("Marcar la respuesta como vista y seleccionar el agente en Herdr", ["Mark the response as seen and select the agent in Herdr", "Marquer la réponse comme vue et sélectionner l’agent dans Herdr", "Segna la risposta come letta e seleziona l’agente in Herdr", "Marcar a resposta como vista e selecionar o agente no Herdr"]),
         ("Sin estado", ["No status", "Sans état", "Senza stato", "Sem estado"]),
         // Window, menu and status item
         ("Minimizar (ocultar)", ["Minimize (hide)", "Réduire (masquer)", "Riduci (nascondi)", "Minimizar (ocultar)"]),
