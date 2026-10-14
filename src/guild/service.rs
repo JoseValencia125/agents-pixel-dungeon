@@ -519,9 +519,15 @@ impl Service {
             level: serde_json::from_value(params.get("level").cloned().unwrap_or(json!("loop"))).map_err(|e| ApiError::invalid(format!("level: {e}")))?,
             hypothesis: p_str(params, "hypothesis")?.into(), expected_effect: p_opt(params, "expectedEffect").unwrap_or_default(), proposed_change: p_opt(params, "proposedChange").unwrap_or_default(),
             measurements: p_list(params, "measurements"), related_systems: p_list(params, "relatedSystems"), status: HypothesisStatus::Proposed, created_at: now(), updated_at: now(),
+            question_id: p_opt(params, "questionId"),
         };
         self.atomic(&store, || {
             store.put_hypothesis(&h)?;
+            if let Some(qid) = &h.question_id {
+                let mut q = store.question(project_id, qid)?.ok_or_else(|| ApiError::not_found(format!("question {qid}")))?;
+                if !q.hypothesis_ids.contains(&h.id) { q.hypothesis_ids.push(h.id.clone()); }
+                store.put_question(&q)?;
+            }
             self.emit_locked(&store, Event::new("hypothesis.created", "user").with(json!({"projectId": project_id, "hypothesisId": h.id, "problem": h.problem, "level": h.level})));
             Ok(())
         })?;
@@ -626,6 +632,12 @@ impl Service {
             let store = self.store.lock().unwrap();
             self.atomic(&store, || {
                 store.put_experiment(&e)?;
+                if let Some(qid) = &hypothesis.question_id {
+                    if let Some(mut q) = store.question(&e.project_id, qid)? {
+                        if !q.experiment_ids.contains(&e.id) { q.experiment_ids.push(e.id.clone()); }
+                        store.put_question(&q)?;
+                    }
+                }
                 let mut h = hypothesis.clone();
                 h.status = HypothesisStatus::Experimenting;
                 h.updated_at = now();
@@ -910,6 +922,21 @@ impl Service {
                         integrated = Some(self.task_integrate(tid)?);
                     }
                 }
+                // The decision goes on record, with its evidence, and answers the question the hypothesis came from.
+                let (hypothesis, playtests) = {
+                    let store = self.store.lock().unwrap();
+                    (store.hypothesis(&e.hypothesis_id)?, store.playtests_of_experiment(&e.id)?)
+                };
+                let finished = playtests.iter().filter(|p| p.status == "finished").count();
+                let mut evidence = vec![format!("{finished} synthetic playtests over {} variants", e.variants.len())];
+                if let Some(r) = &e.result { evidence.extend(r.evidence.iter().cloned()); }
+                let rejected: Vec<String> = e.variants.iter().filter(|x| x.id != vid).map(|x| format!("{} ({})", x.name, serde_json::to_string(&x.params).unwrap_or_default())).collect();
+                let decision_text = match hypothesis.as_ref() { Some(h) => format!("Adopt variant \"{}\" ({}): {}", v.name, serde_json::to_string(&v.params).unwrap_or_default(), h.proposed_change), None => format!("Adopt variant \"{}\"", v.name) };
+                let why = match (&note, e.result.as_ref()) { (n, _) if !n.trim().is_empty() => n.clone(), (_, Some(r)) => format!("The analyst's verdict was \"{}\": {}", r.verdict, r.recommended_next), _ => "Chosen by the human.".into() };
+                let decided = self.decision_create(&json!({"projectId": e.project_id, "decision": decision_text, "why": why, "questionIds": hypothesis.as_ref().and_then(|h| h.question_id.clone()).into_iter().collect::<Vec<_>>(),
+                    "hypothesisIds": [e.hypothesis_id], "experimentIds": [e.id], "playtestIds": playtests.iter().filter(|p| p.status == "finished").map(|p| p.id.clone()).collect::<Vec<_>>(),
+                    "evidence": evidence, "rejectedAlternatives": rejected, "systemIds": hypothesis.as_ref().map(|h| h.related_systems.clone()).unwrap_or_default(), "decidedBy": "human"}))?;
+                integrated = Some(json!({"integrated": integrated.as_ref().and_then(|i| i.get("integrated")).cloned().unwrap_or(Value::Bool(false)), "decision": decided["id"]}));
                 Some(vid)
             }
             "iterate" => {
@@ -942,6 +969,107 @@ impl Service {
             Ok(())
         })?;
         Ok(json!({"experiment": e, "integrated": integrated}))
+    }
+
+    // ----- the living design's questions and decisions -----
+
+    fn question_create(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let store = self.store.lock().unwrap();
+        store.project(project_id)?.ok_or_else(|| ApiError::not_found(format!("project {project_id}")))?;
+        let id = crate::design::next_id("Q", store.questions_of(project_id)?.into_iter().map(|q| q.id));
+        let q = crate::design::DesignQuestion {
+            id: id.clone(), project_id: project_id.into(), question: p_str(params, "question")?.into(), context: p_opt(params, "context").unwrap_or_default(),
+            system_id: p_opt(params, "systemId"), status: "open".into(), raised_by: p_opt(params, "raisedBy").unwrap_or_else(|| "human".into()), source: p_opt(params, "source"),
+            hypothesis_ids: vec![], experiment_ids: vec![], decision_id: None, answer: String::new(), created_at: now(), resolved_at: None,
+        };
+        self.atomic(&store, || {
+            store.put_question(&q)?;
+            if let Some(sid) = &q.system_id {
+                if let Some(mut d) = store.design(project_id)? {
+                    if let Some(sys) = d.systems.iter_mut().find(|s| &s.id == sid) {
+                        if !sys.questions.contains(&q.id) { sys.questions.push(q.id.clone()); }
+                        d.updated_at = now();
+                        store.put_design(&d)?;
+                    }
+                }
+            }
+            self.emit_locked(&store, Event::new("question.created", &q.raised_by).with(json!({"projectId": project_id, "questionId": q.id, "question": q.question, "systemId": q.system_id})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(q).unwrap())
+    }
+
+    /// Answer a question with a new decision; the question stays, resolved,
+    /// pointing at it.
+    fn question_resolve(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let qid = p_str(params, "questionId")?;
+        let q = self.store.lock().unwrap().question(project_id, qid)?.ok_or_else(|| ApiError::not_found(format!("question {qid}")))?;
+        if q.status != "open" { return Err(ApiError::conflict(format!("{qid} is already resolved by {}", q.decision_id.clone().unwrap_or_default()))); }
+        let mut p = params.clone();
+        p["questionIds"] = json!([qid]);
+        if p.get("systemIds").is_none() { if let Some(s) = &q.system_id { p["systemIds"] = json!([s]); } }
+        let decided = self.decision_create(&p)?;
+        Ok(json!({"question": self.store.lock().unwrap().question(project_id, qid)?, "decision": decided}))
+    }
+
+    fn decision_create(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let store = self.store.lock().unwrap();
+        store.project(project_id)?.ok_or_else(|| ApiError::not_found(format!("project {project_id}")))?;
+        let design = store.design(project_id)?;
+        let id = crate::design::next_id("DEC", store.design_decisions_of(project_id)?.into_iter().map(|d| d.id));
+        let d = crate::design::DesignDecision {
+            id: id.clone(), project_id: project_id.into(), decision: p_str(params, "decision")?.into(), why: p_opt(params, "why").unwrap_or_default(),
+            question_ids: p_list(params, "questionIds"), hypothesis_ids: p_list(params, "hypothesisIds"), experiment_ids: p_list(params, "experimentIds"), playtest_ids: p_list(params, "playtestIds"),
+            evidence: p_list(params, "evidence"), rejected_alternatives: p_list(params, "rejectedAlternatives"), system_ids: p_list(params, "systemIds"),
+            decided_by: p_opt(params, "decidedBy").unwrap_or_else(|| "human".into()), design_version: design.as_ref().map(|x| x.version).unwrap_or(0), created_at: now(),
+        };
+        let answer = p_opt(params, "answer").unwrap_or_else(|| d.decision.clone());
+        self.atomic(&store, || {
+            store.put_design_decision(&d)?;
+            for qid in &d.question_ids {
+                let mut q = store.question(project_id, qid)?.ok_or_else(|| ApiError::not_found(format!("question {qid}")))?;
+                q.status = "resolved".into();
+                q.decision_id = Some(d.id.clone());
+                q.answer = answer.clone();
+                q.resolved_at = Some(now());
+                store.put_question(&q)?;
+                self.emit_locked(&store, Event::new("question.resolved", &d.decided_by).with(json!({"projectId": project_id, "questionId": q.id, "decisionId": d.id})));
+            }
+            if let Some(mut design) = design.clone() {
+                let mut touched = false;
+                for sid in &d.system_ids {
+                    if let Some(sys) = design.systems.iter_mut().find(|s| &s.id == sid) {
+                        if !sys.decisions.contains(&d.id) { sys.decisions.push(d.id.clone()); touched = true; }
+                    }
+                }
+                if touched { design.updated_at = now(); store.put_design(&design)?; }
+            }
+            self.emit_locked(&store, Event::new("decision.created", &d.decided_by).with(json!({"projectId": project_id, "decisionId": d.id, "decision": d.decision, "questions": d.question_ids, "systems": d.system_ids})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(d).unwrap())
+    }
+
+    /// Upsert one system of the design (its maturity, intent, known,
+    /// unknown, current design, links) without rewriting the whole design.
+    fn design_system_set(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let sys: crate::design::GameSystem = serde_json::from_value(params.get("system").cloned().ok_or_else(|| ApiError::invalid("missing system"))?).map_err(|e| ApiError::invalid(format!("system: {e}")))?;
+        if sys.id.trim().is_empty() || sys.name.trim().is_empty() { return Err(ApiError::invalid("a system needs an id and a name")); }
+        let store = self.store.lock().unwrap();
+        let mut d = store.design(project_id)?.ok_or_else(|| ApiError::not_found("the project has no design yet"))?;
+        match d.systems.iter_mut().find(|s| s.id == sys.id) { Some(existing) => *existing = sys.clone(), None => d.systems.push(sys.clone()) }
+        d.version += 1;
+        d.updated_at = now();
+        self.atomic(&store, || {
+            store.put_design(&d)?;
+            self.emit_locked(&store, Event::new("design.updated", "user").with(json!({"projectId": project_id, "version": d.version, "system": sys.id, "maturity": sys.maturity})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(d).unwrap())
     }
 
     fn record_decision(&self, d: &RaceDecision) -> Res<()> {
@@ -1682,6 +1810,10 @@ impl Service {
                 Ok(serde_json::to_value(self.store.lock().unwrap().design(id)?).unwrap())
             }
             "design.set" => self.design_set(params),
+            "question.create" => self.question_create(params),
+            "question.resolve" => self.question_resolve(params),
+            "decision.create" => self.decision_create(params),
+            "design.system.set" => self.design_system_set(params),
             "hypothesis.create" => self.hypothesis_create(params),
             "hypothesis.update" => self.hypothesis_update(params),
             "experiment.create" => self.experiment_create(params),
@@ -1699,9 +1831,16 @@ impl Service {
                 let store = self.store.lock().unwrap();
                 let project = store.project(id)?.ok_or_else(|| ApiError::not_found(format!("project {id}")))?;
                 let d = store.design(id)?.ok_or_else(|| ApiError::not_found("the project has no design yet"))?;
+                let bundle = crate::design::DesignBundle {
+                    design: d.clone(),
+                    questions: store.questions_of(id)?,
+                    decisions: store.design_decisions_of(id)?,
+                    hypotheses: store.hypotheses()?.into_iter().filter(|h| h.project_id == id).collect(),
+                    experiments: store.experiments()?.into_iter().filter(|e| e.project_id == id).collect(),
+                };
                 // Never the user's checkout: a managed branch the user merges when ready.
                 let ref_name = crate::design::design_ref(&project.id);
-                let (sha, files) = workspaces::publish(&project, &ref_name, &project.target_ref, &format!("guild: game design v{}", d.version), |dir| crate::design::export(dir, &d)).map_err(ApiError::internal)?;
+                let (sha, files) = workspaces::publish(&project, &ref_name, &project.target_ref, &format!("guild: game design v{}", d.version), |dir| crate::design::export(dir, &bundle)).map_err(ApiError::internal)?;
                 let files: Vec<String> = files.iter().map(|f| f.rsplit("game-design/").next().map(|r| format!("game-design/{r}")).unwrap_or_else(|| f.clone())).collect();
                 self.emit_locked(&store, Event::new("design.exported", "user").with(json!({"projectId": id, "files": files.len(), "ref": ref_name, "sha": sha})));
                 Ok(json!({"files": files, "ref": ref_name, "sha": sha}))
@@ -1781,8 +1920,12 @@ impl Service {
         let mut design_imported = false;
         if store.design(&project.id)?.is_none() {
             let from_branch = workspaces::read_ref(&project, &crate::design::design_ref(&project.id), |dir| crate::design::import(dir, &project.id)).flatten();
-            if let Some(d) = from_branch.or_else(|| crate::design::import(&repo, &project.id)) {
-                store.put_design(&d)?;
+            if let Some(b) = from_branch.or_else(|| crate::design::import(&repo, &project.id)) {
+                store.put_design(&b.design)?;
+                for q in &b.questions { if store.question(&project.id, &q.id)?.is_none() { store.put_question(q)?; } }
+                for d in &b.decisions { store.put_design_decision(d)?; }
+                for h in &b.hypotheses { if store.hypothesis(&h.id)?.is_none() { store.put_hypothesis(h)?; } }
+                for e in &b.experiments { if store.experiment(&e.id)?.is_none() { store.put_experiment(e)?; } }
                 design_imported = true;
             }
         }
@@ -2580,12 +2723,14 @@ mod tests {
         assert!(prompt.contains("Avoid: a dominant strategy; always choosing the longest word; obvious decisions; grinding"));
         assert!(prompt.contains("Loop \"Economy\": earn → spend ↺"));
         assert!(prompt.contains("part, a loop or the whole"));
+        assert!(prompt.contains("System Combat [prototyping]"));
         // Export writes TOML into the repo, and a fresh project add reads it back.
         let exported = service.handle("design.export", &json!({"projectId": design.project_id})).unwrap();
         assert!(exported["files"].as_array().unwrap().len() >= 9);
         assert!(!repo.join("game-design").exists(), "the user's checkout is untouched");
         let listed = workspaces::git(&repo, &["ls-tree", "-r", "--name-only", &crate::design::design_ref(&design.project_id)]).unwrap();
-        assert!(listed.contains("game-design/loops/03-loop-3.toml"), "{listed}");
+        assert!(listed.contains("game-design/loops/loop-3.md"), "{listed}");
+        assert!(listed.contains("game-design/overview.md") && listed.contains("game-design/design.json"), "{listed}");
         // Exporting again without changes keeps the commit.
         let again = service.handle("design.export", &json!({"projectId": design.project_id})).unwrap();
         assert_eq!(again["sha"], exported["sha"]);
@@ -3057,6 +3202,11 @@ mod tests {
         let decided = service.handle("experiment.accept", &json!({"experimentId": eid, "note": "b reads best"})).unwrap();
         assert_eq!(decided["experiment"]["status"], "accepted");
         assert_eq!(decided["integrated"]["integrated"], true);
+        assert_eq!(decided["integrated"]["decision"], "DEC-001", "{decided}");
+        let decisions = service.snapshot().unwrap().design_decisions;
+        assert_eq!(decisions[0].experiment_ids, vec![eid.clone()]);
+        assert_eq!(decisions[0].playtest_ids.len(), 12);
+        assert_eq!(decisions[0].rejected_alternatives.len(), 2);
         let snap = service.snapshot().unwrap();
         let b_task = snap.experiments[0].variants.iter().find(|v| v.id == "b").unwrap().task_id.clone().unwrap();
         assert_eq!(snap.tasks.iter().find(|t| t.id == b_task).unwrap().state, TaskState::Completed);
@@ -3075,6 +3225,65 @@ mod tests {
         assert_eq!(draft.status, crate::experiment::ExperimentStatus::Draft);
         assert_eq!(draft.variants.len(), 3);
         assert!(draft.variants.iter().all(|v| v.task_id.is_none()));
+    }
+
+    #[test]
+    fn a_question_is_resolved_by_a_decision_the_design_points_at_and_both_survive_a_restart() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let db = home.0.join("guild.db");
+        let service = Service::new(Store::open(&db).unwrap(), Settings::default());
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("design.template", &json!({"projectId": "p", "template": "videogame"})).unwrap();
+        // A system is edited on its own: maturity and the precise current design.
+        let d = service.handle("design.system.set", &json!({"projectId": "p", "system": {"id": "economy", "name": "Letter economy", "maturity": "hypothesis", "intent": "Every rare letter is a decision.", "unknown": ["pool size"], "current": "Pool: 6; refills 1 per turn."}})).unwrap();
+        assert_eq!(d["version"], 2);
+        assert_eq!(d["systems"][2]["maturity"], "hypothesis");
+        // A question on that system, then a decision that answers it.
+        let q = service.handle("question.create", &json!({"projectId": "p", "question": "Should the pool refill from rewards?", "context": "Players run dry by round 8.", "systemId": "economy"})).unwrap();
+        assert_eq!(q["id"], "Q-001");
+        assert_eq!(q["status"], "open");
+        let q2 = service.handle("question.create", &json!({"projectId": "p", "question": "How many districts?", "systemId": "progression"})).unwrap();
+        assert_eq!(q2["id"], "Q-002");
+        let snap = service.snapshot().unwrap();
+        assert_eq!(snap.questions.len(), 2);
+        assert!(snap.designs[0].systems.iter().find(|s| s.id == "economy").unwrap().questions.contains(&"Q-001".to_string()));
+        let r = service.handle("question.resolve", &json!({"projectId": "p", "questionId": "Q-001", "decision": "Rewards refill the pool by 2.", "why": "Runs died of starvation, not of bad words.", "evidence": ["6 human playtests"], "rejectedAlternatives": ["a bigger pool"], "answer": "Yes: +2 per reward."})).unwrap();
+        assert_eq!(r["decision"]["id"], "DEC-001");
+        assert_eq!(r["question"]["status"], "resolved");
+        assert_eq!(r["question"]["decision_id"], "DEC-001");
+        assert_eq!(r["question"]["answer"], "Yes: +2 per reward.");
+        assert!(service.handle("question.resolve", &json!({"projectId": "p", "questionId": "Q-001", "decision": "again"})).is_err(), "a resolved question is not resolved twice");
+        let snap = service.snapshot().unwrap();
+        let economy = snap.designs[0].systems.iter().find(|s| s.id == "economy").unwrap();
+        assert_eq!(economy.decisions, vec!["DEC-001".to_string()]);
+        assert_eq!(snap.design_decisions[0].question_ids, vec!["Q-001".to_string()]);
+        assert_eq!(snap.design_decisions[0].design_version, 2);
+        // Export: Markdown pages for the question and the decision, and design.json with both.
+        service.handle("design.export", &json!({"projectId": "p"})).unwrap();
+        let listed = workspaces::git(&repo, &["ls-tree", "-r", "--name-only", &crate::design::design_ref("p")]).unwrap();
+        for f in ["game-design/overview.md", "game-design/questions/q-001.md", "game-design/questions/q-002.md", "game-design/decisions/dec-001.md", "game-design/systems/economy.md", "game-design/design.json"] {
+            assert!(listed.contains(f), "{f} missing in {listed}");
+        }
+        assert!(!repo.join("game-design").exists());
+        let overview = workspaces::git(&repo, &["show", &format!("{}:game-design/overview.md", crate::design::design_ref("p"))]).unwrap();
+        assert!(overview.contains("## Unresolved questions (1)") && overview.contains("## Resolved questions (1)"), "{overview}");
+        // A restart over the same database keeps everything; a fresh guild re-adding the project reads the branch.
+        drop(service);
+        let again = Service::new(Store::open(&db).unwrap(), Settings::default());
+        let snap = again.snapshot().unwrap();
+        assert_eq!(snap.questions.len(), 2);
+        assert_eq!(snap.design_decisions.len(), 1);
+        assert_eq!(snap.designs[0].version, 2);
+        let fresh = Service::new(Store::open_in_memory().unwrap(), Settings::default());
+        let added = fresh.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        assert_eq!(added["designImported"], true);
+        let snap = fresh.snapshot().unwrap();
+        assert_eq!(snap.questions.iter().filter(|q| q.status == "resolved").count(), 1);
+        assert_eq!(snap.design_decisions[0].id, "DEC-001");
+        assert_eq!(snap.designs[0].systems.len(), 3);
+        let kinds: Vec<String> = again.store.lock().unwrap().events_after(0, 10_000).unwrap().into_iter().map(|e| e.kind).collect();
+        for k in ["question.created", "question.resolved", "decision.created", "design.updated", "design.exported"] { assert!(kinds.contains(&k.to_string()), "missing {k}"); }
     }
 
     #[test]

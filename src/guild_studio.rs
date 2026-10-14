@@ -8,13 +8,12 @@ use crate::guild_view::GuildView;
 use crate::l10n::{tr, trf};
 use egui::{vec2, Color32, Context, CornerRadius, Frame, Margin, RichText, Stroke, Ui};
 use guild::config::Role;
-use guild::design::{Experience, GameDesign, GameLoop, Part};
 use guild::domain::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Tab { #[default] Guild, Experience, Loops, Parts }
+pub enum Tab { #[default] Guild, Concept, Experience, Loops, Systems, Parts, Questions, Decisions }
 
 #[derive(Clone, Default)]
 pub struct MemberRow {
@@ -33,50 +32,7 @@ pub struct FoundForm {
     pub members: Vec<MemberRow>,
 }
 
-#[derive(Clone, Default)]
-pub struct LoopDraft { pub id: String, pub name: String, pub steps: String, pub inputs: String, pub outputs: String, pub feedback: String, pub failure: String }
-
-#[derive(Clone, Default)]
-pub struct PartDraft { pub id: String, pub name: String, pub attributes: String, pub rules: String }
-
-#[derive(Clone, Default)]
-pub struct Draft {
-    pub title: String,
-    pub fantasy: String,
-    pub feel: String,
-    pub behaviors: String,
-    pub avoid: String,
-    pub loops: Vec<LoopDraft>,
-    pub parts: Vec<PartDraft>,
-}
-
-fn lines(s: &str) -> Vec<String> { s.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect() }
-
-impl Draft {
-    pub fn from_design(d: &GameDesign) -> Draft {
-        Draft {
-            title: d.title.clone(),
-            fantasy: d.experience.fantasy.clone(),
-            feel: d.experience.player_should_feel.join("\n"),
-            behaviors: d.experience.desired_behaviors.join("\n"),
-            avoid: d.experience.avoid.join("\n"),
-            loops: d.loops.iter().map(|l| LoopDraft { id: l.id.clone(), name: l.name.clone(), steps: l.steps.join("\n"), inputs: l.inputs.join("\n"), outputs: l.outputs.join("\n"), feedback: l.feedback.clone(), failure: l.failure.clone() }).collect(),
-            parts: d.parts.iter().map(|p| PartDraft { id: p.id.clone(), name: p.name.clone(), attributes: p.attributes.join("\n"), rules: p.rules.join("\n") }).collect(),
-        }
-    }
-
-    pub fn to_design(&self, project_id: &str) -> GameDesign {
-        GameDesign {
-            project_id: project_id.into(),
-            title: self.title.trim().into(),
-            experience: Experience { fantasy: self.fantasy.trim().into(), player_should_feel: lines(&self.feel), desired_behaviors: lines(&self.behaviors), avoid: lines(&self.avoid) },
-            loops: self.loops.iter().filter(|l| !l.name.trim().is_empty() || !l.steps.trim().is_empty()).map(|l| GameLoop { id: l.id.clone(), name: l.name.trim().into(), steps: lines(&l.steps), inputs: lines(&l.inputs), outputs: lines(&l.outputs), feedback: l.feedback.trim().into(), failure: l.failure.trim().into(), notes: String::new() }).collect(),
-            parts: self.parts.iter().filter(|p| !p.name.trim().is_empty()).map(|p| Part { id: p.id.clone(), name: p.name.trim().into(), attributes: lines(&p.attributes), rules: lines(&p.rules), notes: String::new() }).collect(),
-            version: 0,
-            updated_at: String::new(),
-        }
-    }
-}
+pub use crate::guild_chamber::Draft;
 
 #[derive(Default)]
 pub struct Studio {
@@ -90,28 +46,29 @@ pub struct Studio {
     loaded: Option<(String, u32)>,
     /// Per-member edits on the guild tab, until applied.
     member_edits: HashMap<String, MemberRow>,
+    pub chamber: crate::guild_chamber::ChamberState,
 }
 
 #[derive(Default)]
 pub struct StudioAction { pub close: bool }
 
-const PAPER: Color32 = Color32::from_rgb(237, 217, 168);
-const PAPER_DARK: Color32 = Color32::from_rgb(229, 206, 152);
-const INK: Color32 = Color32::from_rgb(61, 38, 20);
-const FAINT: Color32 = Color32::from_rgb(120, 90, 60);
-const RUST: Color32 = Color32::from_rgb(160, 120, 70);
+pub(crate) const PAPER: Color32 = Color32::from_rgb(237, 217, 168);
+pub(crate) const PAPER_DARK: Color32 = Color32::from_rgb(229, 206, 152);
+pub(crate) const INK: Color32 = Color32::from_rgb(61, 38, 20);
+pub(crate) const FAINT: Color32 = Color32::from_rgb(120, 90, 60);
+pub(crate) const RUST: Color32 = Color32::from_rgb(160, 120, 70);
 
-fn mono(text: &str, size: f32) -> RichText { RichText::new(text).font(egui::FontId::monospace(crate::ui::fs(size))).color(INK) }
+pub(crate) fn mono(text: &str, size: f32) -> RichText { RichText::new(text).font(egui::FontId::monospace(crate::ui::fs(size))).color(INK) }
 
-fn small(ui: &mut Ui, text: &str) -> bool {
+pub(crate) fn small(ui: &mut Ui, text: &str) -> bool {
     ui.add(egui::Button::new(mono(text, 10.0).strong()).fill(Color32::from_rgb(222, 196, 140)).stroke(Stroke::new(1.0_f32, RUST)).corner_radius(CornerRadius::same(3))).clicked()
 }
 
-fn primary(ui: &mut Ui, text: &str) -> bool {
+pub(crate) fn primary(ui: &mut Ui, text: &str) -> bool {
     ui.add(egui::Button::new(mono(text, 10.5).strong().color(Color32::from_rgb(250, 240, 220))).fill(Color32::from_rgb(140, 80, 30)).stroke(Stroke::NONE).corner_radius(CornerRadius::same(3))).clicked()
 }
 
-fn field(ui: &mut Ui, label: &str, text: &mut String, width: f32) -> bool {
+pub(crate) fn field(ui: &mut Ui, label: &str, text: &mut String, width: f32) -> bool {
     ui.horizontal_wrapped(|ui| {
         ui.label(mono(label, 10.5).color(FAINT));
         let width = width.min((ui.available_width() - 4.0).max(80.0));
@@ -119,7 +76,7 @@ fn field(ui: &mut Ui, label: &str, text: &mut String, width: f32) -> bool {
     }).inner
 }
 
-fn area(ui: &mut Ui, label: &str, text: &mut String, rows: usize) -> bool {
+pub(crate) fn area(ui: &mut Ui, label: &str, text: &mut String, rows: usize) -> bool {
     ui.label(mono(label, 10.5).color(FAINT));
     ui.add(egui::TextEdit::multiline(text).desired_rows(rows).desired_width(f32::INFINITY).font(egui::FontId::monospace(crate::ui::fs(10.5)))).changed()
 }
@@ -174,7 +131,7 @@ pub fn studio(ctx: &Context, view: &mut GuildView) -> StudioAction {
         ui.set_width(width - 20.0);
         ui.spacing_mut().item_spacing = vec2(6.0, 5.0);
         // Header: project, tabs, close.
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             if !snap.projects.is_empty() {
                 let shown = snap.projects.iter().find(|p| p.id == studio.project_id).map(|p| p.name.clone()).unwrap_or_default();
                 egui::ComboBox::from_id_salt("studio-project").selected_text(mono(&shown, 10.5)).width(140.0).show_ui(ui, |ui| {
@@ -183,85 +140,36 @@ pub fn studio(ctx: &Context, view: &mut GuildView) -> StudioAction {
                     }
                 });
             }
-            for (tab, label) in [(Tab::Guild, tr("Gremio")), (Tab::Experience, tr("Experiencia")), (Tab::Loops, tr("Loops")), (Tab::Parts, tr("Partes"))] {
-                let on = studio.tab == tab;
-                let fill = if on { Color32::from_rgb(140, 80, 30) } else { Color32::from_rgb(222, 196, 140) };
-                let color = if on { Color32::from_rgb(250, 240, 220) } else { INK };
-                if ui.add(egui::Button::new(mono(&label, 10.5).strong().color(color)).fill(fill).stroke(Stroke::new(1.0_f32, RUST)).corner_radius(CornerRadius::same(3))).clicked() { studio.tab = tab; }
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(egui::Button::new(mono("x", 11.0).strong()).frame(false)).on_hover_text(tr("Cerrar")).clicked() { action.close = true; }
                 if studio.dirty { ui.label(mono(&tr("sin guardar"), 10.0).color(Color32::from_rgb(190, 40, 30))); }
                 else if let Some(d) = &design { ui.label(mono(&format!("v{}", d.version), 10.0).color(FAINT)); }
             });
         });
+        ui.horizontal_wrapped(|ui| {
+            for (tab, label) in [(Tab::Guild, tr("Gremio")), (Tab::Concept, tr("Concepto")), (Tab::Experience, tr("Experiencia")), (Tab::Loops, tr("Loops")), (Tab::Systems, tr("Sistemas")), (Tab::Parts, tr("Partes")), (Tab::Questions, tr("Preguntas")), (Tab::Decisions, tr("Decisiones"))] {
+                let on = studio.tab == tab;
+                let fill = if on { Color32::from_rgb(140, 80, 30) } else { Color32::from_rgb(222, 196, 140) };
+                let color = if on { Color32::from_rgb(250, 240, 220) } else { INK };
+                if ui.add(egui::Button::new(mono(&label, 10.5).strong().color(color)).fill(fill).stroke(Stroke::new(1.0_f32, RUST)).corner_radius(CornerRadius::same(3))).clicked() { studio.tab = tab; }
+            }
+        });
         ui.separator();
+        if studio.tab != Tab::Guild { crate::guild_chamber::header(ui, &snap, design.as_ref(), &studio.project_id); }
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             match studio.tab {
                 Tab::Guild => guild_tab(ui, studio, &snap, founding, &harnesses, &mut commands),
-                Tab::Experience => {
-                    ui.label(mono(&tr("El todo: la experiencia que el jugador debe tener. Cada decisión de diseño se argumenta desde aquí."), 10.5).color(FAINT));
-                    studio.dirty |= field(ui, &tr("Título"), &mut studio.draft.title, 300.0);
-                    studio.dirty |= area(ui, &tr("Fantasía: quién es el jugador, en una frase"), &mut studio.draft.fantasy, 2);
-                    studio.dirty |= area(ui, &tr("El jugador debe sentir (una por línea)"), &mut studio.draft.feel, 3);
-                    studio.dirty |= area(ui, &tr("Conductas deseadas (una por línea)"), &mut studio.draft.behaviors, 3);
-                    studio.dirty |= area(ui, &tr("Evitar (una por línea)"), &mut studio.draft.avoid, 3);
-                }
-                Tab::Loops => {
-                    ui.label(mono(&tr("Los sistemas: ciclos que producen la experiencia. El último paso alimenta al primero."), 10.5).color(FAINT));
-                    let mut remove: Option<usize> = None;
-                    for (i, l) in studio.draft.loops.iter_mut().enumerate() {
-                        Frame::new().fill(PAPER_DARK).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                studio.dirty |= field(ui, &tr("Loop"), &mut l.name, 180.0);
-                                if small(ui, &tr("Quitar")) { remove = Some(i); }
-                            });
-                            cycle(ui, &lines(&l.steps));
-                            if ui.available_width() > 420.0 {
-                                ui.columns(2, |cols| {
-                                    studio.dirty |= area(&mut cols[0], &tr("Pasos del ciclo (uno por línea)"), &mut l.steps, 4);
-                                    studio.dirty |= area(&mut cols[1], &tr("Entradas (una por línea)"), &mut l.inputs, 2);
-                                    studio.dirty |= area(&mut cols[1], &tr("Salidas (una por línea)"), &mut l.outputs, 2);
-                                });
-                            } else {
-                                studio.dirty |= area(ui, &tr("Pasos del ciclo (uno por línea)"), &mut l.steps, 4);
-                                studio.dirty |= area(ui, &tr("Entradas (una por línea)"), &mut l.inputs, 2);
-                                studio.dirty |= area(ui, &tr("Salidas (una por línea)"), &mut l.outputs, 2);
-                            }
-                            studio.dirty |= field(ui, &tr("Retroalimentación"), &mut l.feedback, f32::INFINITY);
-                            studio.dirty |= field(ui, &tr("Falla cuando"), &mut l.failure, f32::INFINITY);
-                        });
-                    }
-                    if let Some(i) = remove { studio.draft.loops.remove(i); studio.dirty = true; }
-                    if small(ui, &tr("+ loop")) { studio.draft.loops.push(LoopDraft { id: format!("loop-{}", studio.draft.loops.len() + 1), ..Default::default() }); studio.dirty = true; }
-                }
-                Tab::Parts => {
-                    ui.label(mono(&tr("Las partes: entidades y reglas concretas. Un atributo por línea, como nombre: tipo o rango."), 10.5).color(FAINT));
-                    let mut remove: Option<usize> = None;
-                    for (i, p) in studio.draft.parts.iter_mut().enumerate() {
-                        Frame::new().fill(PAPER_DARK).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                studio.dirty |= field(ui, &tr("Parte"), &mut p.name, 180.0);
-                                if small(ui, &tr("Quitar")) { remove = Some(i); }
-                            });
-                            if ui.available_width() > 420.0 {
-                                ui.columns(2, |cols| {
-                                    studio.dirty |= area(&mut cols[0], &tr("Atributos (uno por línea)"), &mut p.attributes, 4);
-                                    studio.dirty |= area(&mut cols[1], &tr("Reglas (una por línea)"), &mut p.rules, 4);
-                                });
-                            } else {
-                                studio.dirty |= area(ui, &tr("Atributos (uno por línea)"), &mut p.attributes, 4);
-                                studio.dirty |= area(ui, &tr("Reglas (una por línea)"), &mut p.rules, 4);
-                            }
-                        });
-                    }
-                    if let Some(i) = remove { studio.draft.parts.remove(i); studio.dirty = true; }
-                    if small(ui, &tr("+ parte")) { studio.draft.parts.push(PartDraft { id: format!("part-{}", studio.draft.parts.len() + 1), ..Default::default() }); studio.dirty = true; }
-                }
+                Tab::Concept => crate::guild_chamber::concept_tab(ui, &mut studio.draft, &mut studio.dirty),
+                Tab::Experience => crate::guild_chamber::experience_tab(ui, &mut studio.draft, &mut studio.dirty),
+                Tab::Loops => crate::guild_chamber::loops_tab(ui, &mut studio.draft, &mut studio.dirty),
+                Tab::Systems => crate::guild_chamber::systems_tab(ui, &mut studio.draft, &mut studio.chamber, &snap, &studio.project_id, &mut studio.dirty, &mut commands),
+                Tab::Parts => crate::guild_chamber::parts_tab(ui, &mut studio.draft, &mut studio.dirty),
+                Tab::Questions => crate::guild_chamber::questions_tab(ui, &mut studio.chamber, &snap, &studio.project_id, &studio.draft.systems, &mut commands),
+                Tab::Decisions => crate::guild_chamber::decisions_tab(ui, &snap, &studio.project_id),
             }
         });
         // Footer for the design tabs.
-        if studio.tab != Tab::Guild && !studio.project_id.is_empty() {
+        if !matches!(studio.tab, Tab::Guild | Tab::Questions | Tab::Decisions) && !studio.project_id.is_empty() {
             ui.separator();
             ui.horizontal(|ui| {
                 if primary(ui, &tr("Guardar diseño")) {
@@ -275,7 +183,7 @@ pub fn studio(ctx: &Context, view: &mut GuildView) -> StudioAction {
                     studio.loaded = None;
                 }
                 if design.is_some() && small(ui, &tr("Exportar al repo")) { commands.push(("design.export", json!({"projectId": studio.project_id}))); }
-                ui.label(mono(&tr("game-design/ en el repositorio, en TOML; los agentes lo reciben al final de cada prompt"), 9.5).color(FAINT));
+                ui.label(mono(&tr("game-design/ en la rama guild/design del repositorio, en Markdown enlazado; los agentes reciben el diseño actual al final de cada prompt"), 9.5).color(FAINT));
             });
         }
     });
@@ -319,7 +227,7 @@ fn paper() -> Frame {
 
 /// The loop drawn as a cycle of steps, wrapped by hand: a framed label
 /// does not wrap on its own, and the row width is what we have here.
-fn cycle(ui: &mut Ui, steps: &[String]) {
+pub(crate) fn cycle(ui: &mut Ui, steps: &[String]) {
     if steps.is_empty() { return; }
     let row = ui.available_width();
     let font = egui::FontId::monospace(crate::ui::fs(10.0));
@@ -474,13 +382,14 @@ mod tests {
     fn the_draft_round_trips_and_drops_empty_rows() {
         let d = guild::design::template("p", "Verbrawl", "videogame");
         let mut draft = Draft::from_design(&d);
-        draft.loops.push(LoopDraft::default());
-        draft.parts.push(PartDraft { id: "x".into(), ..Default::default() });
+        draft.loops.push(crate::guild_chamber::LoopDraft::default());
+        draft.parts.push(crate::guild_chamber::PartDraft { id: "x".into(), ..Default::default() });
         let back = draft.to_design("p");
         assert_eq!(back.experience, d.experience);
         assert_eq!(back.loops, d.loops);
         assert_eq!(back.parts, d.parts);
         let members = videogame_members(&["kiro".into(), "claude".into()]);
+        assert_eq!(back.systems.len(), d.systems.len());
         assert_eq!(members.len(), 6);
         assert!(members.iter().all(|m| m.harness == "kiro" || m.harness == "claude"), "codex not available falls back to the first harness");
     }

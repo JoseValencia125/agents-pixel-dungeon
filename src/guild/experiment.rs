@@ -22,6 +22,9 @@ pub enum HypothesisStatus { #[default] Proposed, Experimenting, Supported, Rejec
 pub struct Hypothesis {
     pub id: String,
     pub project_id: String,
+    /// The design question this hypothesis tries to answer, when there is one.
+    #[serde(default)]
+    pub question_id: Option<String>,
     /// What is wrong, as observed.
     pub problem: String,
     #[serde(default)]

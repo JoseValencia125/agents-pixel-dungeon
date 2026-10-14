@@ -36,7 +36,12 @@ USAGE
                                      [--strategy single|reviewed|race] [--candidates N] [--select policy|judge|user] [--auto-integrate]
                                      a race runs N members at once; the selection picks among the candidates that passed the verifiers
   guild decisions <task>             how each candidate was chosen: by the policy, a judge or you
-  guild hypothesis new <project> --problem TEXT --hypothesis TEXT [--level whole|loop|part] [--evidence TEXT]
+  guild question new <project> --question TEXT [--context TEXT] [--system ID]
+  guild question resolve <project> <Q-id> --decision TEXT [--why TEXT] [--answer TEXT] [--evidence TEXT]... [--rejected TEXT]...
+  guild questions <project>          open and resolved questions, with their decisions
+  guild decision new <project> --decision TEXT [--why TEXT] [--question Q-id]... [--system ID]... [--evidence TEXT]... [--rejected TEXT]...
+  guild design <project> system set <id> --name N [--maturity undefined|concept|hypothesis|prototyping|validated|production|revised] [--intent TEXT] [--current TEXT] [--known TEXT]... [--unknown TEXT]...
+  guild hypothesis new <project> --problem TEXT --hypothesis TEXT [--level whole|loop|part] [--evidence TEXT] [--question Q-id]
                                      [--expected TEXT] [--change TEXT] [--measure TEXT]... [--system NAME]...
   guild experiment new <project> <hypothesis> [--title T] --variant id[:name][:key=value,...]... [--instructions TEXT]
                                      [--profiles a,b,c] [--runs N] [--seeds 1,2,3]
@@ -257,6 +262,20 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
         "design" => {
             let project = a.pos(0, "project")?;
             match a.positional.get(1).copied().unwrap_or("get") {
+                "system" => {
+                    if a.positional.get(2).copied() != Some("set") { return Err(USAGE.into()); }
+                    let id = a.pos(3, "system id")?;
+                    let snap = call(&ensure_running()?, "guild.snapshot", json!({}))?;
+                    let mut system = snap["designs"].as_array().into_iter().flatten().find(|d| d["project_id"] == project).and_then(|d| d["systems"].as_array()).into_iter().flatten().find(|s| s["id"] == id).cloned().unwrap_or(json!({"id": id, "name": id}));
+                    if let Some(n) = a.flag("name") { system["name"] = json!(n); }
+                    if let Some(m) = a.flag("maturity") { system["maturity"] = json!(m); }
+                    if let Some(t) = a.flag("intent") { system["intent"] = json!(t); }
+                    if let Some(t) = a.flag("current") { system["current"] = json!(t); }
+                    if !a.all("known").is_empty() { system["known"] = json!(a.all("known")); }
+                    if !a.all("unknown").is_empty() { system["unknown"] = json!(a.all("unknown")); }
+                    let r = call(&ensure_running()?, "design.system.set", json!({"projectId": project, "system": system}))?;
+                    println!("design v{} · {} systems", r["version"], r["systems"].as_array().map(Vec::len).unwrap_or(0));
+                }
                 "template" => { let r = call(&ensure_running()?, "design.template", json!({"projectId": project, "template": a.flag("template").unwrap_or("videogame")}))?; println!("design v{} · {} loops · {} parts", r["version"], r["loops"].as_array().map(Vec::len).unwrap_or(0), r["parts"].as_array().map(Vec::len).unwrap_or(0)); }
                 "export" => { let r = call(&ensure_running()?, "design.export", json!({"projectId": project}))?; for f in r["files"].as_array().into_iter().flatten() { println!("{}", f.as_str().unwrap_or("")); } }
                 _ => { let r = call(&ensure_running()?, "design.get", json!({"projectId": project}))?; println!("{}", serde_json::to_string_pretty(&r).unwrap()); }
@@ -338,10 +357,42 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        "question" => {
+            match a.pos(0, "subcommand")? {
+                "new" => {
+                    let r = call(&ensure_running()?, "question.create", json!({"projectId": a.pos(1, "project")?, "question": a.flag("question"), "context": a.flag("context"), "systemId": a.flag("system")}))?;
+                    println!("{} · {}", r["id"].as_str().unwrap_or(""), r["question"].as_str().unwrap_or(""));
+                    Ok(())
+                }
+                "resolve" => {
+                    let r = call(&ensure_running()?, "question.resolve", json!({"projectId": a.pos(1, "project")?, "questionId": a.pos(2, "question id")?, "decision": a.flag("decision"), "why": a.flag("why"), "answer": a.flag("answer"), "evidence": a.all("evidence"), "rejectedAlternatives": a.all("rejected")}))?;
+                    println!("{} resolved by {} · {}", r["question"]["id"].as_str().unwrap_or(""), r["decision"]["id"].as_str().unwrap_or(""), r["decision"]["decision"].as_str().unwrap_or(""));
+                    Ok(())
+                }
+                _ => Err(USAGE.into()),
+            }
+        }
+        "questions" => {
+            let snap = call(&ensure_running()?, "guild.snapshot", json!({}))?;
+            let project = a.pos(0, "project")?;
+            for q in snap["questions"].as_array().into_iter().flatten().filter(|q| q["project_id"] == project) {
+                println!("{} [{}] {}{}", q["id"].as_str().unwrap_or(""), q["status"].as_str().unwrap_or(""), q["question"].as_str().unwrap_or(""), q["decision_id"].as_str().map(|d| format!(" → {d}")).unwrap_or_default());
+            }
+            for d in snap["design_decisions"].as_array().into_iter().flatten().filter(|d| d["project_id"] == project) {
+                println!("{} {} · {}", d["id"].as_str().unwrap_or(""), d["decision"].as_str().unwrap_or(""), d["why"].as_str().unwrap_or(""));
+            }
+            Ok(())
+        }
+        "decision" => {
+            if a.pos(0, "subcommand")? != "new" { return Err(USAGE.into()); }
+            let r = call(&ensure_running()?, "decision.create", json!({"projectId": a.pos(1, "project")?, "decision": a.flag("decision"), "why": a.flag("why"), "questionIds": a.all("question"), "systemIds": a.all("system"), "evidence": a.all("evidence"), "rejectedAlternatives": a.all("rejected")}))?;
+            println!("{} · {}", r["id"].as_str().unwrap_or(""), r["decision"].as_str().unwrap_or(""));
+            Ok(())
+        }
         "hypothesis" => {
             if a.pos(0, "subcommand")? != "new" { return Err(USAGE.into()); }
             let r = call(&ensure_running()?, "hypothesis.create", json!({"projectId": a.pos(1, "project")?, "problem": a.flag("problem"), "hypothesis": a.flag("hypothesis"), "level": a.flag("level").unwrap_or("loop"),
-                "evidence": a.flag("evidence"), "expectedEffect": a.flag("expected"), "proposedChange": a.flag("change"), "measurements": a.all("measure"), "relatedSystems": a.all("system")}))?;
+                "evidence": a.flag("evidence"), "expectedEffect": a.flag("expected"), "proposedChange": a.flag("change"), "measurements": a.all("measure"), "relatedSystems": a.all("system"), "questionId": a.flag("question")}))?;
             println!("hypothesis {} · {} · {}", r["id"].as_str().unwrap_or(""), r["level"].as_str().unwrap_or(""), r["problem"].as_str().unwrap_or(""));
             Ok(())
         }

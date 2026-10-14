@@ -861,6 +861,8 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         projects: vec![Project { id: "verbrawl".into(), name: "Verbrawl".into(), repo_path: "~/demo/verbrawl".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, created_at: t.clone() }],
         decisions: vec![],
         hypotheses: vec![],
+        questions: vec![],
+        design_decisions: vec![],
         experiments: vec![],
         playtests: vec![],
         designs: vec![guild::design::template("verbrawl", "Verbrawl", "videogame")],

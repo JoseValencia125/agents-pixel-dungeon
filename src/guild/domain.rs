@@ -511,6 +511,10 @@ pub struct Snapshot {
     #[serde(default)]
     pub hypotheses: Vec<crate::experiment::Hypothesis>,
     #[serde(default)]
+    pub questions: Vec<crate::design::DesignQuestion>,
+    #[serde(default)]
+    pub design_decisions: Vec<crate::design::DesignDecision>,
+    #[serde(default)]
     pub experiments: Vec<crate::experiment::Experiment>,
     #[serde(default)]
     pub playtests: Vec<crate::experiment::Playtest>,

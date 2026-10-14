@@ -9,6 +9,7 @@ mod changes;
 mod assets;
 mod commands;
 mod events;
+mod guild_chamber;
 mod guild_studio;
 mod guild_view;
 mod herdr;
@@ -721,7 +722,7 @@ impl eframe::App for App {
         if let Ok(v) = std::env::var("HPD_TEST_STUDIO") {
             if now > 1.0 && now < 1.2 {
                 self.show_studio = true;
-                self.guild.studio.tab = match v.as_str() { "experience" => guild_studio::Tab::Experience, "loops" => guild_studio::Tab::Loops, "parts" => guild_studio::Tab::Parts, _ => guild_studio::Tab::Guild };
+                self.guild.studio.tab = match v.as_str() { "concept" => guild_studio::Tab::Concept, "experience" => guild_studio::Tab::Experience, "loops" => guild_studio::Tab::Loops, "systems" => guild_studio::Tab::Systems, "parts" => guild_studio::Tab::Parts, "questions" => guild_studio::Tab::Questions, "decisions" => guild_studio::Tab::Decisions, _ => guild_studio::Tab::Guild };
             }
         }
         if std::env::var("HPD_TEST_DIFF").is_ok() && now > 1.0 && now < 1.2 { self.guild.diff_open = true; }
