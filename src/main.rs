@@ -9,6 +9,7 @@ mod changes;
 mod assets;
 mod commands;
 mod events;
+mod guild_view;
 mod herdr;
 mod identity;
 mod l10n;
@@ -174,6 +175,10 @@ struct App {
     compose: ComposeState,
     hud: HudState,
     show_log: bool,
+    /// The guild service's view: members as rooms, attempts, the quest board.
+    guild: guild_view::GuildView,
+    show_board: bool,
+    shot_asked: bool,
     visible: bool,
     first_frame: bool,
     /// --fullscreen: go full screen on the first frame.
@@ -238,6 +243,9 @@ impl App {
         let mut monitor = Monitor::new(session, StatusFilter::from_raw(&prefs.filter));
         monitor.set_wake(wake.clone());
         if demo { monitor.demo = true; }
+        let mut guild = guild_view::GuildView::new(wake.clone());
+        guild.set_demo(demo);
+        guild.start();
         let mut scene = Scene::new();
         scene.reduced_motion = reduce_motion();
         scene.overrides = prefs.projects.clone();
@@ -271,6 +279,9 @@ impl App {
             compose: ComposeState::default(),
             hud: HudState::default(),
             show_log: false,
+            guild,
+            show_board: false,
+            shot_asked: false,
             visible: true,
             first_frame: true,
             start_fullscreen: fullscreen,
@@ -605,7 +616,8 @@ impl App {
                 self.prefs.save();
                 self.chat = None;
             }
-            TrayAction::Demo => { let demo = !self.monitor.demo; self.monitor.set_demo(demo); self.chat = None; }
+            TrayAction::Demo => { let demo = !self.monitor.demo; self.monitor.set_demo(demo); self.guild.set_demo(demo); self.monitor.set_extra(self.guild.agents()); self.chat = None; }
+            TrayAction::QuestBoard => self.show_board = !self.show_board,
             TrayAction::OpenHerdr => self.open_herdr(),
             TrayAction::OpenAtStart => { self.prefs.open_herdr_at_start = !self.prefs.open_herdr_at_start; self.prefs.save(); }
             TrayAction::TextBigger => self.set_text_scale(self.prefs.text_scale + 0.1),
@@ -691,8 +703,27 @@ impl eframe::App for App {
             if now > 6.0 && !self.visible { self.show(ctx); }
         }
         // HPD_TEST_SELECT=1: open the first room's chat after 1 s (for captures).
-        if std::env::var("HPD_TEST_SELECT").is_ok() && now > 1.0 && now < 1.2 && self.monitor.selected.is_none() {
-            if let Some(first) = self.monitor.visible_agents().first() { self.monitor.select(Some(first.id.clone())); }
+        // A value other than 1 names the room to open. HPD_TEST_BOARD=1 opens the quest board.
+        if let Ok(which) = std::env::var("HPD_TEST_SELECT") {
+            if now > 1.0 && now < 1.2 && self.monitor.selected.is_none() {
+                let id = if which == "1" { self.monitor.visible_agents().first().map(|a| a.id.clone()) } else { Some(which) };
+                if let Some(id) = id { self.monitor.select(Some(id)); }
+            }
+        }
+        if std::env::var("HPD_TEST_BOARD").is_ok() && now > 1.0 && now < 1.2 { self.show_board = true; }
+        // HPD_TEST_SHOT=<file.png>: save what the window shows after 3 s, for
+        // captures when the screen cannot be grabbed (another space is full screen).
+        if let Ok(path) = std::env::var("HPD_TEST_SHOT") {
+            if now > 3.0 && !self.shot_asked {
+                self.shot_asked = true;
+                ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+            let shots: Vec<Arc<egui::ColorImage>> = ctx.input(|i| i.events.iter().filter_map(|e| match e { egui::Event::Screenshot { image, .. } => Some(image.clone()), _ => None }).collect());
+            for image in shots {
+                let [w, h] = image.size;
+                let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+                if let Some(png) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) { let _ = png.save(&path); }
+            }
         }
         if self.first_frame {
             self.first_frame = false;
@@ -700,6 +731,13 @@ impl eframe::App for App {
             if self.start_fullscreen { self.set_fullscreen(ctx, true); }
         }
         let mut needs_fit = self.monitor.poll();
+        // The guild's members are rooms too; what the service says goes to the log.
+        if self.guild.poll() {
+            self.monitor.set_extra(self.guild.agents());
+            needs_fit = true;
+        }
+        for (text, tone) in std::mem::take(&mut self.guild.notes) { self.monitor.log(text, tone); }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::G)) { self.show_board = !self.show_board; }
         // Sounds and notifications for what just changed.
         let alerts: Vec<alerts::AgentAlert> = std::mem::take(&mut self.monitor.alerts);
         if let Some(first) = alerts.first() {
@@ -736,7 +774,8 @@ impl eframe::App for App {
             (i.key_pressed(egui::Key::F11) || mac, i.key_pressed(egui::Key::Escape))
         });
         if toggle { let on = !self.fullscreen; self.set_fullscreen(ctx, on); }
-        if escape && self.fullscreen && !self.panel_open() && !self.hud.searching && !self.show_log { self.set_fullscreen(ctx, false); }
+        if escape && self.show_board { self.show_board = false; }
+        else if escape && self.fullscreen && !self.panel_open() && !self.hud.searching && !self.show_log { self.set_fullscreen(ctx, false); }
         self.enter_fullscreen_when_due(ctx);
         self.follow_native_fullscreen(ctx);
         if self.settle_fullscreen(ctx) { needs_fit = true; }
@@ -955,10 +994,16 @@ impl eframe::App for App {
                         if action.close { self.monitor.set_composing(false); }
                     } else if let Some(chat) = &mut self.chat {
                         if let Some(agent) = self.monitor.agents.iter().find(|a| a.id == chat.agent_id).cloned() {
-                            let action = ui::chat_panel(ui, &self.monitor, &agent, chat, now, fullscreen);
-                            if action.terminal { self.terminals.open(ctx, &agent.cwd); }
-                            if action.close { self.monitor.select(None); }
-                            if action.console_step != 0 { self.step_console_scale(action.console_step); }
+                            if agent.id.starts_with(guild_view::ID_PREFIX) {
+                                let action = guild_view::panel(ui, &mut self.guild, &agent, now, fullscreen);
+                                if let Some(path) = action.terminal { self.terminals.open(ctx, &path); }
+                                if action.close { self.monitor.select(None); }
+                            } else {
+                                let action = ui::chat_panel(ui, &self.monitor, &agent, chat, now, fullscreen);
+                                if action.terminal { self.terminals.open(ctx, &agent.cwd); }
+                                if action.close { self.monitor.select(None); }
+                                if action.console_step != 0 { self.step_console_scale(action.console_step); }
+                            }
                         }
                     } else {
                         ui::console_placeholder(ui);
@@ -990,6 +1035,12 @@ impl eframe::App for App {
             if action.close { ctx.send_viewport_cmd(ViewportCommand::Close); }
         }
         if self.show_log && ui::activity_log(ctx, &self.monitor.events) { self.show_log = false; }
+        if self.show_board {
+            let action = guild_view::board(ctx, &mut self.guild);
+            if action.close { self.show_board = false; }
+            if let Some(id) = action.open { self.monitor.select(Some(id)); needs_fit = true; }
+        }
+        if self.chat.is_none() { self.guild.watch(None); }
         // Full screen has nothing to drag or resize.
         if !self.fullscreen {
             ui::drag_handle(ctx);

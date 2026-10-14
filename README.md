@@ -62,9 +62,27 @@ Original pixel art drawn in Aseprite (sources in `art/`), coloured after each to
 - **Full screen** (⌃⌘F, F11 on Linux): its own space, one column of rooms on the left, the live console (colours and all) in the rest.
 - **See an agent's diff** in full screen: **± Diff** in its chat lists the files changed in its folder (uncommitted, unpushed, or against main as in a pull request) with lines added and removed; click one for its diff. A **PR #N** chip opens the branch's pull request.
 - **Event-driven**: Herdr's socket events the moment they happen, snapshots only to reconcile.
+- **The guild** (preview): give it a quest split into tasks, and its members (a role on a harness and a model, Kiro first) attempt each one in their own git worktree, ask you for permissions in their room, leave a candidate commit the project's verifiers check, and wait for you to accept it before it is squashed into the quest's branch. ⌘G opens the quest board.
 - Spanish, English, French, Italian and Portuguese.
 
 The [guide](docs/GUIDE.md) has the details: how states are read, background jobs, the menu, configuration, privacy and the optional viewer mode without Herdr.
+
+## The guild (preview)
+
+Besides watching Herdr's agents, the dungeon can run a guild of its own: a local service (`agents-pixel-dungeon-guild`, built next to the app) that takes a **quest**, its **tasks** with dependencies and acceptance criteria, and **members** bound to a harness and a model. Each attempt runs in its own git worktree under the app's data folder, so your checkout is never touched; the member's room shows what it does, asks for its permissions, and when the agent stops the guild commits a candidate, runs the project's verifiers and waits for your decision. Accepted candidates are squashed into the quest's integration branch (`guild/quest/<id>`); publishing to `main` is yours.
+
+```sh
+G='build/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild'   # Linux: build/agents-pixel-dungeon-guild
+"$G" project add ~/code/my-repo                       # members and verifiers from .guild/guild.toml, if any
+"$G" member add aria --harness kiro --role implementer --model claude-sonnet-5.5
+Q=$("$G" quest new my-repo "Add poison and shield" | awk '{print $2}')
+"$G" task new $Q "Data contract" --id t1 --instructions "…" --accept "…"
+"$G" task new $Q "Combat logic"  --id t2 --depends t1 --instructions "…"
+"$G" start $Q && "$G" status                           # or watch the rooms; ⌘G opens the quest board
+"$G" accept t1 --integrate
+```
+
+Kiro runs over its Agent Client Protocol (`kiro-cli acp --agent-engine=v3`) with the model confirmed per session; `"$G" models kiro` lists what your account offers. Codex and Claude Code adapters come next. The [guide](docs/GUIDE.md#the-guild) has the configuration file and the rest of the commands.
 
 ## Build and open
 

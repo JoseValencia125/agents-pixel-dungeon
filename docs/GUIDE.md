@@ -113,6 +113,47 @@ Monitors the default local session. Environment variables:
 
 Command-line flags: `--demo` (fictional agents), `--fullscreen` (start in full screen), `--diagnose` (print what Herdr reports, or the standalone scan), `--self-test`.
 
+## The guild
+
+The guild is a second binary, `agents-pixel-dungeon-guild`, built next to the app. Run as `serve` it keeps a SQLite database, an append-only event log, the worktrees and the artifacts under the app's data folder (`~/Library/Application Support/agents-pixel-dungeon/guild` on macOS, `~/.config/agents-pixel-dungeon/guild` on Linux; `HPD_GUILD_HOME` overrides it) and listens on a Unix socket. Every other subcommand talks to it and starts it in the background when it is not up; **Quest board** in the menu (or ⌘G) shows it in the app, with a button to start the service.
+
+What it manages:
+
+- **Project**: a git repository. `project add <path>` reads `.guild/guild.toml` from it, if present, for members, a setup command and verifiers.
+- **Quest**: a goal in a project, with its own integration branch `refs/heads/guild/quest/<id>` created from the project's target branch when it starts.
+- **Task**: a unit of delivery with instructions, acceptance criteria, a role, optional dependencies (`--depends t1,t2`), a preferred member or model, and up to two attempts by default. A task is ready when every dependency is completed; a failed dependency blocks it.
+- **Member**: a name, roles, a harness (`kiro`, `mock`; `codex` and `claude` to come) and optionally a model and a mode. A member runs one attempt at a time; two run at once by default (`serve --concurrency N`).
+- **Attempt**: one try at a task. The service creates a worktree from the quest's branch, opens a session in the member's harness with the task as the prompt, follows its tools and messages, parks it when it asks for a permission (answer in the room, on the board or with `permission <attempt> <option>`), commits whatever it left when the turn ends (the candidate), runs the project's verifiers on it and leaves the task **verifying** until you `accept` (optionally `--integrate`) or `reject` it. Retry creates a new attempt; cancel interrupts the harness and waits for it to confirm. A finished attempt never runs again.
+- **Integration**: accepting then integrating squashes the candidate onto the quest's branch in a temporary checkout with compare-and-swap on the branch; a conflict blocks the task with the reason instead of touching anything.
+
+In the rooms a member is a hero of its harness in the project's room: at work in the workshop (the station follows the tool it runs), under the red "!" when it asks for a permission or failed, in the treasure chamber when its candidate was accepted. Its panel shows the task, the state, the candidate's size, each verifier's result, the permission's options, the decisions available and the attempt's transcript.
+
+`.guild/guild.toml`:
+
+```toml
+schema_version = 1
+
+[project]
+setup = ["pnpm", "install", "--frozen-lockfile"]   # run in each new worktree, optional
+
+[[members]]
+id = "aria"
+roles = ["implementer"]
+harness = "kiro"
+model = "claude-sonnet-5.5"                        # must be one the harness announces
+# mode = "vibe"                                    # Kiro: vibe, spec, plan, semantic_reviewer…
+
+[[verifiers]]
+id = "unit"
+argv = ["pnpm", "test", "--run"]
+required = true
+timeout_seconds = 300
+```
+
+Commands: `serve [--daemon] [--concurrency N] [--attempt-timeout MIN]`, `status`, `snapshot`, `stop`, `project add`, `member add`, `models [kiro|mock]`, `quest new`, `task new`, `start`, `pause`, `resume`, `cancel-quest`, `accept [--integrate]`, `reject [--reason]`, `integrate`, `retry`, `cancel-task`, `cancel <attempt>`, `permission <attempt> <option-id|deny>`, `attempt <id>` (candidate, verifiers, transcript), `events [--follow] [--after SEQ] [--attempt ID]`. Run it without arguments for the details.
+
+Kiro runs over the Agent Client Protocol, `kiro-cli acp --agent-engine=v3`, one process per attempt in the attempt's worktree; the model is set with `session/set_config_option` and only an id the provider confirms counts as effective. Permission requests are Kiro's own (`session/request_permission`); the service never answers them by itself. The `mock` harness writes a file and finishes, for trying the flow without a provider.
+
 ## Verify
 
 ```sh

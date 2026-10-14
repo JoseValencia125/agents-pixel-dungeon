@@ -87,6 +87,8 @@ pub struct Monitor {
     pub changed: bool,
     /// Herdr's availability; while not Up the rooms come from the standalone scan.
     pub herdr: HerdrState,
+    /// Rooms that are not Herdr panes: the guild's members.
+    extra: Vec<Agent>,
     next_herdr_try: Instant,
 
     inbox: Receiver<Inbox>,
@@ -138,6 +140,7 @@ impl Monitor {
             finishing: vec![],
             changed: false,
             herdr: HerdrState::Unknown,
+            extra: vec![],
             next_herdr_try: Instant::now(),
             inbox,
             outbox,
@@ -255,7 +258,18 @@ impl Monitor {
         self.events.truncate(40);
     }
 
+    /// The guild's members, drawn as rooms beside Herdr's agents and kept
+    /// through every refresh.
+    pub fn set_extra(&mut self, extra: Vec<Agent>) {
+        if self.extra == extra { return; }
+        self.extra = extra;
+        let base: Vec<Agent> = self.agents.iter().filter(|a| !a.id.starts_with("guild:")).cloned().collect();
+        self.apply(base);
+    }
+
     pub fn apply(&mut self, next: Vec<Agent>) {
+        let mut next = next;
+        next.extend(self.extra.iter().cloned());
         // Sort last: background jobs and subagents can change a status after
         // Herdr's, and whoever needs attention must lead the grid.
         let next = sort_agents(next);
