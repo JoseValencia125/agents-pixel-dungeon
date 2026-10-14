@@ -199,6 +199,8 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         // New agent
         ("Invocar un agente nuevo", ["Summon a new agent", "Invoquer un nouvel agent", "Evoca un nuovo agente", "Invocar um novo agente"]),
         ("Invocar un agente", ["Summon an agent", "Invoquer un agent", "Evoca un agente", "Invocar um agente"]),
+        ("Permiso completo", ["Full permission", "Permission complète", "Permesso completo", "Permissão completa"]),
+        ("El agente usa cualquier herramienta sin pedir permiso cada vez.", ["The agent uses any tool without asking permission each time.", "L’agent utilise n’importe quel outil sans demander la permission à chaque fois.", "L’agente usa qualsiasi strumento senza chiedere permesso ogni volta.", "O agente usa qualquer ferramenta sem pedir permissão a cada vez."]),
         ("Elegir carpeta…", ["Choose folder…", "Choisir un dossier…", "Scegli cartella…", "Escolher pasta…"]),
         ("Carpeta…", ["Folder…", "Dossier…", "Cartella…", "Pasta…"]),
         ("Primer prompt (opcional)", ["First prompt (optional)", "Premier prompt (facultatif)", "Primo prompt (facoltativo)", "Primeiro prompt (opcional)"]),

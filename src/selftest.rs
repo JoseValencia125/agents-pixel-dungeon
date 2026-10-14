@@ -42,6 +42,12 @@ pub fn run() {
     assert_eq!(git_branch(&repo.join("src").to_string_lossy()).as_deref(), Some("feature/x"));
     let _ = std::fs::remove_dir_all(&repo);
     assert!(harness_for("claude") == "claude" && harness_for("Codex CLI") == "codex" && harness_for("opencode") == "hero");
+    // Full-permission launch: only kiro has the flag, and it is the one
+    // kiro-cli chat takes (`-a, --trust-all-tools`); every other harness
+    // offers nothing, so the summon form hides the toggle for them.
+    assert_eq!(crate::herdr::trust_all_args("kiro"), &["--trust-all-tools"], "Kiro's full-permission flag");
+    assert!(crate::herdr::supports_trust_all("kiro"), "Kiro supports full permission");
+    assert!(["claude", "codex", "gemini", "cursor", "opencode", ""].iter().all(|k| crate::herdr::trust_all_args(k).is_empty() && !crate::herdr::supports_trust_all(k)), "Only Kiro offers full permission for now");
     let with_session = decode_snapshot(br#"{"result":{"snapshot":{"agents":[{"pane_id":"a","agent":"claude","agent_session":{"kind":"id","value":"s-1"}}]}}}"#).unwrap();
     assert!(with_session[0].session.as_deref() == Some("s-1") && with_session[0].subagents == 0);
     assert!(tool_action("WebSearch") == "read" && tool_action("Edit") == "forge" && tool_action("Bash") == "brew" && tool_action("Task") == "summon" && tool_action("TodoWrite") == "plan" && tool_action("mcp__x") == "type");
