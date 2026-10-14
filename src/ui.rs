@@ -1563,9 +1563,15 @@ pub fn resize_grip(ctx: &Context, visible: bool) -> bool {
 pub fn usage_height(ctx: &egui::Context, usages: &[crate::usage::HarnessUsage], open_panel: bool) -> f32 {
     if usages.is_empty() { return 0.0; }
     if !open_panel { return USAGE_LINE; }
+    // What it took last frame (the title wraps in some languages, Kiro has
+    // fewer lines); the estimate only until it has been drawn once.
+    if let Some(drawn) = ctx.data(|d| d.get_temp::<f32>(egui::Id::new(USAGE_DRAWN))) { return drawn; }
     let open = usage_open(ctx);
     26.0 + usages.iter().map(|u| 54.0 + if open.as_deref() == Some(u.harness) && has_options(u.harness) { 22.0 } else { 0.0 }).sum::<f32>()
 }
+
+/// The open HP viewer's height as drawn, kept for the next frame's layout.
+pub const USAGE_DRAWN: &str = "hp-drawn-height";
 
 /// The hero whose options (Claude's source, Kiro's plan) are showing.
 fn usage_open(ctx: &egui::Context) -> Option<String> {
