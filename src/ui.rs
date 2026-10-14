@@ -1160,6 +1160,25 @@ pub struct ComposeAction {
     pub close: bool,
 }
 
+/// Whether the summon should launch the chosen harness with every tool
+/// pre-approved: the toggle's value, but only for a harness that supports
+/// it, so an old preference can never leak onto one that does not.
+fn trust_all_for(prefs: &Prefs) -> bool {
+    prefs.create_trust_all && crate::herdr::supports_trust_all(&prefs.create_kind)
+}
+
+/// A "Permiso completo" checkbox, shown only for a harness that can be
+/// launched with full permissions (kiro). It saves the preference, which
+/// `trust_all_for` reads back guarded by the same support check.
+fn trust_all_toggle(ui: &mut Ui, prefs: &mut Prefs, size: f32) {
+    if !crate::herdr::supports_trust_all(&prefs.create_kind) { return; }
+    let mut on = prefs.create_trust_all;
+    let changed = ui.checkbox(&mut on, mono(&tr("Permiso completo"), size))
+        .on_hover_text(tr("El agente usa cualquier herramienta sin pedir permiso cada vez."))
+        .changed();
+    if changed { prefs.create_trust_all = on; prefs.save(); }
+}
+
 /// Opens under the rooms from the + button: pick a harness, a folder (one
 /// of the agents' or any other) and an optional first prompt, and Herdr
 /// starts the agent in a new workspace there.
@@ -1190,6 +1209,7 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
             if kind != prefs.create_kind { prefs.create_kind = kind; prefs.save(); }
             folder_picker(ui, prefs, &known, 11.0);
         });
+        trust_all_toggle(ui, prefs, 11.0);
         Frame::new().fill(alpha(Color32::BLACK, 0.45)).corner_radius(CornerRadius::same(5)).inner_margin(Margin::same(3)).show(ui, |ui| {
             let height = total - 7.0 * 3.0 - 22.0 - 24.0 - 24.0;
             ui.set_width(ui.available_width());
@@ -1210,7 +1230,7 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
                 let can = !busy && !prefs.create_folder.is_empty();
                 if (ui.add_enabled(can, egui::Button::new(mono(&tr("Invocar"), 11.0))).on_hover_text(tr("Crear el agente (⌘⏎)")).clicked() || (shortcut && can)) && state.busy.is_none() {
                     state.note = None;
-                    state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt));
+                    state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt, trust_all_for(prefs)));
                 }
             });
         });
@@ -1310,6 +1330,7 @@ pub fn summon_form(ui: &mut Ui, monitor: &Monitor, assets: &crate::assets::Asset
     });
     ui.label(mono(&prefs.create_kind, 10.0).strong().color(green));
     ui.horizontal(|ui| folder_picker(ui, prefs, &known, 10.0));
+    trust_all_toggle(ui, prefs, 10.0);
     // A failure says what to do: it wraps above the button, and the prompt
     // gives up a row so the room still holds it.
     let note = state.note.clone().filter(|_| !busy);
@@ -1327,7 +1348,7 @@ pub fn summon_form(ui: &mut Ui, monitor: &Monitor, assets: &crate::assets::Asset
             let can = !busy && !prefs.create_folder.is_empty();
             if (ui.add_enabled(can, egui::Button::new(mono(&tr("Invocar"), 11.0).color(Color32::WHITE)).fill(alpha(green, 0.35))).on_hover_text(tr("Crear el agente (⌘⏎)")).clicked() || (shortcut && can)) && state.busy.is_none() {
                 state.note = None;
-                state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt));
+                state.busy = Some(monitor.create(&prefs.create_kind, &prefs.create_folder, &state.prompt, trust_all_for(prefs)));
             }
         });
     });

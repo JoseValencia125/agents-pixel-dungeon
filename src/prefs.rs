@@ -25,6 +25,9 @@ pub struct Prefs {
     pub top_right: Option<(f32, f32)>,
     pub create_kind: String,
     pub create_folder: String,
+    /// Summon Kiro (and other harnesses that allow it) with every tool
+    /// pre-approved, so it stops asking permission for the same tools.
+    pub create_trust_all: bool,
     /// Open Herdr in a terminal when the app starts and its server is down.
     pub open_herdr_at_start: bool,
     /// Text size in the panels, as a factor (1.0 = normal).
@@ -75,6 +78,7 @@ impl Default for Prefs {
             top_right: None,
             create_kind: "claude".into(),
             create_folder: String::new(),
+            create_trust_all: false,
             open_herdr_at_start: false,
             text_scale: 1.0,
             console_scale: 1.0,

@@ -696,6 +696,27 @@ pub fn connection_note(error: Option<&str>, updated: Option<Instant>, now: Insta
 /// Harnesses offered when creating an agent (all are `herdr agent start --kind` values).
 pub const CREATABLE_KINDS: [&str; 8] = ["claude", "codex", "gemini", "kiro", "opencode", "cursor", "copilot", "amp"];
 
+/// Extra arguments that launch a harness with every tool pre-approved, so
+/// it stops asking permission for the same tools over and over. Passed
+/// after `herdr agent start … --`, which forwards them to the harness's
+/// own command. Empty for a harness with no such flag, which is how
+/// `supports_trust_all` and the summon form know not to offer it.
+///
+/// kiro: `kiro-cli chat --trust-all-tools` ("Allows the model to use any
+/// tool to run commands without asking for confirmation").
+pub fn trust_all_args(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "kiro" => &["--trust-all-tools"],
+        _ => &[],
+    }
+}
+
+/// Whether a harness can be launched with full permissions (so the summon
+/// form shows the toggle only then).
+pub fn supports_trust_all(kind: &str) -> bool {
+    !trust_all_args(kind).is_empty()
+}
+
 /// The link in `text` around char `index`: a URL, or something path-like
 /// (has a `/`, starts with `~`, or is a `name.ext`), without the quotes,
 /// brackets and trailing punctuation around it.

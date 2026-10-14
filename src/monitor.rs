@@ -711,7 +711,7 @@ impl Monitor {
     /// fresh shell), `herdr agent start` of `kind` in it, then the first
     /// prompt if there is one. It shows up in the dungeon with the next
     /// snapshot. The receiver gets None or an error message.
-    pub fn create(&self, kind: &str, folder: &str, prompt: &str) -> Receiver<Option<String>> {
+    pub fn create(&self, kind: &str, folder: &str, prompt: &str, trust_all: bool) -> Receiver<Option<String>> {
         let (tx, rx) = channel();
         let session = self.session.clone();
         let demo = self.demo;
@@ -733,7 +733,7 @@ impl Monitor {
                     }
                     let created = run_herdr(&["workspace", "create", "--cwd", &path, "--label", &label, "--no-focus"], &session, Duration::from_secs(8))?;
                     let pane = root_pane(&created).ok_or_else(|| MonitorError::Message(tr("Herdr no devolvió el panel nuevo.")))?;
-                    match start_agent(&session, &name, &kind, &pane) {
+                    match start_agent(&session, &name, &kind, &pane, trust_all) {
                         Ok(_) => {}
                         Err(e) if e.code() == Some("agent_not_ready") => waiting_pane = Some(pane.clone()),
                         Err(e) => {
@@ -882,11 +882,20 @@ fn pane_screen(session: &str, pane: &str) -> String {
 /// code is retried for up to ten seconds; any other answer is final. A shell
 /// that asks something first (see `shell_blocker`) is not typed into: the
 /// command would only answer its question.
-fn start_agent(session: &str, name: &str, kind: &str, pane: &str) -> Result<Vec<u8>, MonitorError> {
+///
+/// `herdr agent start … -- <args>` forwards <args> to the harness's own
+/// command, so full-permission flags (kiro: --trust-all-tools) ride along.
+fn start_agent(session: &str, name: &str, kind: &str, pane: &str, trust_all: bool) -> Result<Vec<u8>, MonitorError> {
+    let mut args: Vec<&str> = vec!["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000"];
+    let extra = if trust_all { crate::herdr::trust_all_args(kind) } else { &[] };
+    if !extra.is_empty() {
+        args.push("--");
+        args.extend_from_slice(extra);
+    }
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(blocker) = shell_blocker(&pane_screen(session, pane)) { return Err(MonitorError::Message(blocker)); }
-        match run_herdr(&["agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000"], session, Duration::from_secs(65)) {
+        match run_herdr(&args, session, Duration::from_secs(65)) {
             Err(e) if e.code() == Some("agent_pane_busy") && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(250)),
             other => return other,
         }
