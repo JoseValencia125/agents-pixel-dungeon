@@ -955,12 +955,12 @@ impl Room {
                     pos.y += if p < 0.42 { hop(p) } else if p < 0.84 { hop(p - 0.42) } else if p < 1.14 { small(p - 0.84) } else if p < 1.44 { small(p - 1.14) } else if p < 1.86 { hop(p - 1.44) } else { 0.0 };
                 }
                 "idle" if self.runner.is_none() => {
-                    // A page turns every few seconds; the hero nods with it.
+                    // The hero sits still; every few seconds the book alone
+                    // lifts a little and a page turns. Held out before it,
+                    // toward the window.
                     let p = rt % 4.2;
-                    let turning = p > 3.9;
-                    if turning { pos.y -= 1.0; }
-                    // Held out before it, toward the window.
-                    book = Some((if turning { "book_open_flipped" } else { "book_open" }, vec2(14.0, 9.0), pos2(-11.0, 2.0)));
+                    let turning = p > 3.8;
+                    book = Some((if turning { "book_open_flipped" } else { "book_open" }, vec2(14.0, 9.0), pos2(-11.0, if turning { 0.0 } else { 2.0 })));
                 }
                 _ => {}
             }
@@ -1201,7 +1201,8 @@ impl Room {
                 let back = assets.prop("chair_side_back");
                 draw_sprite(&clipped, back, pos2(seat.x + 9.0, seat.y - 1.0), back.px * 2.0, false, 0.0, Color32::WHITE);
             }
-            let sprite = assets.hero_frame(self.harness, kind, index);
+            // Seated, it holds one frame: no breathing bob in the chair.
+            let sprite = if seated { assets.hero_frame(self.harness, "idle", 0) } else { assets.hero_frame(self.harness, kind, index) };
             draw_sprite(&clipped, sprite, hero_at, vec2(HERO, HERO), if seated { true } else { self.facing < 0.0 }, 0.0, Color32::WHITE);
             if seated {
                 let front = assets.prop("chair_side_front");
@@ -1563,6 +1564,18 @@ pub struct SceneResponse {
     pub summon_rect: Option<(Rect, Rect)>,
     /// A room's emblem was right-clicked: edit it.
     pub edit_emblem: Option<String>,
+    /// A room was dragged to a new place: every room's id, in the new order.
+    pub reorder: Option<Vec<String>>,
+}
+
+/// How long a room's band is held before it comes loose to be dragged.
+const HOLD: f64 = 0.45;
+
+/// The room being dragged and where the pointer grabbed it.
+#[derive(Clone)]
+struct Drag {
+    id: String,
+    grab: Vec2,
 }
 
 enum ScrollRequest {
@@ -1597,6 +1610,8 @@ pub struct Scene {
     /// The summon panel is open: the spare room holds its form.
     pub summoning: bool,
     summon_shown: bool,
+    /// Full screen's column: a room held by its band, being dragged.
+    dragging: Option<Drag>,
     seeds: u32,
     clock: f32,
     last_time: Option<f64>,
@@ -1621,6 +1636,7 @@ impl Scene {
             emblems_added: false,
             summoning: false,
             summon_shown: false,
+            dragging: None,
             seeds: 7,
             clock: 0.0,
             last_time: None,
@@ -1659,7 +1675,17 @@ impl Scene {
         let asking: HashSet<String> = agents.iter().filter(|a| a.status == "blocked").map(|a| a.id.clone()).collect();
         let newly_asking = asking.difference(&self.asking_before).next().is_some();
         self.asking_before = asking;
-        self.order = agents.iter().map(|a| a.id.clone()).collect();
+        let fresh: Vec<String> = agents.iter().map(|a| a.id.clone()).collect();
+        if self.dragging.as_ref().is_some_and(|d| !fresh.contains(&d.id)) { self.dragging = None; }
+        self.order = if self.dragging.is_some() {
+            // While a room is dragged the order is the user's: rooms keep
+            // their places, gone ones leave and new ones come last.
+            let mut kept: Vec<String> = self.order.iter().filter(|id| fresh.contains(id)).cloned().collect();
+            for id in &fresh { if !kept.contains(id) { kept.push(id.clone()); } }
+            kept
+        } else {
+            fresh
+        };
         if newly_asking && self.selected.is_none() && !self.keep_order { self.scroll_request = Some(ScrollRequest::Top); }
         let mut shown: Vec<usize> = vec![];
         for agent in agents {
@@ -1751,7 +1777,7 @@ impl Scene {
         let dt = match self.last_time { Some(last) if !self.reduced_motion => ((now - last) as f32).clamp(0.0, 0.1), _ => 0.0 };
         self.last_time = Some(now);
         self.clock += dt;
-        let mut response = SceneResponse { clicked: None, finish: None, terminal: None, summon: false, summon_rect: None, edit_emblem: None };
+        let mut response = SceneResponse { clicked: None, finish: None, terminal: None, summon: false, summon_rect: None, edit_emblem: None, reorder: None };
         let width = ui.available_width();
         let (slots, height) = self.layout(width);
         let scroll_request = self.scroll_request.take();
@@ -1792,13 +1818,25 @@ impl Scene {
                         if wanted == id { ui.scroll_to_rect(rect.expand(4.0), None); }
                     }
                     room_rects.push(rect);
-                    let hit = ui.interact(rect, ui.id().with(id), egui::Sense::click());
-                    // Only what shows is drawn.
+                    // Full screen's rooms can be held and dragged, so they take drags too.
+                    let hit = ui.interact(rect, ui.id().with(id), if self.compact { egui::Sense::click_and_drag() } else { egui::Sense::click() });
+                    let dragged = self.dragging.as_ref().is_some_and(|d| &d.id == id);
+                    // Holding a room's band still comes loose to drag it.
+                    if self.compact && self.dragging.is_none() && hit.is_pointer_button_down_on() {
+                        let (origin, start, at, time) = ui.input(|i| (i.pointer.press_origin(), i.pointer.press_start_time(), i.pointer.interact_pos(), i.time));
+                        if let (Some(origin), Some(start), Some(at)) = (origin, start, at) {
+                            if room.header().translate(rect.min.to_vec2()).contains(origin) && at.distance(origin) < 6.0 {
+                                if time - start >= HOLD { self.dragging = Some(Drag { id: id.clone(), grab: origin - rect.min }); }
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                    }
+                    // Only what shows is drawn; the dragged room is drawn last, over the others.
                     room.size = size;
-                    if ui.is_rect_visible(rect) {
+                    if ui.is_rect_visible(rect) && !dragged {
                         room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
                     }
-                    if hit.clicked() { response.clicked = Some(id.clone()); }
+                    if hit.clicked() && !dragged { response.clicked = Some(id.clone()); }
                     if let Some((area, rows)) = hit.hover_pos().and_then(|p| room.shells_tip(rect.min, p)) { crate::ui::shells_note(ui.ctx(), area, &rows); }
                     let hit = match hit.hover_pos().and_then(|p| room.header_tip(rect.min, p)) { Some(tip) => hit.on_hover_text(tip), None => hit };
                     // A right click on the emblem edits it; elsewhere it opens the room's menu.
@@ -1819,6 +1857,46 @@ impl Scene {
                             ui.close_menu();
                         }
                     }); }
+                }
+                // The dragged room follows the pointer up or down, shivering,
+                // and the others make way; letting go leaves it in its new place.
+                if let Some(drag) = self.dragging.clone() {
+                    let (down, at) = ui.input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
+                    let from = self.order.iter().position(|i| *i == drag.id);
+                    match (down, at, from) {
+                        (true, Some(at), Some(from)) => {
+                            let top = at.y - drag.grab.y - content.min.y;
+                            let centre = top + slots[from].height() / 2.0;
+                            let to = (0..order.len()).min_by(|&a, &b| (slots[a].center().y - centre).abs().total_cmp(&(slots[b].center().y - centre).abs())).unwrap_or(from);
+                            if to != from {
+                                let moved = self.order.remove(from);
+                                self.order.insert(to, moved);
+                            }
+                            let shiver = if self.reduced_motion { 0.0 } else { (self.clock * 55.0).sin() * 1.5 };
+                            let place = pos2(slots[to].min.x + shiver, top);
+                            let selected = self.selected.as_deref() == Some(drag.id.as_str());
+                            if let Some(room) = self.rooms.get_mut(&drag.id) {
+                                let rect = Rect::from_min_size(content.min + place.to_vec2(), slots[to].size());
+                                ui.painter().rect_filled(rect.translate(vec2(4.0, 6.0)), CornerRadius::same(6), Color32::from_rgba_unmultiplied(0, 0, 0, 140));
+                                room.draw(ui.painter(), rect.min, assets, selected);
+                                room.shown = Some(place);
+                            }
+                            // Near the edges the column scrolls along.
+                            let view = ui.clip_rect();
+                            if at.y < view.min.y + 40.0 { ui.scroll_with_delta(vec2(0.0, 10.0)); }
+                            if at.y > view.max.y - 40.0 { ui.scroll_with_delta(vec2(0.0, -10.0)); }
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            ui.ctx().request_repaint();
+                        }
+                        _ => {
+                            // Dropped: it slides from where it was let go into its place.
+                            if let Some(room) = self.rooms.get_mut(&drag.id) {
+                                if let Some(shown) = room.shown { room.move_from = shown; room.move_at = self.clock; }
+                            }
+                            self.dragging = None;
+                            response.reorder = Some(self.order.clone());
+                        }
+                    }
                 }
                 if self.summon_tile {
                     let rect = slots[order.len()].translate(content.min.to_vec2());
@@ -1865,6 +1943,21 @@ mod tests {
 
     fn agent(id: &str, status: &str) -> Agent {
         Agent::new(id, "claude", status, id, "Doing a long task that would never fit on one line of a window", &format!("/nonexistent/{id}"))
+    }
+
+    #[test]
+    fn a_dragged_order_holds_until_dropped() {
+        let mut scene = Scene::new();
+        scene.sync(&[agent("a", "idle"), agent("b", "idle"), agent("c", "idle")]);
+        scene.order = vec!["c".into(), "a".into(), "b".into()];
+        scene.dragging = Some(Drag { id: "c".into(), grab: vec2(0.0, 0.0) });
+        // Herdr's order comes back each frame; the dragged one is kept, a new room comes last.
+        scene.sync(&[agent("a", "idle"), agent("b", "idle"), agent("c", "idle"), agent("d", "idle")]);
+        assert_eq!(scene.order, ["c", "a", "b", "d"]);
+        // The dragged room closing lets go of the drag.
+        scene.sync(&[agent("a", "idle"), agent("b", "idle")]);
+        assert!(scene.dragging.is_none());
+        assert_eq!(scene.order, ["a", "b"]);
     }
 
     #[test]

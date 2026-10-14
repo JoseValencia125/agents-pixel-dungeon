@@ -790,7 +790,11 @@ impl eframe::App for App {
         let mut visible_agents = self.monitor.visible_agents();
         // Full screen keeps each room in its place; who waits for you is
         // called on top instead.
-        if self.fullscreen { visible_agents.sort_by(|a, b| herdr::natural_cmp(&a.id, &b.id)); }
+        // The order the user dragged the rooms to comes first.
+        if self.fullscreen {
+            let placed = |a: &herdr::Agent| self.prefs.room_order.iter().position(|folder| *folder == a.cwd).unwrap_or(usize::MAX);
+            visible_agents.sort_by(|a, b| placed(a).cmp(&placed(b)).then_with(|| herdr::natural_cmp(&a.id, &b.id)));
+        }
         self.scene.keep_order = self.fullscreen;
         self.scene.compact = self.fullscreen;
         self.scene.room_size = scene::RoomSize::from_key(&self.prefs.room_size);
@@ -864,6 +868,21 @@ impl eframe::App for App {
                 // The last known rooms stay, faded, while the data is not live.
                 ui.painter().rect_filled(scene_rect, CornerRadius { nw: round, ne: round, sw: 0, se: 0 }, Color32::from_rgba_unmultiplied(13, 15, 17, 90));
             }
+            // A room dragged to a new place: keep the order by folder, with
+            // folders not showing now where they were, after these.
+            if let Some(order) = response.reorder {
+                let mut folders: Vec<String> = vec![];
+                for id in &order {
+                    if let Some(agent) = visible_agents.iter().find(|a| &a.id == id) {
+                        if !folders.contains(&agent.cwd) { folders.push(agent.cwd.clone()); }
+                    }
+                }
+                for kept in &self.prefs.room_order {
+                    if !folders.contains(kept) { folders.push(kept.clone()); }
+                }
+                self.prefs.room_order = folders;
+                self.prefs.save();
+            }
             if let Some(id) = response.clicked {
                 let next = if self.monitor.selected.as_deref() == Some(&id) { None } else { Some(id) };
                 self.monitor.select(next);
@@ -891,7 +910,14 @@ impl eframe::App for App {
                 ui.painter().rect_filled(rect, CornerRadius::ZERO, ui::HUD_FILL);
                 ui.painter().hline(rect.x_range(), rect.min.y, egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 20)));
                 let inner = Rect::from_min_max(egui::pos2(rect.min.x + 10.0, rect.min.y), egui::pos2(rect.max.x - 10.0, rect.max.y));
-                let picked = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| { ui.set_clip_rect(rect); ui::usage_panel(ui, &self.assets, &self.usages, now, self.prefs.claude_usage_live, self.prefs.guild_hp_open) }).inner;
+                let drawn = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| { ui.set_clip_rect(rect); ui::usage_panel(ui, &self.assets, &self.usages, now, self.prefs.claude_usage_live, self.prefs.guild_hp_open) });
+                // The open panel gets the height it really took, from the next frame on.
+                let needed = drawn.response.rect.height() + 6.0;
+                if self.prefs.guild_hp_open && (needed - usage_h).abs() > 0.5 {
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new(ui::USAGE_DRAWN), needed));
+                    ctx.request_repaint();
+                }
+                let picked = drawn.inner;
                 if picked.toggle_open { self.prefs.guild_hp_open = !self.prefs.guild_hp_open; self.prefs.save(); }
                 if let Some(plan) = picked.kiro_plan { self.prefs.kiro_plan = plan; self.prefs.save(); self.next_usage = 0.0; }
                 if let Some(live) = picked.claude_live { self.prefs.claude_usage_live = live; self.prefs.save(); self.next_usage = 0.0; }
