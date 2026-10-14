@@ -24,6 +24,9 @@ USAGE
   guild stop                         stop the service
 
   guild project add <path> [--id ID] [--name NAME]
+  guild found <path> [--name NAME] [--template videogame|blank|none] [--member NAME:ROLE:HARNESS[:MODEL]]...
+  guild roles                        the roles of the catalogue
+  guild design <project> [get|template|export]   the game design: show it, start from the template, write game-design/ into the repo
   guild member add <id> --harness kiro|codex|claude|mock [--role R]... [--model M] [--mode MODE] [--name N]
   guild models [kiro|codex|claude|mock]  the models the harness announces
 
@@ -216,6 +219,33 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             if let Some(name) = a.flag("name") { params["name"] = json!(name); }
             let r = call(&ensure_running()?, "project.add", params)?;
             println!("project {} at {} ({} members from .guild/guild.toml)", r["project"]["id"].as_str().unwrap_or(""), r["project"]["repo_path"].as_str().unwrap_or(""), r["membersFromConfig"]);
+            Ok(())
+        }
+        "found" => {
+            let members: Vec<Value> = a.all("member").iter().map(|m| {
+                let parts: Vec<&str> = m.splitn(4, ':').collect();
+                json!({"name": parts.first().unwrap_or(&""), "role": parts.get(1).unwrap_or(&"implementer"), "harness": parts.get(2).unwrap_or(&"kiro"), "model": parts.get(3)})
+            }).collect();
+            let mut params = json!({"repoPath": a.pos(0, "project path")?, "template": a.flag("template").unwrap_or("videogame"), "members": members});
+            if let Some(name) = a.flag("name") { params["name"] = json!(name); }
+            let r = call(&ensure_running()?, "guild.found", params)?;
+            println!("guild {} · {} members · design {}", r["project"]["id"].as_str().unwrap_or(""), r["members"].as_array().map(Vec::len).unwrap_or(0), if r["design"].is_null() { "none" } else { "from template" });
+            Ok(())
+        }
+        "roles" => {
+            let r = call(&ensure_running()?, "roles.list", json!({}))?;
+            for role in r.as_array().into_iter().flatten() {
+                println!("{:<18} {:<13} {}", role["id"].as_str().unwrap_or(""), role["guild"].as_str().unwrap_or(""), role["name"].as_str().unwrap_or(""));
+            }
+            Ok(())
+        }
+        "design" => {
+            let project = a.pos(0, "project")?;
+            match a.positional.get(1).copied().unwrap_or("get") {
+                "template" => { let r = call(&ensure_running()?, "design.template", json!({"projectId": project, "template": a.flag("template").unwrap_or("videogame")}))?; println!("design v{} · {} loops · {} parts", r["version"], r["loops"].as_array().map(Vec::len).unwrap_or(0), r["parts"].as_array().map(Vec::len).unwrap_or(0)); }
+                "export" => { let r = call(&ensure_running()?, "design.export", json!({"projectId": project}))?; for f in r["files"].as_array().into_iter().flatten() { println!("{}", f.as_str().unwrap_or("")); } }
+                _ => { let r = call(&ensure_running()?, "design.get", json!({"projectId": project}))?; println!("{}", serde_json::to_string_pretty(&r).unwrap()); }
+            }
             Ok(())
         }
         "member" => {

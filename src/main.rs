@@ -9,6 +9,7 @@ mod changes;
 mod assets;
 mod commands;
 mod events;
+mod guild_studio;
 mod guild_view;
 mod herdr;
 mod identity;
@@ -178,6 +179,7 @@ struct App {
     /// The guild service's view: members as rooms, attempts, the quest board.
     guild: guild_view::GuildView,
     show_board: bool,
+    show_studio: bool,
     shot_asked: bool,
     visible: bool,
     first_frame: bool,
@@ -281,6 +283,7 @@ impl App {
             show_log: false,
             guild,
             show_board: false,
+            show_studio: false,
             shot_asked: false,
             visible: true,
             first_frame: true,
@@ -618,6 +621,7 @@ impl App {
             }
             TrayAction::Demo => { let demo = !self.monitor.demo; self.monitor.set_demo(demo); self.guild.set_demo(demo); self.monitor.set_extra(self.guild.agents()); self.chat = None; }
             TrayAction::QuestBoard => self.show_board = !self.show_board,
+            TrayAction::Guild => self.show_studio = !self.show_studio,
             TrayAction::OpenHerdr => self.open_herdr(),
             TrayAction::OpenAtStart => { self.prefs.open_herdr_at_start = !self.prefs.open_herdr_at_start; self.prefs.save(); }
             TrayAction::TextBigger => self.set_text_scale(self.prefs.text_scale + 0.1),
@@ -713,6 +717,13 @@ impl eframe::App for App {
         if let Ok(v) = std::env::var("HPD_TEST_BOARD") {
             if now > 1.0 && now < 1.2 { self.show_board = true; self.guild.form.open = v == "form"; }
         }
+        // HPD_TEST_STUDIO=guild|experience|loops|parts opens the guild window on that tab.
+        if let Ok(v) = std::env::var("HPD_TEST_STUDIO") {
+            if now > 1.0 && now < 1.2 {
+                self.show_studio = true;
+                self.guild.studio.tab = match v.as_str() { "experience" => guild_studio::Tab::Experience, "loops" => guild_studio::Tab::Loops, "parts" => guild_studio::Tab::Parts, _ => guild_studio::Tab::Guild };
+            }
+        }
         if std::env::var("HPD_TEST_DIFF").is_ok() && now > 1.0 && now < 1.2 { self.guild.diff_open = true; }
         // HPD_TEST_SHOT=<file.png>: save what the window shows after 3 s, for
         // captures when the screen cannot be grabbed (another space is full screen).
@@ -740,7 +751,8 @@ impl eframe::App for App {
             needs_fit = true;
         }
         for (text, tone) in std::mem::take(&mut self.guild.notes) { self.monitor.log(text, tone); }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::G)) { self.show_board = !self.show_board; }
+        if ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::G)) { self.show_studio = !self.show_studio; }
+        else if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::G)) { self.show_board = !self.show_board; }
         // Sounds and notifications for what just changed.
         let alerts: Vec<alerts::AgentAlert> = std::mem::take(&mut self.monitor.alerts);
         if let Some(first) = alerts.first() {
@@ -777,7 +789,8 @@ impl eframe::App for App {
             (i.key_pressed(egui::Key::F11) || mac, i.key_pressed(egui::Key::Escape))
         });
         if toggle { let on = !self.fullscreen; self.set_fullscreen(ctx, on); }
-        if escape && self.show_board { self.show_board = false; }
+        if escape && self.show_studio { self.show_studio = false; }
+        else if escape && self.show_board { self.show_board = false; }
         else if escape && self.fullscreen && !self.panel_open() && !self.hud.searching && !self.show_log { self.set_fullscreen(ctx, false); }
         self.enter_fullscreen_when_due(ctx);
         self.follow_native_fullscreen(ctx);
@@ -1038,9 +1051,14 @@ impl eframe::App for App {
             if action.close { ctx.send_viewport_cmd(ViewportCommand::Close); }
         }
         if self.show_log && ui::activity_log(ctx, &self.monitor.events) { self.show_log = false; }
+        if self.show_studio {
+            let action = guild_studio::studio(ctx, &mut self.guild);
+            if action.close { self.show_studio = false; }
+        }
         if self.show_board {
             let action = guild_view::board(ctx, &mut self.guild);
             if action.close { self.show_board = false; }
+            if action.studio { self.show_studio = true; }
             if let Some(id) = action.open { self.monitor.select(Some(id)); needs_fit = true; }
         }
         if self.chat.is_none() { self.guild.watch(None); }

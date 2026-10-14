@@ -131,6 +131,16 @@ In the rooms a member is a hero of its harness in the project's room: at work in
 
 The **quest board** (⌘G, or the menu) lists the members with a form to add one (name, harness, model, role) and a **New quest** form: the project (or a repository path to register), a title, and the tasks one per line as `Title :: instructions`, with a leading `>` for a task that depends on the one above. **Create and start** registers the project, creates the quest and its tasks and starts it; the same commands the CLI sends.
 
+The **guild window** (⌘⇧G, the menu's **Guild**, or **Guild…** on the board) is where a guild is founded and shaped. Its first tab founds one: a repository, a name, a design template (video game, blank or none) and the members, each with a role from the catalogue, a harness and a model; **Video game roles** fills a studio in one click (planner, systems designer, gameplay engineer, reviewer, art director, exploit hunter, on the harnesses available). With a guild in place the same tab edits or removes members and shows the catalogue: coordination (planner), design (systems designer, design analyst), engineering (implementer, gameplay engineer), quality (reviewer, visual QA), art (art director, asset artist, sprite animator, technical artist) and play (AI player, exploit hunter). Each role has its own prompt, which frames every attempt a member of that role makes.
+
+The other three tabs hold the **game design** in Sellers' three levels, and every attempt's prompt ends with a summary of it, so an agent argues a change from the experience rather than from a number:
+
+- **Experience**, the whole: the fantasy in one sentence, what the player should feel, the behaviours the design wants, and what to avoid.
+- **Loops**, the systems: each loop as a cycle of steps (drawn as a chain that feeds back into itself), its inputs and outputs, its feedback and when it fails.
+- **Parts**: the entities and rules, one attribute per line as `name: type or range`.
+
+**Save design** sends the whole document to the service (it keeps a version); **Video game template** fills it with a small word-combat game to edit from; **Export to the repo** writes it under `game-design/` as TOML (`experience.toml`, `loops/NN-id.toml`, `parts/NN-id.toml`), which `project add` reads back when a project arrives with one. The CLI has the same: `found <path> --template videogame --member Name:role:harness[:model]`, `roles`, `design <project> [get|template|export]`.
+
 The dungeon only sees the guild's own events, never a harness's; every adapter translates to them. Lifecycle: `quest.*`, `task.*`, `attempt.*` (one per state, plus `attempt.finished` with the metrics), `workspace.ready`, `setup.*`, `session.started`, `session.resumed`, `session.closed`, `turn.started`, `turn.text`, `turn.completed`. From the agent: `agent.thinking`, `agent.working`, `agent.waiting` (once per change), `tool.started`, `tool.completed`, `file.changed`, `plan.updated`, `model.changed`, `permission.requested`, `permission.resolved`. From the guild: `candidate.committed` or `candidate.empty`, `verifier.started`, `verifier.finished`, `verification.finished`, `merge.started`, `merge.completed`, `merge.blocked`.
 
 `.guild/guild.toml`:
@@ -155,7 +165,7 @@ required = true
 timeout_seconds = 300
 ```
 
-Commands: `serve [--daemon] [--concurrency N] [--attempt-timeout MIN]`, `status`, `snapshot`, `stop`, `project add`, `member add`, `models [kiro|mock]`, `quest new`, `task new`, `start`, `pause`, `resume`, `cancel-quest`, `accept [--integrate]`, `reject [--reason]`, `integrate`, `retry`, `cancel-task`, `cancel <attempt>`, `interrupt <attempt>`, `permission <attempt> <option-id|deny>`, `attempt <id>` (candidate, verifiers, transcript), `events [--follow] [--after SEQ] [--attempt ID]`. Run it without arguments for the details.
+Commands: `serve [--daemon] [--concurrency N] [--attempt-timeout MIN]`, `status`, `snapshot`, `stop`, `project add`, `found`, `roles`, `design`, `member add`, `models [kiro|mock]`, `quest new`, `task new`, `start`, `pause`, `resume`, `cancel-quest`, `accept [--integrate]`, `reject [--reason]`, `integrate`, `retry`, `cancel-task`, `cancel <attempt>`, `interrupt <attempt>`, `permission <attempt> <option-id|deny>`, `attempt <id>` (candidate, verifiers, transcript), `events [--follow] [--after SEQ] [--attempt ID]`. Run it without arguments for the details.
 
 Kiro runs over the Agent Client Protocol, `kiro-cli acp --agent-engine=v3`, one process per attempt in the attempt's worktree; the model is set with `session/set_config_option` and only an id the provider confirms counts as effective. Permission requests are Kiro's own (`session/request_permission`); the service never answers them by itself. After a restart its sessions are reopened with `session/load`. The `mock` harness writes a file and finishes, for trying the flow without a provider.
 

@@ -348,6 +348,11 @@ pub struct Snapshot {
     pub attempts: Vec<Attempt>,
     pub workspaces: Vec<Workspace>,
     pub harnesses: Vec<HarnessStatus>,
+    /// One per project that has one.
+    #[serde(default)]
+    pub designs: Vec<crate::design::GameDesign>,
+    #[serde(default)]
+    pub roles: Vec<crate::config::Role>,
 }
 
 /// What `probe` found out about an installed harness.

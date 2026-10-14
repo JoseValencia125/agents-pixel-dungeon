@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, attempt_id TEXT NOT NU
 CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, attempt_id TEXT, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, type TEXT NOT NULL, attempt_id TEXT, task_id TEXT, quest_id TEXT, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS commands (idempotency_key TEXT PRIMARY KEY, result TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS designs (id TEXT PRIMARY KEY, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS tasks_quest ON tasks(quest_id, state);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id, state);
 CREATE INDEX IF NOT EXISTS events_attempt ON events(attempt_id);
@@ -108,6 +109,9 @@ impl Store {
     }
 
     pub fn put_member(&self, m: &Member) -> StoreResult<()> { self.put("members", &m.id, &[], m) }
+    pub fn put_design(&self, d: &crate::design::GameDesign) -> StoreResult<()> { self.put("designs", &d.project_id, &[], d) }
+    pub fn design(&self, project_id: &str) -> StoreResult<Option<crate::design::GameDesign>> { self.get("designs", project_id) }
+    pub fn designs(&self) -> StoreResult<Vec<crate::design::GameDesign>> { self.list("SELECT json FROM designs ORDER BY id", &[]) }
     pub fn member(&self, id: &str) -> StoreResult<Option<Member>> { self.get("members", id) }
     pub fn members(&self) -> StoreResult<Vec<Member>> { self.list("SELECT json FROM members ORDER BY id", &[]) }
     pub fn delete_member(&self, id: &str) -> StoreResult<()> {
@@ -237,6 +241,8 @@ impl Store {
             attempts: self.attempts()?,
             workspaces: self.workspaces()?,
             harnesses,
+            designs: self.designs()?,
+            roles: vec![],
         })
     }
 }

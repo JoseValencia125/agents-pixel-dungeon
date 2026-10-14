@@ -79,6 +79,7 @@ pub struct GuildView {
     pub diff: Option<(String, String)>,
     pub diff_open: bool,
     pub form: QuestForm,
+    pub studio: crate::guild_studio::Studio,
 }
 
 impl GuildView {
@@ -102,6 +103,7 @@ impl GuildView {
             diff: None,
             diff_open: false,
             form: QuestForm::default(),
+            studio: Default::default(),
         }
     }
 
@@ -419,6 +421,9 @@ fn log_line(ev: &Event, snap: Option<&Snapshot>) -> Option<(String, &'static str
     let p = &ev.payload;
     Some(match ev.kind.as_str() {
         "quest.started" => (trf("Misión iniciada: {}", &[&p["title"].as_str().unwrap_or("")]), "info"),
+        "guild.founded" => (trf("Guild fundada: {} miembros", &[&p["members"]]), "info"),
+        "design.updated" => (trf("Diseño guardado (v{})", &[&p["version"]]), "info"),
+        "design.exported" => (trf("Diseño exportado a {}", &[&p["path"].as_str().unwrap_or("")]), "done"),
         "quest.completed" => (trf("Misión completada: {}", &[&p["title"].as_str().unwrap_or("")]), "done"),
         "attempt.started" => (trf("{} toma {}", &[&p["member"].as_str().unwrap_or(""), &p["task"].as_str().unwrap_or("")]), "working"),
         "permission.requested" => (trf("{} pide permiso: {}", &[&member(), &p["title"].as_str().unwrap_or("")]), "blocked"),
@@ -633,6 +638,8 @@ pub fn panel(ui: &mut Ui, view: &mut GuildView, agent: &Agent, _now: f64, wide: 
 pub struct BoardAction {
     pub close: bool,
     pub open: Option<String>,
+    /// Open the guild window.
+    pub studio: bool,
 }
 
 pub fn board(ctx: &Context, view: &mut GuildView) -> BoardAction {
@@ -701,6 +708,7 @@ pub fn board(ctx: &Context, view: &mut GuildView) -> BoardAction {
                 // The form for a new quest.
                 ui.horizontal(|ui| {
                     if small(ui, &tr("Nueva misión"), ink) { view.form.open = !view.form.open; }
+                    if small(ui, &tr("Gremio…"), ink) { action.studio = true; }
                     if snap.quests.is_empty() { ui.label(mono(&tr("Sin misiones todavía"), 11.0).color(faint)); }
                 });
                 if view.form.open {
@@ -842,6 +850,8 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         last_seq: 0,
         service_version: "demo".into(),
         projects: vec![Project { id: "verbrawl".into(), name: "Verbrawl".into(), repo_path: "~/demo/verbrawl".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], created_at: t.clone() }],
+        designs: vec![guild::design::template("verbrawl", "Verbrawl", "videogame")],
+        roles: guild::config::role_catalog(),
         quests: vec![Quest { id: "q1".into(), project_id: "verbrawl".into(), title: tr("Efectos de estado"), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some("490acd6".into()), plan_version: 1, created_at: t.clone(), updated_at: t.clone() }],
         tasks: vec![
             task("t1", "Contrato de datos", TaskState::Completed, &[]),

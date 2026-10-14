@@ -440,7 +440,8 @@ impl Service {
         let role_prompt = if member.role_prompt.trim().is_empty() { config::default_role_prompt(&task.role) } else { member.role_prompt.clone() };
         let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_requested.clone(), mode: member.mode.clone(), role_prompt: role_prompt.clone() };
         let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
-        let prompt = compose_prompt(&role_prompt, &task, &workspace);
+        let design = self.store.lock().unwrap().design(&project.id)?;
+        let prompt = compose_prompt(&role_prompt, &task, &workspace, design.as_ref());
         self.run_turn(attempt_id, &attempt, &member, &adapter, session, &prompt)
     }
 
@@ -800,7 +801,9 @@ impl Service {
 
     pub fn snapshot(&self) -> Res<Snapshot> {
         let harnesses = self.harness_status.lock().unwrap().clone();
-        Ok(self.store.lock().unwrap().snapshot(SERVICE_VERSION, harnesses)?)
+        let mut snap = self.store.lock().unwrap().snapshot(SERVICE_VERSION, harnesses)?;
+        snap.roles = config::role_catalog();
+        Ok(snap)
     }
 
     // ----- commands -----
@@ -847,6 +850,24 @@ impl Service {
                 Ok(json!({"artifact": a, "text": text}))
             }
             "project.add" => self.project_add(params),
+            "guild.found" => self.guild_found(params),
+            "roles.list" => Ok(serde_json::to_value(config::role_catalog()).unwrap()),
+            "member.update" => self.member_update(params),
+            "design.get" => {
+                let id = p_str(params, "projectId")?;
+                Ok(serde_json::to_value(self.store.lock().unwrap().design(id)?).unwrap())
+            }
+            "design.set" => self.design_set(params),
+            "design.template" => self.design_template(params),
+            "design.export" => {
+                let id = p_str(params, "projectId")?;
+                let store = self.store.lock().unwrap();
+                let project = store.project(id)?.ok_or_else(|| ApiError::not_found(format!("project {id}")))?;
+                let d = store.design(id)?.ok_or_else(|| ApiError::not_found("the project has no design yet"))?;
+                let files = crate::design::export(Path::new(&project.repo_path), &d).map_err(|e| ApiError::internal(e.to_string()))?;
+                self.emit_locked(&store, Event::new("design.exported", "user").with(json!({"projectId": id, "files": files.len(), "path": format!("{}/game-design", project.repo_path)})));
+                Ok(json!({"files": files}))
+            }
             "member.add" => self.member_add(params),
             "member.remove" => {
                 let id = p_str(params, "memberId")?;
@@ -916,8 +937,80 @@ impl Service {
                 members += 1;
             }
         }
-        self.emit_locked(&store, Event::new("project.added", "user").with(json!({"projectId": project.id, "repoPath": project.repo_path, "members": members})));
-        Ok(json!({"project": project, "membersFromConfig": members}))
+        // A design kept in the repo comes along, unless the guild already has one.
+        let mut design_imported = false;
+        if store.design(&project.id)?.is_none() {
+            if let Some(d) = crate::design::import(&repo, &project.id) {
+                store.put_design(&d)?;
+                design_imported = true;
+            }
+        }
+        self.emit_locked(&store, Event::new("project.added", "user").with(json!({"projectId": project.id, "repoPath": project.repo_path, "members": members, "designImported": design_imported})));
+        Ok(json!({"project": project, "membersFromConfig": members, "designImported": design_imported}))
+    }
+
+    /// Found a guild in one go: the project, its members with their
+    /// roles, and a design from a template. What the dungeon's window sends.
+    fn guild_found(&self, params: &Value) -> ApiResult {
+        let added = self.project_add(params)?;
+        let project_id = added["project"]["id"].as_str().unwrap_or("").to_string();
+        let mut members = vec![];
+        for m in params.get("members").and_then(Value::as_array).into_iter().flatten() {
+            let name = m.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            if name.is_empty() { continue; }
+            let id = m.get("id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| slug(&name));
+            let role = m.get("role").and_then(Value::as_str).unwrap_or("implementer");
+            let p = json!({"id": id, "name": name, "harness": m.get("harness").and_then(Value::as_str).unwrap_or("kiro"), "roles": [role], "model": m.get("model"), "mode": m.get("mode")});
+            members.push(self.member_add(&p)?);
+        }
+        let design = match p_opt(params, "template") {
+            Some(t) if !t.is_empty() && t != "none" => Some(self.design_template(&json!({"projectId": project_id, "template": t}))?),
+            _ => None,
+        };
+        self.emit(Event::new("guild.founded", "user").with(json!({"projectId": project_id, "members": members.len(), "template": p_opt(params, "template")})));
+        Ok(json!({"project": added["project"], "members": members, "design": design}))
+    }
+
+    fn member_update(&self, params: &Value) -> ApiResult {
+        let id = p_str(params, "memberId")?;
+        let store = self.store.lock().unwrap();
+        let mut m = store.member(id)?.ok_or_else(|| ApiError::not_found(format!("member {id}")))?;
+        if let Some(n) = p_opt(params, "name") { m.name = n; }
+        if let Some(h) = p_opt(params, "harness") { m.harness = HarnessKind::parse(&h).ok_or_else(|| ApiError::invalid("unknown harness"))?; }
+        if params.get("roles").is_some() { let roles = p_list(params, "roles"); if !roles.is_empty() { m.roles = roles; } }
+        if params.get("model").is_some() { m.model_id = p_opt(params, "model"); }
+        if params.get("mode").is_some() { m.mode = p_opt(params, "mode"); }
+        if let Some(e) = params.get("enabled").and_then(Value::as_bool) { m.enabled = e; }
+        store.put_member(&m)?;
+        self.emit_locked(&store, Event::new("member.updated", "user").with(json!({"memberId": m.id, "harness": m.harness, "model": m.model_id, "roles": m.roles})));
+        Ok(serde_json::to_value(m).unwrap())
+    }
+
+    fn design_template(&self, params: &Value) -> ApiResult {
+        let id = p_str(params, "projectId")?;
+        let name = p_opt(params, "template").unwrap_or_else(|| "videogame".into());
+        let store = self.store.lock().unwrap();
+        let project = store.project(id)?.ok_or_else(|| ApiError::not_found(format!("project {id}")))?;
+        let mut d = crate::design::template(id, &project.name, &name);
+        d.version = store.design(id)?.map(|x| x.version + 1).unwrap_or(1);
+        store.put_design(&d)?;
+        self.emit_locked(&store, Event::new("design.updated", "user").with(json!({"projectId": id, "version": d.version, "template": name})));
+        Ok(serde_json::to_value(d).unwrap())
+    }
+
+    fn design_set(&self, params: &Value) -> ApiResult {
+        let id = p_str(params, "projectId")?;
+        let mut d: crate::design::GameDesign = serde_json::from_value(params.get("design").cloned().ok_or_else(|| ApiError::invalid("missing design"))?).map_err(|e| ApiError::invalid(format!("design: {e}")))?;
+        let store = self.store.lock().unwrap();
+        store.project(id)?.ok_or_else(|| ApiError::not_found(format!("project {id}")))?;
+        d.project_id = id.into();
+        d.version = store.design(id)?.map(|x| x.version + 1).unwrap_or(1);
+        d.updated_at = now();
+        for (i, l) in d.loops.iter_mut().enumerate() { if l.id.trim().is_empty() { l.id = format!("loop-{}", i + 1); } }
+        for (i, p) in d.parts.iter_mut().enumerate() { if p.id.trim().is_empty() { p.id = format!("part-{}", i + 1); } }
+        store.put_design(&d)?;
+        self.emit_locked(&store, Event::new("design.updated", "user").with(json!({"projectId": id, "version": d.version, "loops": d.loops.len(), "parts": d.parts.len()})));
+        Ok(serde_json::to_value(d).unwrap())
     }
 
     fn member_add(&self, params: &Value) -> ApiResult {
@@ -1223,7 +1316,7 @@ impl Service {
     }
 }
 
-fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace) -> String {
+fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>) -> String {
     let mut s = String::new();
     s.push_str(role_prompt.trim());
     s.push_str("\n\n# Task: ");
@@ -1240,6 +1333,7 @@ fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace) -> Stri
         "\n## Rules\n- Your working directory is a dedicated git worktree on branch `{}`. Work only inside it.\n- Do not commit, push or switch branches; the guild commits your work when you finish.\n- Do not ask whether to proceed: do the work, then reply with a short summary of what changed, how you verified it, and anything left undone.\n",
         workspace.branch
     ));
+    if let Some(d) = design { s.push_str(&crate::design::prompt_context(d)); }
     s
 }
 
@@ -1481,6 +1575,47 @@ mod tests {
         assert!(kinds.contains(&"session.resumed".to_string()));
         // Let the first life's hung turn end so its thread stops.
         let _ = first.handle("attempt.cancel", &json!({"attemptId": attempt_id}));
+    }
+
+    #[test]
+    fn founding_a_guild_gives_members_a_design_the_prompt_carries() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let service = Service::new(Store::open_in_memory().unwrap(), Settings::default());
+        service.register(Arc::new(MockHarness::new(MockBehaviour::Hang)));
+        service.probe_harnesses();
+        let r = service.handle("guild.found", &json!({"repoPath": repo.display().to_string(), "name": "Verbrawl", "template": "videogame", "members": [
+            {"name": "Sellers", "role": "systems-designer", "harness": "mock", "model": "mock-fast"},
+            {"name": "Orin", "role": "gameplay-engineer", "harness": "mock"},
+        ]})).unwrap();
+        assert_eq!(r["members"].as_array().unwrap().len(), 2);
+        assert_eq!(r["design"]["loops"].as_array().unwrap().len(), 2);
+        let snap = service.snapshot().unwrap();
+        assert_eq!(snap.designs.len(), 1);
+        assert!(snap.roles.iter().any(|r| r.id == "exploit-hunter"));
+        assert_eq!(snap.members.iter().find(|m| m.id == "sellers").unwrap().roles, vec!["systems-designer".to_string()]);
+        // Edit the design: the version moves and the prompt carries it.
+        let mut d = snap.designs[0].clone();
+        d.experience.avoid.push("grinding".into());
+        d.loops.push(crate::design::GameLoop { id: String::new(), name: "Economy".into(), steps: vec!["earn".into(), "spend".into()], ..Default::default() });
+        let saved = service.handle("design.set", &json!({"projectId": d.project_id, "design": d})).unwrap();
+        assert_eq!(saved["version"], 2);
+        assert_eq!(saved["loops"][2]["id"], "loop-3");
+        let design: crate::design::GameDesign = serde_json::from_value(saved).unwrap();
+        let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, version: 1, created_at: now(), updated_at: now() };
+        let ws = Workspace { id: "w".into(), attempt_id: "a".into(), project_id: design.project_id.clone(), path: "/tmp/w".into(), branch: "guild/x".into(), base_sha: "0".into(), state: WorkspaceState::Ready, created_at: now(), updated_at: now() };
+        let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design));
+        assert!(prompt.contains("Avoid: a dominant strategy; always choosing the longest word; obvious decisions; grinding"));
+        assert!(prompt.contains("Loop \"Economy\": earn → spend ↺"));
+        assert!(prompt.contains("part, a loop or the whole"));
+        // Export writes TOML into the repo, and a fresh project add reads it back.
+        let exported = service.handle("design.export", &json!({"projectId": design.project_id})).unwrap();
+        assert!(exported["files"].as_array().unwrap().len() >= 9);
+        assert!(repo.join("game-design/loops/03-loop-3.toml").exists());
+        let other = Service::new(Store::open_in_memory().unwrap(), Settings::default());
+        let added = other.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "again"})).unwrap();
+        assert_eq!(added["designImported"], true);
+        assert_eq!(other.snapshot().unwrap().designs[0].loops.len(), 3);
     }
 
     #[test]

@@ -62,7 +62,7 @@ Original pixel art drawn in Aseprite (sources in `art/`), coloured after each to
 - **Full screen** (⌃⌘F, F11 on Linux): its own space, one column of rooms on the left, the live console (colours and all) in the rest.
 - **See an agent's diff** in full screen: **± Diff** in its chat lists the files changed in its folder (uncommitted, unpushed, or against main as in a pull request) with lines added and removed; click one for its diff. A **PR #N** chip opens the branch's pull request.
 - **Event-driven**: Herdr's socket events the moment they happen, snapshots only to reconcile.
-- **The guild** (preview): give it a quest split into tasks, from the quest board (⌘G) or the CLI, and its members (a role on a harness and a model: Kiro, Codex or Claude Code) attempt each one in their own git worktree, ask you for permissions in their room, leave a candidate commit the project's verifiers check, and wait for you to accept it before it is squashed into the quest's branch. The work survives restarts: sessions are resumed where the harness allows it.
+- **The guild** (preview): found one for a repository from the guild window (⌘⇧G): members with roles from a game studio's catalogue (systems designer, gameplay engineer, reviewer, art director, exploit hunter…) on Kiro, Codex or Claude Code, and the game design in three levels, the experience, the loops and the parts, which every agent gets with its task. Give it a quest split into tasks, from the quest board (⌘G) or the CLI, and its members attempt each one in their own git worktree, ask you for permissions in their room, leave a candidate commit the project's verifiers check, and wait for you to accept it before it is squashed into the quest's branch. The work survives restarts: sessions are resumed where the harness allows it.
 - Spanish, English, French, Italian and Portuguese.
 
 The [guide](docs/GUIDE.md) has the details: how states are read, background jobs, the menu, configuration, privacy and the optional viewer mode without Herdr.
@@ -71,11 +71,12 @@ The [guide](docs/GUIDE.md) has the details: how states are read, background jobs
 
 Besides watching Herdr's agents, the dungeon can run a guild of its own: a local service (`agents-pixel-dungeon-guild`, built next to the app) that takes a **quest**, its **tasks** with dependencies and acceptance criteria, and **members** bound to a harness and a model. Each attempt runs in its own git worktree under the app's data folder, so your checkout is never touched; the member's room shows what it does, asks for its permissions, and when the agent stops the guild commits a candidate, runs the project's verifiers and waits for your decision. Accepted candidates are squashed into the quest's integration branch (`guild/quest/<id>`); publishing to `main` is yours. The guild owns the work and its state; agents are ephemeral: if the service or an agent dies, the quest, its tasks, attempts and events are still there, and a running attempt is resumed in a reopened session or its worktree adopted as the candidate.
 
-The quest board (⌘G) has the forms: add a member, then a new quest with its tasks one per line and **Create and start**. The same from the command line:
+The guild window (⌘⇧G) founds a guild: the repository, its members with a role each (a video game studio's roles in one click), and a design from the **video game** template, which it then lets you shape in three tabs, Experience, Loops and Parts, and export to `game-design/` in the repo. The quest board (⌘G) has the forms for members and for a new quest with its tasks one per line and **Create and start**. The same from the command line:
 
 ```sh
 G='build/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild'   # Linux: build/agents-pixel-dungeon-guild
-"$G" project add ~/code/my-repo                       # members and verifiers from .guild/guild.toml, if any
+"$G" found ~/code/my-game --template videogame --member Sellers:systems-designer:kiro --member Orin:gameplay-engineer:codex
+"$G" project add ~/code/my-repo                       # or just a project: members and verifiers from .guild/guild.toml, if any
 "$G" member add aria --harness kiro --role implementer --model claude-sonnet-5.5
 "$G" member add orin --harness codex --role reviewer       # or --harness claude --model sonnet
 Q=$("$G" quest new my-repo "Add poison and shield" | awk '{print $2}')
