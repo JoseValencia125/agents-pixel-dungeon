@@ -36,6 +36,12 @@ USAGE
                                      [--strategy single|reviewed|race] [--candidates N] [--select policy|judge|user] [--auto-integrate]
                                      a race runs N members at once; the selection picks among the candidates that passed the verifiers
   guild decisions <task>             how each candidate was chosen: by the policy, a judge or you
+  guild hypothesis new <project> --problem TEXT --hypothesis TEXT [--level whole|loop|part] [--evidence TEXT]
+                                     [--expected TEXT] [--change TEXT] [--measure TEXT]... [--system NAME]...
+  guild experiment new <project> <hypothesis> [--title T] --variant id[:name][:key=value,...]... [--instructions TEXT]
+                                     [--profiles a,b,c] [--runs N] [--seeds 1,2,3]
+  guild experiment start|show|accept|reject|iterate <experiment> [--variant ID] [--note TEXT]
+  guild playtests <experiment>       every playtest of the experiment, with its metrics
   guild records [--project ID] [--task ID]   one row per finished attempt: strategy, member, harness, model, duration, size, verifiers, judge score, winner
   guild start <quest>  |  guild pause <quest>  |  guild resume <quest>  |  guild cancel-quest <quest>
 
@@ -329,6 +335,60 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                 let size = format!("{}/{}", r["insertions"].as_u64().unwrap_or(0), r["deletions"].as_u64().unwrap_or(0));
                 let win = match r["winner"] { Value::Bool(true) => " ★", Value::Bool(false) => " ✗", _ => "" };
                 println!("{:<10} {:<22} {:<16} {:<8} {:<7} {:<22} {:>7} {:>5} {:>4} {:>4} {:>5} {:>5} {:>5} {:<8}{}", r["kind"].as_str().unwrap_or(""), r["task_title"].as_str().unwrap_or("").chars().take(22).collect::<String>(), format!("{}/{}", r["strategy"].as_str().unwrap_or(""), r["selection"].as_str().unwrap_or("")), r["member_id"].as_str().unwrap_or(""), r["harness"].as_str().unwrap_or(""), r["model"].as_str().unwrap_or("-").chars().take(22).collect::<String>(), r["duration_ms"].as_i64().unwrap_or(0), r["turns"], r["resumed"], r["files_changed"].as_u64().unwrap_or(0), size, r["verifiers_passed"], r["judge_score"].as_f64().map(|s| format!("{s:.0}")).unwrap_or("-".into()), r["result"].as_str().unwrap_or(""), win);
+            }
+            Ok(())
+        }
+        "hypothesis" => {
+            if a.pos(0, "subcommand")? != "new" { return Err(USAGE.into()); }
+            let r = call(&ensure_running()?, "hypothesis.create", json!({"projectId": a.pos(1, "project")?, "problem": a.flag("problem"), "hypothesis": a.flag("hypothesis"), "level": a.flag("level").unwrap_or("loop"),
+                "evidence": a.flag("evidence"), "expectedEffect": a.flag("expected"), "proposedChange": a.flag("change"), "measurements": a.all("measure"), "relatedSystems": a.all("system")}))?;
+            println!("hypothesis {} · {} · {}", r["id"].as_str().unwrap_or(""), r["level"].as_str().unwrap_or(""), r["problem"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        "experiment" => {
+            let sub = a.pos(0, "subcommand")?;
+            match sub {
+                "new" => {
+                    let variants: Vec<Value> = a.all("variant").iter().map(|spec| {
+                        let mut parts = spec.splitn(3, ':');
+                        let id = parts.next().unwrap_or("").to_string();
+                        let name = parts.next().unwrap_or("").to_string();
+                        let params: serde_json::Map<String, Value> = parts.next().unwrap_or("").split(',').filter(|kv| kv.contains('=')).map(|kv| {
+                            let (k, v) = kv.split_once('=').unwrap();
+                            (k.trim().to_string(), v.trim().parse::<f64>().map(Value::from).unwrap_or_else(|_| Value::from(v.trim())))
+                        }).collect();
+                        json!({"id": id, "name": if name.is_empty() { id.clone() } else { name }, "params": params, "instructions": a.flag("instructions").unwrap_or("")})
+                    }).collect();
+                    let mut plan = json!({});
+                    if let Some(p) = a.flag("profiles") { plan["profiles"] = json!(p.split(',').map(str::trim).collect::<Vec<_>>()); }
+                    if let Some(n) = a.flag("runs").and_then(|s| s.parse::<u64>().ok()) { plan["runs_per_profile"] = json!(n); }
+                    if let Some(s) = a.flag("seeds") { plan["seeds"] = json!(s.split(',').filter_map(|x| x.trim().parse::<u64>().ok()).collect::<Vec<_>>()); }
+                    let mut params = json!({"projectId": a.pos(1, "project")?, "hypothesisId": a.pos(2, "hypothesis")?, "variants": variants, "plan": plan});
+                    if let Some(t) = a.flag("title") { params["title"] = json!(t); }
+                    let r = call(&ensure_running()?, "experiment.create", params)?;
+                    println!("experiment {} · {} · {} variants", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""), r["variants"].as_array().map(Vec::len).unwrap_or(0));
+                    Ok(())
+                }
+                "start" => { let r = call(&ensure_running()?, "experiment.start", json!({"experimentId": a.pos(1, "experiment")?}))?; println!("experiment {} · quest {}", r["status"].as_str().unwrap_or(""), r["quest_id"].as_str().unwrap_or("")); Ok(()) }
+                "accept" | "reject" | "iterate" => {
+                    let r = call(&ensure_running()?, &format!("experiment.{sub}"), json!({"experimentId": a.pos(1, "experiment")?, "variantId": a.flag("variant"), "note": a.flag("note")}))?;
+                    println!("experiment {} · {}", r["experiment"]["status"].as_str().unwrap_or(""), r["integrated"]);
+                    Ok(())
+                }
+                _ => {
+                    let snap = call(&ensure_running()?, "guild.snapshot", json!({}))?;
+                    let id = a.pos(1, "experiment")?;
+                    let e = snap["experiments"].as_array().into_iter().flatten().find(|e| e["id"] == id || e["id"].as_str().map(|s| s.ends_with(id)).unwrap_or(false)).ok_or_else(|| format!("no experiment {id}"))?;
+                    println!("{}", serde_json::to_string_pretty(e).unwrap());
+                    Ok(())
+                }
+            }
+        }
+        "playtests" => {
+            let snap = call(&ensure_running()?, "guild.snapshot", json!({}))?;
+            let id = a.pos(0, "experiment")?;
+            for p in snap["playtests"].as_array().into_iter().flatten().filter(|p| p["experiment_id"] == id || p["experiment_id"].as_str().map(|s| s.ends_with(id)).unwrap_or(false)) {
+                println!("{:<10} {:<10} seed {:<3} {:<9} {:>4} events · runs {}/{} · top {} ({:.0}%) · {}", p["variant_id"].as_str().unwrap_or(""), p["profile"].as_str().unwrap_or(""), p["seed"], p["status"].as_str().unwrap_or(""), p["event_count"], p["metrics"]["runs"]["completed"], p["metrics"]["runs"]["started"], p["metrics"]["choices"]["top"].as_str().unwrap_or("-"), p["metrics"]["choices"]["top_share"].as_f64().unwrap_or(0.0) * 100.0, p["failure"].as_str().unwrap_or(""));
             }
             Ok(())
         }

@@ -17,6 +17,21 @@ pub struct GuildFile {
     pub members: Vec<MemberSection>,
     #[serde(default)]
     pub verifiers: Vec<VerifierSection>,
+    #[serde(default)]
+    pub playtest: Option<PlaytestSection>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlaytestSection {
+    pub argv: Vec<String>,
+    #[serde(default = "three_hundred")]
+    pub timeout_seconds: u64,
+}
+
+fn three_hundred() -> u64 { 300 }
+
+impl PlaytestSection {
+    pub fn to_runner(&self) -> PlaytestRunner { PlaytestRunner { argv: self.argv.clone(), timeout_seconds: self.timeout_seconds } }
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,7 +158,7 @@ pub fn role_catalog() -> Vec<Role> {
         role("visual-qa", "Visual QA", "quality", &format!("You are visual QA in a game development guild. Nothing is approved from the PNG alone: import the asset, render it in a test scene, capture it, and judge readability, contrast, scale, silhouette, animation, hierarchy, background compatibility and UI overlap.{COMMON}")),
         role("ai-player", "AI player", "play", &format!("You are an AI player in a game development guild. You do not program: you play, as the persona the task names (novice, optimizer, explorer, greedy, long-term planner), and report what you did, what you felt tempted to do and why, and the numbers the task asks to measure.{COMMON}")),
         role("exploit-hunter", "Exploit hunter", "play", &format!("You are the exploit hunter of a game development guild. Try to break the design: infinite resource loops, dominant and safe strategies, degenerate loops, unusable mechanics, unreachable content, economy inflation, overpowered combinations. Report each with the steps to reproduce it.{COMMON}")),
-        role("design-analyst", "Design analyst", "design", &format!("You are the design analyst of a game development guild. Read playtest and simulation data against the experience and the hypotheses, and say what the numbers support and what they do not. Never declare something fun from data alone; human playtests are the independent source of truth.{COMMON}")),
+        role("design-analyst", "Design analyst", "design", "You are the design analyst of a game development guild. You receive a design hypothesis, the variants of the game an experiment built, and the metrics synthetic players produced on each. Compare the intended experience, the hypothesis and the observed behaviour; say what the numbers support and what they do not, name unexpected behaviours, and recommend the next experiment. Never declare something fun from synthetic data; human playtests are the independent source of truth. Do not edit files. Answer with one fenced ```json block and nothing after it: {\"verdict\": \"supports\" | \"rejects\" | \"inconclusive\", \"evidence\": [\"…\"], \"unexpected\": [\"…\"], \"recommended_variant\": \"<variant id or none>\", \"recommended_next\": \"…\", \"confidence\": 0.0}"),
     ]
 }
 

@@ -20,6 +20,9 @@ pub enum MockBehaviour {
     Hang,
     /// Say this and finish, writing nothing.
     Reply(String),
+    /// Write the JSON after `GUILD_PARAMS:` in the prompt to this file:
+    /// a variant builder that applies exactly its parameters.
+    WriteParams { file: String },
 }
 
 #[derive(Default)]
@@ -34,6 +37,8 @@ pub struct MockHarness {
     behaviour: Mutex<MockBehaviour>,
     /// What the mock answers when the prompt is a judge's (it lists candidates).
     judge_reply: Mutex<Option<String>>,
+    /// What the mock answers when the prompt is an analyst's (it lists metrics).
+    analysis_reply: Mutex<Option<String>>,
     /// Milliseconds the turn takes, so rooms show working for a moment.
     pub delay_ms: u64,
     state: Arc<Mutex<MockState>>,
@@ -41,11 +46,12 @@ pub struct MockHarness {
 
 impl MockHarness {
     pub fn new(behaviour: MockBehaviour) -> MockHarness {
-        MockHarness { behaviour: Mutex::new(behaviour), judge_reply: Mutex::new(None), delay_ms: 50, state: Arc::default() }
+        MockHarness { behaviour: Mutex::new(behaviour), judge_reply: Mutex::new(None), analysis_reply: Mutex::new(None), delay_ms: 50, state: Arc::default() }
     }
     pub fn set_behaviour(&self, b: MockBehaviour) { *self.behaviour.lock().unwrap() = b; }
     /// Answer judge prompts with this text (a JSON block naming a winner).
     pub fn set_judge_reply(&self, text: impl Into<String>) { *self.judge_reply.lock().unwrap() = Some(text.into()); }
+    pub fn set_analysis_reply(&self, text: impl Into<String>) { *self.analysis_reply.lock().unwrap() = Some(text.into()); }
     /// Session ids that were reopened through `resume_session`.
     pub fn resumed(&self) -> Vec<String> { self.state.lock().unwrap().resumed.clone() }
 }
@@ -99,6 +105,13 @@ impl HarnessAdapter for MockHarness {
         if text.contains("## Candidates") {
             if let Some(reply) = self.judge_reply.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(reply); }
         }
+        if text.contains("## Playtest metrics") {
+            if let Some(reply) = self.analysis_reply.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(reply); }
+        }
+        if let MockBehaviour::WriteParams { file } = &behaviour {
+            let params = text.lines().find_map(|l| l.trim().strip_prefix("GUILD_PARAMS:")).map(|s| s.trim().to_string()).unwrap_or_else(|| "{}".into());
+            behaviour = MockBehaviour::Succeed { file: file.clone(), content: format!("{params}\n") };
+        }
         let (cwd, _model) = {
             let st = self.state.lock().unwrap();
             let Some(s) = st.sessions.iter().find(|s| s.0 == session.id) else { return Err(HarnessError::RuntimeFailed("unknown session".into())) };
@@ -149,6 +162,7 @@ impl HarnessAdapter for MockHarness {
                         let _ = ev_tx.send(HarnessEvent::Text(text));
                         let _ = res_tx.send(TurnOutcome::Completed { stop_reason: "end_turn".into() });
                     }
+                    MockBehaviour::WriteParams { .. } => unreachable!("turned into Succeed above"),
                     MockBehaviour::Fail(reason) => {
                         std::thread::sleep(Duration::from_millis(delay));
                         let _ = res_tx.send(TurnOutcome::Failed { reason });

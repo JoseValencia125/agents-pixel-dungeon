@@ -7,6 +7,7 @@ use crate::api::{ApiError, ApiResult, Handler};
 use crate::domain::*;
 use crate::harness::{HarnessAdapter, HarnessEvent, SessionOptions, SessionRef, Support, TurnOutcome};
 use crate::store::Store;
+use crate::experiment::{Experiment, ExperimentDecision, ExperimentResult, ExperimentStatus, Hypothesis, HypothesisStatus, Playtest, PlaytestKind, Variant};
 use crate::{config, scheduler, workspaces};
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -51,6 +52,8 @@ pub struct Service {
     /// Events appended inside an open unit of work, sent on commit.
     held: Mutex<Vec<Event>>,
     running: Mutex<HashMap<String, Running>>,
+    /// Experiments whose playtests a thread is running.
+    playtesting: Mutex<Vec<String>>,
     pub settings: Settings,
     pub stop: Arc<AtomicBool>,
     log_file: Mutex<Option<std::fs::File>>,
@@ -90,6 +93,7 @@ impl Service {
             harness_status: Mutex::new(vec![]),
             subscribers: Mutex::new(vec![]),
             held: Mutex::new(vec![]),
+            playtesting: Mutex::new(vec![]),
             running: Mutex::new(HashMap::new()),
             settings,
             stop: Arc::new(AtomicBool::new(false)),
@@ -350,6 +354,7 @@ impl Service {
                 })?;
             }
         }
+        self.experiments_tick()?;
         // Dispatch.
         let running_quests: Vec<String> = quests.iter().filter(|q| q.state == QuestState::Running).map(|q| q.id.clone()).collect();
         let tasks = self.store.lock().unwrap().tasks()?;
@@ -500,6 +505,443 @@ impl Service {
             if let Err(e) = self.task_integrate(task_id) { self.log(&format!("task {task_id}: integration failed: {}", e.message)); }
         }
         Ok(())
+    }
+
+    // ----- hypotheses and experiments -----
+
+    fn hypothesis_create(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let store = self.store.lock().unwrap();
+        store.project(project_id)?.ok_or_else(|| ApiError::not_found(format!("project {project_id}")))?;
+        let h = Hypothesis {
+            id: p_opt(params, "id").unwrap_or_else(new_id), project_id: project_id.into(),
+            problem: p_str(params, "problem")?.into(), evidence: p_opt(params, "evidence").unwrap_or_default(),
+            level: serde_json::from_value(params.get("level").cloned().unwrap_or(json!("loop"))).map_err(|e| ApiError::invalid(format!("level: {e}")))?,
+            hypothesis: p_str(params, "hypothesis")?.into(), expected_effect: p_opt(params, "expectedEffect").unwrap_or_default(), proposed_change: p_opt(params, "proposedChange").unwrap_or_default(),
+            measurements: p_list(params, "measurements"), related_systems: p_list(params, "relatedSystems"), status: HypothesisStatus::Proposed, created_at: now(), updated_at: now(),
+        };
+        self.atomic(&store, || {
+            store.put_hypothesis(&h)?;
+            self.emit_locked(&store, Event::new("hypothesis.created", "user").with(json!({"projectId": project_id, "hypothesisId": h.id, "problem": h.problem, "level": h.level})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(h).unwrap())
+    }
+
+    fn hypothesis_update(&self, params: &Value) -> ApiResult {
+        let id = p_str(params, "hypothesisId")?;
+        let store = self.store.lock().unwrap();
+        let mut h = store.hypothesis(id)?.ok_or_else(|| ApiError::not_found(format!("hypothesis {id}")))?;
+        if let Some(v) = p_opt(params, "problem") { h.problem = v; }
+        if let Some(v) = p_opt(params, "evidence") { h.evidence = v; }
+        if let Some(v) = p_opt(params, "hypothesis") { h.hypothesis = v; }
+        if let Some(v) = p_opt(params, "expectedEffect") { h.expected_effect = v; }
+        if let Some(v) = p_opt(params, "proposedChange") { h.proposed_change = v; }
+        if params.get("measurements").is_some() { h.measurements = p_list(params, "measurements"); }
+        if params.get("relatedSystems").is_some() { h.related_systems = p_list(params, "relatedSystems"); }
+        if let Some(l) = params.get("level") { h.level = serde_json::from_value(l.clone()).map_err(|e| ApiError::invalid(format!("level: {e}")))?; }
+        if let Some(s) = params.get("status") { h.status = serde_json::from_value(s.clone()).map_err(|e| ApiError::invalid(format!("status: {e}")))?; }
+        h.updated_at = now();
+        self.atomic(&store, || {
+            store.put_hypothesis(&h)?;
+            self.emit_locked(&store, Event::new("hypothesis.updated", "user").with(json!({"hypothesisId": h.id, "status": h.status})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(h).unwrap())
+    }
+
+    fn experiment_create(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let hypothesis_id = p_str(params, "hypothesisId")?;
+        let store = self.store.lock().unwrap();
+        store.project(project_id)?.ok_or_else(|| ApiError::not_found(format!("project {project_id}")))?;
+        let h = store.hypothesis(hypothesis_id)?.ok_or_else(|| ApiError::not_found(format!("hypothesis {hypothesis_id}")))?;
+        let mut variants: Vec<Variant> = serde_json::from_value(params.get("variants").cloned().unwrap_or(json!([]))).map_err(|e| ApiError::invalid(format!("variants: {e}")))?;
+        if variants.is_empty() { return Err(ApiError::invalid("an experiment needs at least one variant")); }
+        for v in variants.iter_mut() {
+            v.id = slug(if v.id.trim().is_empty() { &v.name } else { &v.id });
+            if v.name.trim().is_empty() { v.name = v.id.clone(); }
+            v.task_id = None;
+            v.attempt_id = None;
+        }
+        let mut seen = std::collections::HashSet::new();
+        if !variants.iter().all(|v| seen.insert(v.id.clone())) { return Err(ApiError::invalid("variant ids repeat")); }
+        let plan = match params.get("plan") { Some(p) => serde_json::from_value(p.clone()).map_err(|e| ApiError::invalid(format!("plan: {e}")))?, None => Default::default() };
+        let e = Experiment {
+            id: p_opt(params, "id").unwrap_or_else(new_id), project_id: project_id.into(), hypothesis_id: hypothesis_id.into(),
+            title: p_opt(params, "title").unwrap_or_else(|| format!("Experiment: {}", h.hypothesis.chars().take(60).collect::<String>())),
+            status: ExperimentStatus::Draft, quest_id: None, variants, plan, analysis_task_id: None, result: None, decision: None, failure: None, created_at: now(), updated_at: now(),
+        };
+        self.atomic(&store, || {
+            store.put_experiment(&e)?;
+            self.emit_locked(&store, Event::new("experiment.created", "user").with(json!({"projectId": project_id, "experimentId": e.id, "hypothesisId": hypothesis_id, "variants": e.variants.len(), "title": e.title})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(e).unwrap())
+    }
+
+    /// Build the variants: a quest with one single-attempt task per
+    /// variant, chosen by the policy and never integrated by itself, plus
+    /// an analysis task that waits for them.
+    fn experiment_start(self: &Arc<Service>, id: &str) -> ApiResult {
+        let (mut e, project, hypothesis, members) = {
+            let store = self.store.lock().unwrap();
+            let e = store.experiment(id)?.ok_or_else(|| ApiError::not_found(format!("experiment {id}")))?;
+            if e.status != ExperimentStatus::Draft { return Err(ApiError::conflict(format!("experiment is {:?}", e.status))); }
+            let p = store.project(&e.project_id)?.ok_or_else(|| ApiError::not_found("project"))?;
+            let h = store.hypothesis(&e.hypothesis_id)?.ok_or_else(|| ApiError::not_found("hypothesis"))?;
+            (e, p, h, store.members()?)
+        };
+        if project.playtest.is_none() { return Err(ApiError::invalid("the project has no [playtest] runner in .guild/guild.toml")); }
+        let builder_role = if members.iter().any(|m| m.roles.iter().any(|r| r == "gameplay-engineer")) { "gameplay-engineer" } else { "implementer" };
+        let quest = self.quest_create(&json!({"projectId": e.project_id, "title": e.title, "description": format!("Experiment on: {}", hypothesis.hypothesis)}))?;
+        let quest_id = quest["id"].as_str().unwrap_or("").to_string();
+        let short = e.id[e.id.len().saturating_sub(8)..].to_string();
+        let mut variant_tasks = vec![];
+        for v in e.variants.iter_mut() {
+            let task_id = format!("{short}-{}", v.id);
+            let params_json = serde_json::to_string(&v.params).unwrap_or_else(|_| "{}".into());
+            let mut instructions = String::new();
+            if v.id == "control" && v.params.is_empty() {
+                instructions.push_str("This is the control variant: the game as it is. Change nothing. Reply that the build is ready.\n");
+            } else {
+                instructions.push_str(&format!("Build variant \"{}\" of the experiment \"{}\" for the hypothesis: {}\n\n", v.name, e.title, hypothesis.hypothesis));
+                if !v.instructions.trim().is_empty() { instructions.push_str(v.instructions.trim()); instructions.push_str("\n\n"); }
+                if !v.params.is_empty() { instructions.push_str(&format!("Apply exactly these parameters to the game's balance/configuration, changing nothing else:\nGUILD_PARAMS: {params_json}\n")); }
+            }
+            self.task_create(&json!({"questId": quest_id, "id": task_id, "title": format!("Variant: {}", v.name), "instructions": instructions, "role": builder_role,
+                "strategy": {"type": "single", "candidates": 1, "selection": "policy", "auto_integrate": false},
+                "acceptance": [format!("the build runs with parameters {params_json}")]}))?;
+            v.task_id = Some(task_id.clone());
+            variant_tasks.push(task_id);
+        }
+        let analysis_id = format!("{short}-analysis");
+        self.task_create(&json!({"questId": quest_id, "id": analysis_id, "title": "Analysis", "instructions": "Analyse the playtests of the experiment's variants against the hypothesis.", "role": "design-analyst", "dependsOn": variant_tasks,
+            "strategy": {"type": "single", "candidates": 1, "selection": "user", "auto_integrate": false}}))?;
+        e.analysis_task_id = Some(analysis_id);
+        e.quest_id = Some(quest_id.clone());
+        e.status = ExperimentStatus::Building;
+        e.updated_at = now();
+        {
+            let store = self.store.lock().unwrap();
+            self.atomic(&store, || {
+                store.put_experiment(&e)?;
+                let mut h = hypothesis.clone();
+                h.status = HypothesisStatus::Experimenting;
+                h.updated_at = now();
+                store.put_hypothesis(&h)?;
+                self.emit_locked(&store, Event::new("experiment.started", "user").with(json!({"experimentId": e.id, "questId": quest_id, "variants": e.variants.len(), "title": e.title})));
+                Ok(())
+            })?;
+        }
+        self.quest_start(&json!({"questId": quest_id}))?;
+        Ok(serde_json::to_value(e).unwrap())
+    }
+
+    /// Move experiments along: builds done, then playtests; playtests
+    /// done, then analysis; a lost analysis, then a new one. Runs every
+    /// tick, so it also picks up where a restart left off.
+    fn experiments_tick(self: &Arc<Service>) -> Res<()> {
+        let experiments = self.store.lock().unwrap().experiments()?;
+        for mut e in experiments.into_iter().filter(|e| matches!(e.status, ExperimentStatus::Building | ExperimentStatus::Playtesting | ExperimentStatus::Analysing)) {
+            match e.status {
+                ExperimentStatus::Building => {
+                    let store = self.store.lock().unwrap();
+                    let mut all_built = true;
+                    let mut failed: Option<String> = None;
+                    for v in e.variants.iter_mut() {
+                        let Some(tid) = &v.task_id else { all_built = false; continue };
+                        let Some(t) = store.task(tid)? else { all_built = false; continue };
+                        match t.state {
+                            TaskState::Accepted | TaskState::Completed => {
+                                v.attempt_id = t.winner_attempt_id.clone().or_else(|| store.attempts_of_task(tid).ok().and_then(|a| a.into_iter().find(|a| a.state == AttemptState::Passed).map(|a| a.id)));
+                                if v.attempt_id.is_none() { all_built = false; }
+                            }
+                            TaskState::Failed | TaskState::Cancelled => failed = Some(format!("variant {} {}: {}", v.name, format!("{:?}", t.state).to_lowercase(), t.block_reason.unwrap_or_default())),
+                            _ => all_built = false,
+                        }
+                    }
+                    if let Some(why) = failed {
+                        e.status = ExperimentStatus::Failed;
+                        e.failure = Some(why.clone());
+                        e.updated_at = now();
+                        self.atomic(&store, || { store.put_experiment(&e)?; self.emit_locked(&store, Event::new("experiment.failed", "guild").with(json!({"experimentId": e.id, "reason": why}))); Ok(()) })?;
+                    } else if all_built {
+                        e.status = ExperimentStatus::Playtesting;
+                        e.updated_at = now();
+                        self.atomic(&store, || { store.put_experiment(&e)?; self.emit_locked(&store, Event::new("experiment.built", "guild").with(json!({"experimentId": e.id, "variants": e.variants.len()}))); Ok(()) })?;
+                    }
+                }
+                ExperimentStatus::Playtesting => {
+                    let mut live = self.playtesting.lock().unwrap();
+                    if !live.contains(&e.id) {
+                        live.push(e.id.clone());
+                        drop(live);
+                        self.spawn_playtests(e.id.clone());
+                    }
+                }
+                ExperimentStatus::Analysing => {
+                    let active = self.store.lock().unwrap().attempts()?.into_iter().any(|a| a.kind == AttemptKind::Analysis && a.state.is_active() && e.analysis_task_id.as_deref() == Some(a.task_id.as_str()));
+                    if !active { self.start_analysis(&e)?; }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Play every variant with every profile and seed the plan names, on
+    /// a thread; skips playtests already finished (after a restart).
+    fn spawn_playtests(self: &Arc<Service>, experiment_id: String) {
+        let service = self.clone();
+        std::thread::Builder::new().name("playtests".into()).spawn(move || {
+            let result = service.run_playtests(&experiment_id);
+            service.playtesting.lock().unwrap().retain(|id| id != &experiment_id);
+            if let Err(e) = result { service.log(&format!("experiment {experiment_id}: playtests failed: {}", e.message)); }
+            service.tick();
+        }).ok();
+    }
+
+    fn run_playtests(self: &Arc<Service>, experiment_id: &str) -> Res<()> {
+        let (e, project, done) = {
+            let store = self.store.lock().unwrap();
+            let e = store.experiment(experiment_id)?.ok_or_else(|| ApiError::not_found("experiment"))?;
+            let p = store.project(&e.project_id)?.ok_or_else(|| ApiError::not_found("project"))?;
+            (e, p, store.playtests_of_experiment(experiment_id)?)
+        };
+        let runner = project.playtest.clone().ok_or_else(|| ApiError::invalid("no playtest runner"))?;
+        let seeds: Vec<u64> = if e.plan.seeds.is_empty() { (1..=e.plan.runs_per_profile as u64).collect() } else { e.plan.seeds.clone() };
+        for v in &e.variants {
+            let Some(attempt_id) = &v.attempt_id else { continue };
+            let workspace = {
+                let store = self.store.lock().unwrap();
+                let a = store.attempt(attempt_id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
+                a.workspace_id.as_ref().and_then(|id| store.workspace(id).ok().flatten()).ok_or_else(|| ApiError::not_found("workspace"))?
+            };
+            for profile in &e.plan.profiles {
+                for seed in &seeds {
+                    if done.iter().any(|p| p.variant_id.as_deref() == Some(v.id.as_str()) && &p.profile == profile && p.seed == Some(*seed) && p.status == "finished") { continue; }
+                    let mut pt = Playtest { id: new_id(), project_id: e.project_id.clone(), experiment_id: Some(e.id.clone()), variant_id: Some(v.id.clone()), attempt_id: Some(attempt_id.clone()), kind: PlaytestKind::Simulation, profile: profile.clone(), seed: Some(*seed), status: "running".into(), created_at: now(), ..Default::default() };
+                    {
+                        let store = self.store.lock().unwrap();
+                        self.atomic(&store, || { store.put_playtest(&pt)?; self.emit_locked(&store, Event::new("playtest.started", "guild").with(json!({"playtestId": pt.id, "experimentId": e.id, "variant": v.id, "profile": profile, "seed": seed}))); Ok(()) })?;
+                    }
+                    let argv: Vec<String> = runner.argv.iter().map(|a| a.replace("{profile}", profile).replace("{seed}", &seed.to_string()).replace("{runs}", "1")).collect();
+                    let started = Instant::now();
+                    let outcome = workspaces::run_with_timeout(Path::new(&workspace.path), &argv, runner.timeout_seconds);
+                    pt.duration_ms = Some(started.elapsed().as_millis() as i64);
+                    match outcome {
+                        Ok((0, out)) => {
+                            let events = crate::experiment::parse_telemetry(&out);
+                            let artifact = self.write_artifact(Some(attempt_id), "playtest.events", out.as_bytes())?;
+                            pt.events_artifact_id = Some(artifact.id);
+                            pt.event_count = events.len() as u32;
+                            pt.metrics = crate::experiment::derive_metrics(&events);
+                            pt.status = if events.is_empty() { "failed".into() } else { "finished".into() };
+                            if events.is_empty() { pt.failure = Some("the runner printed no game.event lines".into()); }
+                        }
+                        Ok((code, out)) => { pt.status = "failed".into(); pt.failure = Some(format!("runner exited with {code}: {}", out.chars().rev().take(300).collect::<String>().chars().rev().collect::<String>())); }
+                        Err(err) => { pt.status = "failed".into(); pt.failure = Some(err); }
+                    }
+                    let store = self.store.lock().unwrap();
+                    self.atomic(&store, || { store.put_playtest(&pt)?; self.emit_locked(&store, Event::new("playtest.finished", "guild").with(json!({"playtestId": pt.id, "experimentId": e.id, "variant": v.id, "profile": profile, "seed": seed, "status": pt.status, "events": pt.event_count, "failure": pt.failure}))); Ok(()) })?;
+                }
+            }
+        }
+        let store = self.store.lock().unwrap();
+        let mut e = store.experiment(experiment_id)?.ok_or_else(|| ApiError::not_found("experiment"))?;
+        let finished = store.playtests_of_experiment(experiment_id)?.iter().filter(|p| p.status == "finished").count();
+        if finished == 0 {
+            e.status = ExperimentStatus::Failed;
+            e.failure = Some("no playtest produced telemetry".into());
+        } else {
+            e.status = ExperimentStatus::Analysing;
+        }
+        e.updated_at = now();
+        self.atomic(&store, || { store.put_experiment(&e)?; self.emit_locked(&store, Event::new("experiment.playtested", "guild").with(json!({"experimentId": e.id, "finished": finished, "status": e.status}))); Ok(()) })
+    }
+
+    /// Per variant, per profile: the aggregated metrics of its playtests.
+    fn experiment_metrics(&self, e: &Experiment) -> Res<Value> {
+        let playtests = self.store.lock().unwrap().playtests_of_experiment(&e.id)?;
+        let mut out = serde_json::Map::new();
+        for v in &e.variants {
+            let mut per_profile = serde_json::Map::new();
+            for profile in &e.plan.profiles {
+                let ms: Vec<Value> = playtests.iter().filter(|p| p.variant_id.as_deref() == Some(v.id.as_str()) && &p.profile == profile && p.status == "finished").map(|p| p.metrics.clone()).collect();
+                per_profile.insert(profile.clone(), crate::experiment::aggregate(&ms));
+            }
+            out.insert(v.id.clone(), json!({"name": v.name, "params": v.params, "profiles": per_profile}));
+        }
+        Ok(Value::Object(out))
+    }
+
+    fn start_analysis(self: &Arc<Service>, e: &Experiment) -> Res<()> {
+        let Some(task_id) = &e.analysis_task_id else { return Ok(()) };
+        let attempt = {
+            let store = self.store.lock().unwrap();
+            let task = store.task(task_id)?.ok_or_else(|| ApiError::not_found("analysis task"))?;
+            let members = store.members()?;
+            let available = self.available_harnesses();
+            let busy: Vec<String> = store.active_attempts()?.into_iter().map(|a| a.member_id).collect();
+            let mut wanted = task.clone();
+            wanted.member_id = None;
+            let mut pick = |role: &str| { wanted.role = role.into(); scheduler::pick_member(&wanted, &members, &busy, &available).cloned() };
+            let Some(member) = pick("design-analyst").or_else(|| pick("judge")).or_else(|| pick("reviewer")).or_else(|| pick("implementer")) else {
+                self.log(&format!("experiment {}: no member free to analyse; waiting", e.id));
+                return Ok(());
+            };
+            let quest = store.quest(&task.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
+            let attempt = Attempt {
+                id: new_id(), task_id: task.id.clone(), task_version: task.version, quest_id: quest.id.clone(), project_id: quest.project_id.clone(), member_id: member.id.clone(),
+                harness: member.harness.clone(), model_requested: member.model_id.clone(), model_effective: None, kind: AttemptKind::Analysis, state: AttemptState::Queued, workspace_id: None, session_id: None,
+                generation: 0, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 0, resumed: 0,
+                started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
+            };
+            self.atomic(&store, || {
+                store.put_attempt(&attempt)?;
+                if task.state == TaskState::Pending { self.move_task_locked(&store, &task.id, TaskState::Ready, None)?; }
+                if matches!(task.state, TaskState::Pending | TaskState::Ready) { self.move_task_locked(&store, &task.id, TaskState::Running, None)?; }
+                self.emit_locked(&store, Event::new("analysis.started", "guild").about_attempt(&attempt).with(json!({"experimentId": e.id, "member": member.name, "harness": member.harness})));
+                Ok(())
+            })?;
+            attempt
+        };
+        self.spawn_driver(attempt.id.clone());
+        Ok(())
+    }
+
+    fn compose_analysis_prompt(&self, role_prompt: &str, task: &Task, design: Option<&crate::design::GameDesign>) -> Res<String> {
+        let (e, h) = {
+            let store = self.store.lock().unwrap();
+            let e = store.experiments()?.into_iter().find(|e| e.analysis_task_id.as_deref() == Some(task.id.as_str())).ok_or_else(|| ApiError::not_found("the task's experiment"))?;
+            let h = store.hypothesis(&e.hypothesis_id)?.ok_or_else(|| ApiError::not_found("hypothesis"))?;
+            (e, h)
+        };
+        let metrics = self.experiment_metrics(&e)?;
+        let mut s = String::new();
+        s.push_str(role_prompt.trim());
+        s.push_str(&format!("\n\n# Experiment: {}\n", e.title));
+        s.push_str(&format!("\n## Hypothesis ({:?} level)\nProblem: {}\n", h.level, h.problem));
+        if !h.evidence.trim().is_empty() { s.push_str(&format!("Evidence: {}\n", h.evidence.trim())); }
+        s.push_str(&format!("Hypothesis: {}\nExpected effect: {}\nProposed change: {}\n", h.hypothesis, h.expected_effect, h.proposed_change));
+        if !h.measurements.is_empty() { s.push_str(&format!("Measurements: {}\n", h.measurements.join("; "))); }
+        if let Some(d) = design { s.push_str(&crate::design::prompt_context(d)); }
+        s.push_str("\n## Variants\n");
+        for v in &e.variants { s.push_str(&format!("- {} ({}): {}\n", v.id, v.name, serde_json::to_string(&v.params).unwrap_or_default())); }
+        s.push_str(&format!("\n## Playtest plan\nprofiles: {} · runs per profile: {}\n", e.plan.profiles.join(", "), e.plan.runs_per_profile));
+        s.push_str("\n## Playtest metrics\nPer variant and player profile: counts of events, means of numeric fields (as event.field), runs started/completed, and the distribution of choices (`top` is the most taken choice and `top_share` its share: a dominant strategy shows as a high top_share).\n```json\n");
+        let mut text = serde_json::to_string_pretty(&metrics).unwrap_or_default();
+        if text.len() > 40_000 { text.truncate(40_000); text.push_str("\n… (truncated)"); }
+        s.push_str(&text);
+        s.push_str("\n```\n\nCompare the variants against the hypothesis and the intended experience and answer with the JSON block only. Use the variant ids given above in recommended_variant.\n");
+        Ok(s)
+    }
+
+    fn finish_analysis(self: &Arc<Service>, attempt: &Attempt, task: &Task, outcome: TurnOutcome) -> Res<()> {
+        let attempt_id = attempt.id.as_str();
+        let e = self.store.lock().unwrap().experiments()?.into_iter().find(|e| e.analysis_task_id.as_deref() == Some(task.id.as_str()));
+        let Some(mut e) = e else { return self.move_attempt(attempt_id, AttemptState::Failed, Some("no experiment for this analysis".into())).map(|_| ()) };
+        let text: String = match &outcome {
+            TurnOutcome::Completed { .. } => self.store.lock().unwrap().events_of_attempt(attempt_id, 5000)?.into_iter().filter(|ev| ev.kind == "turn.text").map(|ev| ev.payload["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join(""),
+            _ => String::new(),
+        };
+        let parsed = match &outcome {
+            TurnOutcome::Completed { .. } => crate::experiment::parse_analysis(&text),
+            TurnOutcome::Failed { reason } => Err(format!("analyst failed: {reason}")),
+            TurnOutcome::Cancelled => Err("analyst cancelled".into()),
+        };
+        let mut result = match parsed {
+            Ok(r) => r,
+            Err(why) => ExperimentResult { verdict: "inconclusive".into(), evidence: vec![format!("the analyst gave no usable verdict: {why}")], ..Default::default() },
+        };
+        if let Some(rv) = &result.recommended_variant {
+            if !e.variants.iter().any(|v| &v.id == rv) { result.unexpected.push(format!("the analyst recommended an unknown variant {rv:?}")); result.recommended_variant = None; }
+        }
+        result.analyst_attempt_id = Some(attempt_id.into());
+        result.metrics = self.experiment_metrics(&e)?;
+        result.created_at = now();
+        let artifact = self.write_artifact(Some(attempt_id), "experiment.result", serde_json::to_string_pretty(&result).unwrap_or_default().as_bytes())?;
+        let usable = !result.evidence.iter().any(|x| x.starts_with("the analyst gave no usable verdict"));
+        let store = self.store.lock().unwrap();
+        self.atomic(&store, || {
+            let _ = self.move_attempt_locked(&store, attempt_id, AttemptState::Submitted, None);
+            if usable {
+                let mut a = store.attempt(attempt_id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
+                a.summary = format!("{}: {}", result.verdict, result.recommended_next.chars().take(120).collect::<String>());
+                store.put_attempt(&a)?;
+                self.move_attempt_locked(&store, attempt_id, AttemptState::Passed, None)?;
+            } else {
+                self.move_attempt_locked(&store, attempt_id, AttemptState::Failed, Some(result.evidence.join("; ")))?;
+            }
+            self.move_task_locked(&store, &task.id, TaskState::Completed, None)?;
+            e.result = Some(result.clone());
+            e.status = ExperimentStatus::Decided;
+            e.updated_at = now();
+            store.put_experiment(&e)?;
+            if let Some(mut h) = store.hypothesis(&e.hypothesis_id)? {
+                h.status = match result.verdict.as_str() { "supports" => HypothesisStatus::Supported, "rejects" => HypothesisStatus::Rejected, _ => HypothesisStatus::Inconclusive };
+                h.updated_at = now();
+                store.put_hypothesis(&h)?;
+            }
+            self.emit_locked(&store, Event::new("experiment.analysed", "guild").about_attempt(attempt).with(json!({"experimentId": e.id, "verdict": result.verdict, "recommendedVariant": result.recommended_variant, "confidence": result.confidence, "artifactId": artifact.id, "evidence": result.evidence.len()})));
+            Ok(())
+        })
+    }
+
+    /// The human's word: accept a variant (its candidate is integrated),
+    /// reject the experiment, or iterate (a new draft from the analyst's
+    /// recommendation).
+    fn experiment_decide(self: &Arc<Service>, params: &Value, action: &str) -> ApiResult {
+        let id = p_str(params, "experimentId")?;
+        let note = p_opt(params, "note").unwrap_or_default();
+        let mut e = self.store.lock().unwrap().experiment(id)?.ok_or_else(|| ApiError::not_found(format!("experiment {id}")))?;
+        let settled = matches!(e.status, ExperimentStatus::Decided | ExperimentStatus::Failed | ExperimentStatus::Accepted | ExperimentStatus::Rejected);
+        if action == "accept" && !matches!(e.status, ExperimentStatus::Decided | ExperimentStatus::Failed) { return Err(ApiError::conflict(format!("experiment is {:?}; wait for its analysis", e.status))); }
+        if action == "iterate" && !settled { return Err(ApiError::conflict(format!("experiment is {:?}; wait for its analysis", e.status))); }
+        let mut integrated: Option<Value> = None;
+        let variant_id = match action {
+            "accept" => {
+                let vid = p_opt(params, "variantId").or_else(|| e.result.as_ref().and_then(|r| r.recommended_variant.clone())).ok_or_else(|| ApiError::invalid("say which variant to accept (variantId)"))?;
+                let v = e.variants.iter().find(|v| v.id == vid).ok_or_else(|| ApiError::not_found(format!("variant {vid}")))?.clone();
+                if let Some(tid) = &v.task_id {
+                    let task = self.store.lock().unwrap().task(tid)?;
+                    if task.as_ref().map(|t| t.state == TaskState::Accepted).unwrap_or(false) {
+                        integrated = Some(self.task_integrate(tid)?);
+                    }
+                }
+                Some(vid)
+            }
+            "iterate" => {
+                let mut next = e.clone();
+                next.id = new_id();
+                next.title = format!("{} (iteration)", e.title.trim_end_matches(" (iteration)"));
+                next.status = ExperimentStatus::Draft;
+                next.quest_id = None;
+                next.analysis_task_id = None;
+                next.result = None;
+                next.decision = None;
+                next.failure = None;
+                for v in next.variants.iter_mut() { v.task_id = None; v.attempt_id = None; }
+                next.created_at = now();
+                next.updated_at = now();
+                let store = self.store.lock().unwrap();
+                self.atomic(&store, || { store.put_experiment(&next)?; self.emit_locked(&store, Event::new("experiment.created", "user").with(json!({"projectId": next.project_id, "experimentId": next.id, "hypothesisId": next.hypothesis_id, "variants": next.variants.len(), "title": next.title, "iterates": e.id}))); Ok(()) })?;
+                integrated = Some(json!({"next": next.id}));
+                None
+            }
+            _ => None,
+        };
+        e.decision = Some(ExperimentDecision { action: action.into(), variant_id: variant_id.clone(), note: note.clone(), at: now() });
+        e.status = match action { "accept" => ExperimentStatus::Accepted, "reject" => ExperimentStatus::Rejected, _ => e.status };
+        e.updated_at = now();
+        let store = self.store.lock().unwrap();
+        self.atomic(&store, || {
+            store.put_experiment(&e)?;
+            self.emit_locked(&store, Event::new("experiment.decided", "user").with(json!({"experimentId": e.id, "action": action, "variant": variant_id, "note": note})));
+            Ok(())
+        })?;
+        Ok(json!({"experiment": e, "integrated": integrated}))
     }
 
     fn record_decision(&self, d: &RaceDecision) -> Res<()> {
@@ -755,15 +1197,15 @@ impl Service {
         }
         if self.cancel_requested(attempt_id) { return self.finish_attempt(attempt_id, TurnOutcome::Cancelled); }
         let adapter = self.adapter(member.harness.clone())?;
-        let role_for_prompt = if attempt.kind == AttemptKind::Judge { "judge".to_string() } else { task.role.clone() };
-        let role_prompt = if member.role_prompt.trim().is_empty() || attempt.kind == AttemptKind::Judge { config::default_role_prompt(&role_for_prompt) } else { member.role_prompt.clone() };
+        let role_for_prompt = match attempt.kind { AttemptKind::Judge => "judge".to_string(), AttemptKind::Analysis => "design-analyst".to_string(), AttemptKind::Work => task.role.clone() };
+        let role_prompt = if member.role_prompt.trim().is_empty() || attempt.kind != AttemptKind::Work { config::default_role_prompt(&role_for_prompt) } else { member.role_prompt.clone() };
         let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_requested.clone(), mode: member.mode.clone(), role_prompt: role_prompt.clone() };
         let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
         let design = self.store.lock().unwrap().design(&project.id)?;
-        let prompt = if attempt.kind == AttemptKind::Judge {
-            self.compose_judge_prompt(&role_prompt, &task, design.as_ref())?
-        } else {
-            compose_prompt(&role_prompt, &task, &workspace, design.as_ref())
+        let prompt = match attempt.kind {
+            AttemptKind::Judge => self.compose_judge_prompt(&role_prompt, &task, design.as_ref())?,
+            AttemptKind::Analysis => self.compose_analysis_prompt(&role_prompt, &task, design.as_ref())?,
+            AttemptKind::Work => compose_prompt(&role_prompt, &task, &workspace, design.as_ref()),
         };
         self.run_turn(attempt_id, &attempt, &member, &adapter, session, &prompt)
     }
@@ -1001,6 +1443,7 @@ impl Service {
             return Ok(());
         }
         if attempt.kind == AttemptKind::Judge { return self.finish_judge(&attempt, &task, outcome); }
+        if attempt.kind == AttemptKind::Analysis { return self.finish_analysis(&attempt, &task, outcome); }
         match outcome {
             TurnOutcome::Completed { stop_reason } => {
                 self.emit(Event::new("turn.completed", "harness").about_attempt(&attempt).with(json!({"stopReason": stop_reason})));
@@ -1148,6 +1591,10 @@ impl Service {
                     let _ = self.move_attempt(&a.id, AttemptState::Submitted, None);
                     if let Some(t) = &task { let _ = self.move_task(&t.id, TaskState::Verifying, None); }
                 }
+                (None, _) if a.kind == AttemptKind::Analysis => {
+                    let _ = self.move_attempt(&a.id, AttemptState::Lost, Some("the service restarted while it analysed".into()));
+                    // The tick starts a new analysis when none is active.
+                }
                 (None, _) if a.kind == AttemptKind::Judge => {
                     let _ = self.move_attempt(&a.id, AttemptState::Lost, Some("the service restarted while it judged".into()));
                     let _ = self.decide_by_policy(&a.task_id, "policy", Some("judge lost in a restart".into()));
@@ -1235,6 +1682,13 @@ impl Service {
                 Ok(serde_json::to_value(self.store.lock().unwrap().design(id)?).unwrap())
             }
             "design.set" => self.design_set(params),
+            "hypothesis.create" => self.hypothesis_create(params),
+            "hypothesis.update" => self.hypothesis_update(params),
+            "experiment.create" => self.experiment_create(params),
+            "experiment.start" => self.experiment_start(p_str(params, "experimentId")?),
+            "experiment.accept" => self.experiment_decide(params, "accept"),
+            "experiment.reject" => self.experiment_decide(params, "reject"),
+            "experiment.iterate" => self.experiment_decide(params, "iterate"),
             "records.list" => {
                 let rows = self.store.lock().unwrap().records(p_opt(params, "projectId").as_deref(), p_opt(params, "taskId").as_deref())?;
                 Ok(serde_json::to_value(rows).unwrap())
@@ -1311,6 +1765,7 @@ impl Service {
             target_ref,
             setup: file.as_ref().map(|f| f.project.setup.clone()).unwrap_or_default(),
             verifiers: file.as_ref().map(|f| f.verifiers.iter().map(|v| v.to_verifier()).collect()).unwrap_or_default(),
+            playtest: file.as_ref().and_then(|f| f.playtest.as_ref()).map(|p| p.to_runner()),
             created_at: existing.map(|p| p.created_at).unwrap_or_else(now),
         };
         store.put_project(&project)?;
@@ -2525,6 +2980,101 @@ mod tests {
         assert_eq!(parse_judge_output("Verdict: {\"winner\": \"B\"} ok").unwrap()["winner"], "B");
         assert!(parse_judge_output("no decision").is_err());
         assert!(parse_judge_output("```json\n{\"scores\": {}}\n```").is_err());
+    }
+
+    /// A repository with the word game and its guild config, as a project.
+    fn wordfight_repo(home: &TempHome) -> PathBuf {
+        let repo = home.repo_path();
+        std::fs::create_dir_all(repo.join(".guild")).unwrap();
+        std::fs::write(repo.join("wordfight.py"), include_str!("../../fixtures/wordfight/wordfight.py")).unwrap();
+        std::fs::write(repo.join("balance.json"), include_str!("../../fixtures/wordfight/balance.json")).unwrap();
+        std::fs::write(repo.join(".guild/guild.toml"), include_str!("../../fixtures/wordfight/.guild/guild.toml")).unwrap();
+        workspaces::git(&repo, &["init", "-q", "-b", "main"]).unwrap();
+        workspaces::git(&repo, &["add", "-A"]).unwrap();
+        workspaces::git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "wordfight"]).unwrap();
+        repo
+    }
+
+    #[test]
+    fn an_experiment_builds_variants_playtests_them_and_the_analyst_answers_the_hypothesis() {
+        let home = TempHome::new();
+        let repo = wordfight_repo(&home);
+        let service = Service::new(Store::open_in_memory().unwrap(), Settings { concurrency: 3, ..Settings::default() });
+        let mock = Arc::new(MockHarness::new(MockBehaviour::WriteParams { file: "balance.json".into() }));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        let added = service.handle("project.add", &json!({"repoPath": repo.display().to_string()})).unwrap();
+        assert_eq!(added["project"]["id"], "wordfight");
+        assert!(added["project"]["playtest"]["argv"].is_array(), "the runner comes from guild.toml");
+        for id in ["orin", "lira"] { service.handle("member.add", &json!({"id": id, "harness": "mock", "roles": ["gameplay-engineer"], "model": "mock-fast"})).unwrap(); }
+        service.handle("member.add", &json!({"id": "sage", "harness": "mock", "roles": ["design-analyst"], "model": "mock-fast"})).unwrap();
+        let h = service.handle("hypothesis.create", &json!({"projectId": "wordfight", "problem": "Players always choose the longest word", "level": "loop",
+            "hypothesis": "A stronger semantic multiplier makes short thematic words competitive", "expectedEffect": "more distinct words chosen", "proposedChange": "semantic_multiplier 1.2 -> 1.6",
+            "measurements": ["choice.selected.length mean", "choices.top_share", "runs.completion_rate"]})).unwrap();
+        let hid = h["id"].as_str().unwrap().to_string();
+        assert_eq!(h["status"], "proposed");
+        let e = service.handle("experiment.create", &json!({"projectId": "wordfight", "hypothesisId": hid, "title": "Semantic bonus", "variants": [
+            {"id": "control", "name": "control", "params": {"length_multiplier": 1.35, "semantic_multiplier": 1.2}},
+            {"id": "a", "name": "semantic 1.6", "params": {"length_multiplier": 1.35, "semantic_multiplier": 1.6}},
+            {"id": "b", "name": "flat length", "params": {"length_multiplier": 1.0, "semantic_multiplier": 1.6}},
+        ], "plan": {"profiles": ["greedy", "explorer"], "runs_per_profile": 2}})).unwrap();
+        let eid = e["id"].as_str().unwrap().to_string();
+        mock.set_analysis_reply("Reading the metrics.\n```json\n{\"verdict\": \"supports\", \"evidence\": [\"explorer completes more runs in b\", \"greedy's top_share stays 1.0: the greedy profile is a dominant strategy by construction\"], \"unexpected\": [\"control and a differ little for greedy\"], \"recommended_variant\": \"b\", \"recommended_next\": \"try semantic 1.8 with length 1.0\", \"confidence\": 0.6}\n```");
+        service.handle("experiment.start", &json!({"experimentId": eid})).unwrap();
+        let snap = service.snapshot().unwrap();
+        assert_eq!(snap.experiments[0].status, crate::experiment::ExperimentStatus::Building);
+        assert_eq!(snap.hypotheses[0].status, HypothesisStatus::Experimenting);
+        assert_eq!(snap.tasks.len(), 4, "three variants and the analysis");
+        // Builds: each variant's worktree gets its parameters, chosen by the policy, not integrated.
+        let snap = wait_for(&service, "playtesting", |s| s.experiments[0].status != crate::experiment::ExperimentStatus::Building);
+        assert_eq!(snap.experiments[0].status, crate::experiment::ExperimentStatus::Playtesting, "{:?}", snap.experiments[0].failure);
+        for v in &snap.experiments[0].variants {
+            let a = snap.attempts.iter().find(|a| Some(&a.id) == v.attempt_id.as_ref()).expect("a build per variant");
+            let ws = snap.workspaces.iter().find(|w| Some(&w.id) == a.workspace_id.as_ref()).unwrap();
+            let balance: Value = serde_json::from_str(&std::fs::read_to_string(Path::new(&ws.path).join("balance.json")).unwrap()).unwrap();
+            assert_eq!(balance["semantic_multiplier"], v.params["semantic_multiplier"], "variant {}", v.id);
+        }
+        assert!(snap.tasks.iter().filter(|t| t.title.starts_with("Variant")).all(|t| t.state == TaskState::Accepted));
+        // Playtests: 3 variants × 2 profiles × 2 seeds, each with telemetry and metrics.
+        let snap = wait_for(&service, "analysed", |s| matches!(s.experiments[0].status, crate::experiment::ExperimentStatus::Decided | crate::experiment::ExperimentStatus::Failed));
+        let e = &snap.experiments[0];
+        assert_eq!(e.status, crate::experiment::ExperimentStatus::Decided, "{:?}", e.failure);
+        assert_eq!(snap.playtests.len(), 12);
+        assert!(snap.playtests.iter().all(|p| p.status == "finished" && p.event_count > 0 && p.events_artifact_id.is_some()), "{:?}", snap.playtests.iter().map(|p| p.failure.clone()).collect::<Vec<_>>());
+        let greedy_control = snap.playtests.iter().find(|p| p.variant_id.as_deref() == Some("control") && p.profile == "greedy").unwrap();
+        assert_eq!(greedy_control.metrics["choices"]["top_share"].as_f64().map(|x| x > 0.0), Some(true));
+        // The analyst's verdict reached the experiment and the hypothesis; the analysis task is done.
+        let r = e.result.as_ref().unwrap();
+        assert_eq!(r.verdict, "supports");
+        assert_eq!(r.recommended_variant.as_deref(), Some("b"));
+        assert_eq!(r.metrics["b"]["profiles"]["explorer"]["playtests"], 2);
+        assert_eq!(snap.hypotheses[0].status, HypothesisStatus::Supported);
+        let analysis = snap.attempts.iter().find(|a| a.kind == AttemptKind::Analysis).unwrap();
+        assert_eq!(analysis.member_id, "sage");
+        assert_eq!(analysis.state, AttemptState::Passed);
+        assert_eq!(snap.tasks.iter().find(|t| t.title == "Analysis").unwrap().state, TaskState::Completed);
+        // The human accepts the recommended variant: its build is integrated, the others are not.
+        let decided = service.handle("experiment.accept", &json!({"experimentId": eid, "note": "b reads best"})).unwrap();
+        assert_eq!(decided["experiment"]["status"], "accepted");
+        assert_eq!(decided["integrated"]["integrated"], true);
+        let snap = service.snapshot().unwrap();
+        let b_task = snap.experiments[0].variants.iter().find(|v| v.id == "b").unwrap().task_id.clone().unwrap();
+        assert_eq!(snap.tasks.iter().find(|t| t.id == b_task).unwrap().state, TaskState::Completed);
+        assert_eq!(snap.tasks.iter().filter(|t| t.title.starts_with("Variant") && t.state == TaskState::Accepted).count(), 2);
+        let merged: Value = serde_json::from_str(&workspaces::git(&repo, &["show", &format!("{}:balance.json", snap.quests[0].integration_ref)]).unwrap()).unwrap();
+        assert_eq!(merged["length_multiplier"], 1.0);
+        let kinds: Vec<String> = service.store.lock().unwrap().events_after(0, 10_000).unwrap().into_iter().map(|e| e.kind).collect();
+        for k in ["hypothesis.created", "experiment.created", "experiment.started", "experiment.built", "playtest.started", "playtest.finished", "experiment.playtested", "analysis.started", "experiment.analysed", "experiment.decided", "merge.completed"] {
+            assert!(kinds.contains(&k.to_string()), "missing {k}");
+        }
+        // Iterating makes a new draft from the same variants.
+        let next = service.handle("experiment.iterate", &json!({"experimentId": eid, "note": "push semantic further"})).unwrap();
+        let next_id = next["integrated"]["next"].as_str().unwrap().to_string();
+        let snap = service.snapshot().unwrap();
+        let draft = snap.experiments.iter().find(|e| e.id == next_id).unwrap();
+        assert_eq!(draft.status, crate::experiment::ExperimentStatus::Draft);
+        assert_eq!(draft.variants.len(), 3);
+        assert!(draft.variants.iter().all(|v| v.task_id.is_none()));
     }
 
     #[test]

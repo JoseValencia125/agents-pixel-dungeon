@@ -52,8 +52,22 @@ pub struct Project {
     pub setup: Vec<String>,
     #[serde(default)]
     pub verifiers: Vec<Verifier>,
+    /// How to play the game headless, for playtests.
+    #[serde(default)]
+    pub playtest: Option<PlaytestRunner>,
     pub created_at: String,
 }
+
+/// `argv` run in a build's worktree; `{profile}`, `{seed}` and `{runs}`
+/// are filled in. Its stdout carries the telemetry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaytestRunner {
+    pub argv: Vec<String>,
+    #[serde(default = "playtest_timeout")]
+    pub timeout_seconds: u64,
+}
+
+fn playtest_timeout() -> u64 { 300 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Verifier {
@@ -212,7 +226,7 @@ impl ExecutionStrategy {
 /// Work attempts make candidates; a judge attempt reads them and decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum AttemptKind { #[default] Work, Judge }
+pub enum AttemptKind { #[default] Work, Judge, Analysis }
 
 /// One candidate as a decision saw it: anonymous to the judge.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -495,6 +509,12 @@ pub struct Snapshot {
     #[serde(default)]
     pub decisions: Vec<RaceDecision>,
     #[serde(default)]
+    pub hypotheses: Vec<crate::experiment::Hypothesis>,
+    #[serde(default)]
+    pub experiments: Vec<crate::experiment::Experiment>,
+    #[serde(default)]
+    pub playtests: Vec<crate::experiment::Playtest>,
+    #[serde(default)]
     pub designs: Vec<crate::design::GameDesign>,
     #[serde(default)]
     pub roles: Vec<crate::config::Role>,
@@ -529,7 +549,7 @@ pub fn task_transition(from: TaskState, to: TaskState) -> Result<(), String> {
         (Draft, Pending) | (Draft, Cancelled)
             | (Pending, Ready) | (Pending, Blocked) | (Pending, Cancelled)
             | (Ready, Running) | (Ready, Blocked) | (Ready, Pending) | (Ready, Cancelled)
-            | (Running, Verifying) | (Running, Ready) | (Running, Blocked) | (Running, Failed) | (Running, Cancelled)
+            | (Running, Verifying) | (Running, Ready) | (Running, Blocked) | (Running, Failed) | (Running, Cancelled) | (Running, Completed)
             | (Verifying, Accepted) | (Verifying, Ready) | (Verifying, Failed) | (Verifying, Blocked) | (Verifying, Cancelled)
             | (Accepted, Integrating) | (Accepted, Ready) | (Accepted, Cancelled)
             | (Integrating, Completed) | (Integrating, Blocked) | (Integrating, Accepted)

@@ -8,6 +8,7 @@
 pub mod api;
 pub mod config;
 pub mod design;
+pub mod experiment;
 pub mod domain;
 pub mod harness;
 pub mod paths;
