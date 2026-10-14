@@ -12,6 +12,8 @@ pub const LANGUAGES: [&str; 5] = ["es", "en", "fr", "it", "pt"];
 pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock::new(|| {
     let rows: &[(&str, [&str; 4])] = &[
         // The guild: quests, tasks and attempts
+        (" · carrera: ganó {}", [" · race: {} won", " · course : {} a gagné", " · gara: ha vinto {}", " · corrida: {} venceu"]),
+        (" · carrera {}/{}", [" · race {}/{}", " · course {}/{}", " · gara {}/{}", " · corrida {}/{}"]),
         ("Gremio", ["Guild", "Guilde", "Gilda", "Guilda"]),
         ("Gremio…", ["Guild…", "Guilde…", "Gilda…", "Guilda…"]),
         ("Experiencia", ["Experience", "Expérience", "Esperienza", "Experiência"]),

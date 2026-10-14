@@ -33,9 +33,10 @@ USAGE
   guild quest new <project> <title> [--description TEXT]
   guild task new <quest> <title> [--instructions TEXT] [--accept TEXT]... [--depends ID,ID]
                                      [--role R] [--member ID] [--model M] [--priority N] [--max-attempts N] [--id ID]
+                                     [--candidates N] [--auto-integrate]   N members race; the best passing candidate is merged alone
   guild start <quest>  |  guild pause <quest>  |  guild resume <quest>  |  guild cancel-quest <quest>
 
-  guild accept <task> [--integrate]  the latest candidate passes; --integrate squashes it into the quest branch
+  guild accept <task> [--integrate] [--attempt ID]  the latest (or that) candidate passes; --integrate squashes it into the quest branch
   guild reject <task> [--reason TEXT]
   guild integrate <task>
   guild retry <task>  |  guild cancel-task <task>  |  guild cancel <attempt>
@@ -118,7 +119,12 @@ impl Args<'_> {
 fn serve(args: &[String]) -> Result<(), String> {
     let a = parse(args);
     if a.has("daemon") {
-        return daemonize();
+        // The daemon gets the same settings this command was given.
+        let mut forward: Vec<String> = vec![];
+        for key in ["concurrency", "attempt-timeout"] {
+            if let Some(v) = a.flag(key) { forward.push(format!("--{key}")); forward.push(v.to_string()); }
+        }
+        return daemonize(&forward);
     }
     paths::ensure_home().map_err(|e| e.to_string())?;
     let lock = acquire_lock()?;
@@ -150,12 +156,12 @@ fn acquire_lock() -> Result<std::fs::File, String> {
     Ok(file)
 }
 
-fn daemonize() -> Result<(), String> {
+fn daemonize(forward: &[String]) -> Result<(), String> {
     paths::ensure_home().map_err(|e| e.to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths::log_path()).map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::from(log.try_clone().map_err(|e| e.to_string())?)).stderr(std::process::Stdio::from(log));
+    cmd.arg("serve").args(forward).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::from(log.try_clone().map_err(|e| e.to_string())?)).stderr(std::process::Stdio::from(log));
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
@@ -178,7 +184,7 @@ fn daemonize() -> Result<(), String> {
 fn ensure_running() -> Result<Client, String> {
     let client = Client::default_socket();
     if client.is_up() { return Ok(client); }
-    daemonize()?;
+    daemonize(&[])?;
     Ok(client)
 }
 
@@ -270,6 +276,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                 "questId": a.pos(1, "quest")?, "title": a.pos(2, "title")?, "instructions": a.flag("instructions"), "acceptance": a.all("accept"),
                 "dependsOn": depends, "role": a.flag("role"), "memberId": a.flag("member"), "modelId": a.flag("model"), "id": a.flag("id"),
                 "priority": a.flag("priority").and_then(|s| s.parse::<i64>().ok()), "maxAttempts": a.flag("max-attempts").and_then(|s| s.parse::<u64>().ok()),
+                "candidates": a.flag("candidates").and_then(|s| s.parse::<u64>().ok()), "autoIntegrate": a.has("auto-integrate"),
             });
             let r = call(&ensure_running()?, "task.create", params)?;
             println!("task {} · {} ({})", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""), r["state"].as_str().unwrap_or(""));
@@ -282,7 +289,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "accept" => {
-            let r = call(&ensure_running()?, "task.accept", json!({"taskId": a.pos(0, "task")?, "integrate": a.has("integrate")}))?;
+            let r = call(&ensure_running()?, "task.accept", json!({"taskId": a.pos(0, "task")?, "integrate": a.has("integrate"), "attemptId": a.flag("attempt")}))?;
             println!("{}", summarize(&r));
             Ok(())
         }

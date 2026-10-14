@@ -9,6 +9,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 pub fn new_id() -> String { ulid::Ulid::new().to_string().to_lowercase() }
 
+fn one() -> u32 { 1 }
+
 pub fn now() -> String { chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true) }
 
 /// Which coding agent runs an attempt.
@@ -125,6 +127,16 @@ pub struct Task {
     pub block_reason: Option<String>,
     pub attempts_made: u32,
     pub max_attempts: u32,
+    /// How many attempts race for this task at once (1: no race). Each
+    /// runs on its own member and worktree and is verified on its own.
+    #[serde(default = "one")]
+    pub candidates: u32,
+    /// Integrate the best passing candidate without asking.
+    #[serde(default)]
+    pub auto_integrate: bool,
+    /// The candidate that won, once decided.
+    #[serde(default)]
+    pub winner_attempt_id: Option<String>,
     pub version: u32,
     pub created_at: String,
     pub updated_at: String,
@@ -474,7 +486,7 @@ mod tests {
         Task {
             id: id.into(), quest_id: "q".into(), title: id.into(), instructions: String::new(), acceptance: vec![],
             depends_on: deps.iter().map(|s| s.to_string()).collect(), role: "implementer".into(), member_id: None, model_id: None,
-            priority: 0, state: TaskState::Pending, block_reason: None, attempts_made: 0, max_attempts: 2, version: 1,
+            priority: 0, state: TaskState::Pending, block_reason: None, attempts_made: 0, max_attempts: 2, candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1,
             created_at: now(), updated_at: now(),
         }
     }

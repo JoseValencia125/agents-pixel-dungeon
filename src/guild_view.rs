@@ -771,7 +771,15 @@ pub fn board(ctx: &Context, view: &mut GuildView) -> BoardAction {
                             };
                             ui.horizontal(|ui| {
                                 ui.add_space(8.0);
-                                let who = member.map(|m| format!(" · {}", m.name)).unwrap_or_default();
+                                let mut who = member.map(|m| format!(" · {}", m.name)).unwrap_or_default();
+                                if t.candidates > 1 {
+                                    let submitted = snap.attempts.iter().filter(|a| a.task_id == t.id && matches!(a.state, AttemptState::Submitted | AttemptState::Passed)).count();
+                                    let winner = t.winner_attempt_id.as_ref().and_then(|w| snap.attempts.iter().find(|a| &a.id == w)).and_then(|a| snap.members.iter().find(|m| m.id == a.member_id)).map(|m| m.name.clone());
+                                    who = match winner {
+                                        Some(w) => trf(" · carrera: ganó {}", &[&w]),
+                                        None => trf(" · carrera {}/{}", &[&submitted, &t.candidates]),
+                                    };
+                                }
                                 let row = ui.add(egui::Label::new(mono(&format!("{:<10} {}{}", state, t.title, who), 10.5).color(color)).sense(egui::Sense::click()));
                                 if row.clicked() {
                                     if let Some(m) = member { action.open = Some(GuildView::member_agent_id(&m.id)); }
@@ -820,7 +828,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
     let member = |id: &str, name: &str, harness: HarnessKind, model: &str, role: &str| Member { id: id.into(), name: name.into(), roles: vec![role.into()], harness, model_id: Some(model.into()), mode: None, role_prompt: String::new(), enabled: true };
     let task = |id: &str, title: &str, state: TaskState, deps: &[&str]| Task {
         id: id.into(), quest_id: "q1".into(), title: tr(title), instructions: String::new(), acceptance: vec![], depends_on: deps.iter().map(|s| s.to_string()).collect(), role: "implementer".into(),
-        member_id: None, model_id: None, priority: 0, state, block_reason: None, attempts_made: 1, max_attempts: 2, version: 1, created_at: t.clone(), updated_at: t.clone(),
+        member_id: None, model_id: None, priority: 0, state, block_reason: None, attempts_made: 1, max_attempts: 2, candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1, created_at: t.clone(), updated_at: t.clone(),
     };
     let attempt = |id: &str, task: &str, member: &str, harness: HarnessKind, model: &str, state: AttemptState| Attempt {
         id: id.into(), task_id: task.into(), task_version: 1, quest_id: "q1".into(), project_id: "verbrawl".into(), member_id: member.into(), harness, model_requested: Some(model.into()), model_effective: Some(model.into()),

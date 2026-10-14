@@ -292,26 +292,38 @@ impl Service {
         // Dispatch.
         let running_quests: Vec<String> = quests.iter().filter(|q| q.state == QuestState::Running).map(|q| q.id.clone()).collect();
         let tasks = self.store.lock().unwrap().tasks()?;
-        let ready = scheduler::ready_in_order(&tasks, &running_quests);
-        if ready.is_empty() { return Ok(()); }
+        // A race that lost every runner (a restart, a failure) is settled here too.
+        for t in tasks.iter().filter(|t| t.candidates > 1 && t.state == TaskState::Running && t.attempts_made >= t.candidates) {
+            let pending = self.store.lock().unwrap().attempts_of_task(&t.id)?.into_iter().any(|a| a.state.is_active() && a.state != AttemptState::Submitted);
+            if !pending { self.settle_race(&t.id)?; }
+        }
+        let mut slots: Vec<(&Task, u32)> = scheduler::ready_in_order(&tasks, &running_quests).into_iter().map(|t| (t, t.candidates.max(1))).collect();
+        // Racing tasks already running still want their remaining runners.
+        for t in tasks.iter().filter(|t| t.candidates > 1 && t.state == TaskState::Running && running_quests.contains(&t.quest_id) && t.attempts_made < t.candidates) {
+            slots.push((t, t.candidates - t.attempts_made));
+        }
+        if slots.is_empty() { return Ok(()); }
         let available = self.available_harnesses();
-        for task in ready {
+        for (task, wanted) in slots { for _ in 0..wanted {
             let active = self.running.lock().unwrap().len();
             if active >= self.settings.concurrency { break; }
             let attempt = {
                 let mut store = self.store.lock().unwrap();
                 let members = store.members()?;
-                let busy: Vec<String> = store.active_attempts()?.into_iter().map(|a| a.member_id).collect();
+                // Runners of one race never share a member; a retry may reuse one.
+                let mut busy: Vec<String> = store.active_attempts()?.into_iter().map(|a| a.member_id).collect();
+                if task.candidates > 1 { busy.extend(store.attempts_of_task(&task.id)?.into_iter().map(|a| a.member_id)); }
                 let Some(member) = scheduler::pick_member(task, &members, &busy, &available).cloned() else {
                     let why = if members.iter().any(|m| m.roles.contains(&task.role)) { "no free member" } else { "no member has the role" };
                     if task.block_reason.as_deref() != Some(why) && members.iter().all(|m| !m.roles.contains(&task.role)) {
                         self.move_task_locked(&store, &task.id, TaskState::Blocked, Some(why.into()))?;
                     }
-                    continue;
+                    break;
                 };
                 let quest = store.quest(&task.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
                 let t = store.task(&task.id)?.ok_or_else(|| ApiError::not_found("task"))?;
-                if t.state != TaskState::Ready { continue; }
+                let racing_more = t.candidates > 1 && t.state == TaskState::Running && t.attempts_made < t.candidates;
+                if t.state != TaskState::Ready && !racing_more { break; }
                 let model = t.model_id.clone().or(member.model_id.clone());
                 let attempt = Attempt {
                     id: new_id(),
@@ -350,13 +362,70 @@ impl Service {
                     Ok(())
                 });
                 created?;
-                self.emit_locked(&store, Event::new("task.running", "guild").about_task(&t, &quest.project_id).with(json!({"state": "running", "title": t.title})));
-                self.emit_locked(&store, Event::new("attempt.started", "guild").about_attempt(&attempt).with(json!({"member": member.name, "harness": member.harness, "model": attempt.model_requested, "task": t.title})));
+                if !racing_more { self.emit_locked(&store, Event::new("task.running", "guild").about_task(&t, &quest.project_id).with(json!({"state": "running", "title": t.title, "candidates": t.candidates}))); }
+                self.emit_locked(&store, Event::new("attempt.started", "guild").about_attempt(&attempt).with(json!({"member": member.name, "harness": member.harness, "model": attempt.model_requested, "task": t.title, "runner": t.attempts_made + 1, "candidates": t.candidates})));
                 attempt
             };
             self.spawn_driver(attempt.id.clone());
-        }
+        } }
         Ok(())
+    }
+
+    /// A race ends when every runner has submitted or dropped out. With
+    /// `auto_integrate` the best candidate whose required verifiers passed
+    /// wins (smallest change, then the earliest); the rest are rejected
+    /// and the winner is integrated. Otherwise the user picks on the board.
+    fn settle_race(self: &Arc<Service>, task_id: &str) -> Res<()> {
+        let (task, attempts) = {
+            let store = self.store.lock().unwrap();
+            let t = store.task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
+            (t.clone(), store.attempts_of_task(task_id)?)
+        };
+        if task.state != TaskState::Running { return Ok(()); }
+        if attempts.iter().any(|a| a.state.is_active() && a.state != AttemptState::Submitted) { return Ok(()); }
+        if task.attempts_made < task.candidates { return Ok(()); }
+        let submitted: Vec<&Attempt> = attempts.iter().filter(|a| a.state == AttemptState::Submitted).collect();
+        if submitted.is_empty() {
+            self.emit(Event::new("race.finished", "guild").about_task(&task, &attempts.first().map(|a| a.project_id.clone()).unwrap_or_default()).with(json!({"candidates": task.candidates, "submitted": 0})));
+            return self.after_failed_attempt(&task, "no candidate survived the race");
+        }
+        self.move_task(task_id, TaskState::Verifying, None)?;
+        let passing: Vec<&Attempt> = submitted.iter().copied().filter(|a| a.candidate.is_some() && a.verifier_results.iter().filter(|r| r.required).all(|r| r.status == "passed")).collect();
+        self.emit(Event::new("race.finished", "guild").about_task(&task, &submitted[0].project_id).with(json!({"candidates": task.candidates, "submitted": submitted.len(), "passing": passing.len(), "autoIntegrate": task.auto_integrate})));
+        if !task.auto_integrate { return Ok(()); }
+        let Some(winner) = passing.iter().min_by_key(|a| (a.candidate.as_ref().map(|c| c.insertions + c.deletions).unwrap_or(u32::MAX), a.finished_at.clone().unwrap_or_default(), a.id.clone())) else {
+            self.log(&format!("race {task_id}: no candidate passed the verifiers; waiting for the user"));
+            return Ok(());
+        };
+        let winner_id = winner.id.clone();
+        self.select_candidate(task_id, &winner_id, "policy")?;
+        match self.task_integrate(task_id) {
+            Ok(_) => Ok(()),
+            Err(e) => { self.log(&format!("race {task_id}: integration failed: {}", e.message)); Ok(()) }
+        }
+    }
+
+    /// Accept one candidate of a task and reject its rivals.
+    fn select_candidate(&self, task_id: &str, attempt_id: &str, by: &str) -> Res<Attempt> {
+        let attempts = self.store.lock().unwrap().attempts_of_task(task_id)?;
+        let winner = attempts.iter().find(|a| a.id == attempt_id).ok_or_else(|| ApiError::not_found("attempt"))?.clone();
+        if !matches!(winner.state, AttemptState::Submitted | AttemptState::Verifying) { return Err(ApiError::conflict(format!("attempt is {:?}, not submitted", winner.state))); }
+        for rival in attempts.iter().filter(|a| a.id != attempt_id && matches!(a.state, AttemptState::Submitted | AttemptState::Verifying)) {
+            let member = self.store.lock().unwrap().member(&winner.member_id)?.map(|m| m.name).unwrap_or_default();
+            self.move_attempt(&rival.id, AttemptState::Failed, Some(format!("not selected: {member}'s candidate won")))?;
+            self.emit(Event::new("candidate.rejected", by).about_attempt(rival).with(json!({"reason": "another candidate was selected", "winner": attempt_id})));
+        }
+        self.move_attempt(attempt_id, AttemptState::Passed, None)?;
+        {
+            let store = self.store.lock().unwrap();
+            let mut t = store.task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
+            t.winner_attempt_id = Some(attempt_id.into());
+            t.updated_at = now();
+            store.put_task(&t)?;
+        }
+        self.move_task(task_id, TaskState::Accepted, None)?;
+        self.emit(Event::new("candidate.selected", by).about_attempt(&winner).with(json!({"by": by, "candidates": attempts.len()})));
+        Ok(winner)
     }
 
     fn spawn_driver(self: &Arc<Service>, attempt_id: String) {
@@ -397,7 +466,7 @@ impl Service {
                     service.log(&format!("attempt {attempt_id}: resume failed: {e}"));
                     let task = service.store.lock().unwrap().attempt(&attempt_id).ok().flatten().and_then(|a| service.store.lock().unwrap().task(&a.task_id).ok().flatten());
                     let _ = service.move_attempt(&attempt_id, AttemptState::Lost, Some(format!("the service restarted and the session could not be reopened: {e}")));
-                    if let Some(t) = task { let _ = service.after_failed_attempt(&t, "lost"); }
+                    if let Some(t) = task { let _ = service.after_runner_dropped(&t, "lost"); }
                 }
                 service.tick();
             })
@@ -644,7 +713,7 @@ impl Service {
 
     /// Record how the turn ended: commit the candidate and run the
     /// verifiers, or fail the attempt and decide the task's next state.
-    fn finish_attempt(&self, attempt_id: &str, outcome: TurnOutcome) -> Res<()> {
+    fn finish_attempt(self: &Arc<Service>, attempt_id: &str, outcome: TurnOutcome) -> Res<()> {
         let (attempt, task, project, workspace) = {
             let store = self.store.lock().unwrap();
             let a = store.attempt(attempt_id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
@@ -686,7 +755,7 @@ impl Service {
                 }
                 self.update_attempt(attempt_id, |a| { a.candidate = candidate.clone(); a.action = None; a.pending_permission = None; })?;
                 self.move_attempt(attempt_id, AttemptState::Submitted, None)?;
-                self.move_task(&task.id, TaskState::Verifying, None)?;
+                if task.candidates <= 1 { self.move_task(&task.id, TaskState::Verifying, None)?; }
                 if let (Some(ws), Some(p), Some(_)) = (&workspace, &project, &candidate) {
                     if !p.verifiers.is_empty() {
                         self.move_attempt(attempt_id, AttemptState::Verifying, None)?;
@@ -702,18 +771,27 @@ impl Service {
                         self.emit_locked(&store, Event::new("verification.finished", "verifier").about_attempt(&attempt).with(json!({"requiredPassed": all_required_pass, "results": results})));
                     }
                 }
+                if task.candidates > 1 { self.settle_race(&task.id)?; }
                 Ok(())
             }
             TurnOutcome::Failed { reason } => {
                 self.move_attempt(attempt_id, if reason == "timed out" { AttemptState::TimedOut } else { AttemptState::Failed }, Some(reason.clone()))?;
+                if task.candidates > 1 { return self.settle_race(&task.id); }
                 self.after_failed_attempt(&task, &reason)
             }
             TurnOutcome::Cancelled => {
                 self.move_attempt(attempt_id, AttemptState::Cancelled, Some("cancelled".into()))?;
+                if task.candidates > 1 { return self.settle_race(&task.id); }
                 let _ = self.move_task(&task.id, TaskState::Blocked, Some("attempt cancelled; retry to continue".into()));
                 Ok(())
             }
         }
+    }
+
+    /// A runner ended without a candidate: a race settles with the rest,
+    /// a single attempt follows the retry policy.
+    fn after_runner_dropped(self: &Arc<Service>, task: &Task, reason: &str) -> Res<()> {
+        if task.candidates > 1 { self.settle_race(&task.id) } else { self.after_failed_attempt(task, reason) }
     }
 
     fn after_failed_attempt(&self, task: &Task, reason: &str) -> Res<()> {
@@ -778,7 +856,7 @@ impl Service {
                 }
                 (None, _) => {
                     let _ = self.move_attempt(&a.id, AttemptState::Lost, Some("the service restarted while it ran".into()));
-                    if let Some(t) = &task { let _ = self.after_failed_attempt(t, "lost"); }
+                    if let Some(t) = &task { let _ = self.after_runner_dropped(t, "lost"); }
                 }
             }
         }
@@ -1089,7 +1167,11 @@ impl Service {
             state,
             block_reason: None,
             attempts_made: 0,
-            max_attempts: params.get("maxAttempts").and_then(Value::as_u64).unwrap_or(2) as u32,
+            // A race needs one attempt per runner before any retry counts.
+            max_attempts: (params.get("maxAttempts").and_then(Value::as_u64).unwrap_or(2) as u32).max(params.get("candidates").and_then(Value::as_u64).unwrap_or(1).clamp(1, 8) as u32),
+            candidates: params.get("candidates").and_then(Value::as_u64).unwrap_or(1).clamp(1, 8) as u32,
+            auto_integrate: params.get("autoIntegrate").and_then(Value::as_bool).unwrap_or(false),
+            winner_attempt_id: None,
             version: 1,
             created_at: now(),
             updated_at: now(),
@@ -1260,10 +1342,8 @@ impl Service {
 
     fn task_accept(self: &Arc<Service>, params: &Value) -> ApiResult {
         let task_id = p_str(params, "taskId")?;
-        let attempt = self.latest_submitted(task_id)?;
-        self.move_attempt(&attempt.id, AttemptState::Passed, None)?;
-        self.move_task(task_id, TaskState::Accepted, None)?;
-        self.emit(Event::new("candidate.selected", "user").about_attempt(&attempt).with(json!({"by": "user"})));
+        let attempt = match p_opt(params, "attemptId") { Some(id) => id, None => self.latest_submitted(task_id)?.id };
+        let attempt = self.select_candidate(task_id, &attempt, "user")?;
         if params.get("integrate").and_then(Value::as_bool).unwrap_or(false) {
             return self.task_integrate(task_id);
         }
@@ -1273,10 +1353,15 @@ impl Service {
     fn task_reject(self: &Arc<Service>, params: &Value) -> ApiResult {
         let task_id = p_str(params, "taskId")?;
         let reason = p_opt(params, "reason").unwrap_or_else(|| "rejected by user".into());
-        let attempt = self.latest_submitted(task_id)?;
+        let attempt = match p_opt(params, "attemptId") {
+            Some(id) => self.store.lock().unwrap().attempt(&id)?.filter(|a| a.task_id == task_id && matches!(a.state, AttemptState::Submitted | AttemptState::Verifying)).ok_or_else(|| ApiError::conflict("that attempt has no candidate to reject"))?,
+            None => self.latest_submitted(task_id)?,
+        };
         self.move_attempt(&attempt.id, AttemptState::Failed, Some(reason.clone()))?;
         self.emit(Event::new("candidate.rejected", "user").about_attempt(&attempt).with(json!({"reason": reason})));
         let task = self.store.lock().unwrap().task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
+        // In a race, other candidates may still be waiting for the user.
+        if self.latest_submitted(task_id).is_ok() { return Ok(json!({"rejected": task_id, "attemptId": attempt.id, "remaining": true})); }
         self.after_failed_attempt(&task, &reason)?;
         self.tick();
         Ok(json!({"rejected": task_id, "attemptId": attempt.id}))
@@ -1602,7 +1687,7 @@ mod tests {
         assert_eq!(saved["version"], 2);
         assert_eq!(saved["loops"][2]["id"], "loop-3");
         let design: crate::design::GameDesign = serde_json::from_value(saved).unwrap();
-        let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, version: 1, created_at: now(), updated_at: now() };
+        let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now() };
         let ws = Workspace { id: "w".into(), attempt_id: "a".into(), project_id: design.project_id.clone(), path: "/tmp/w".into(), branch: "guild/x".into(), base_sha: "0".into(), state: WorkspaceState::Ready, created_at: now(), updated_at: now() };
         let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design));
         assert!(prompt.contains("Avoid: a dominant strategy; always choosing the longest word; obvious decisions; grinding"));
@@ -1616,6 +1701,40 @@ mod tests {
         let added = other.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "again"})).unwrap();
         assert_eq!(added["designImported"], true);
         assert_eq!(other.snapshot().unwrap().designs[0].loops.len(), 3);
+    }
+
+    #[test]
+    fn three_candidates_race_and_the_best_passing_one_is_integrated_alone() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let service = Service::new(Store::open_in_memory().unwrap(), Settings { concurrency: 3, ..Settings::default() });
+        let mock = Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "hello.txt".into(), content: "hello\n".into() }));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        for id in ["aria", "bram", "cora"] {
+            service.handle("member.add", &json!({"id": id, "harness": "mock", "roles": ["implementer"], "model": "mock-fast"})).unwrap();
+        }
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Race"})).unwrap()["id"].as_str().unwrap().to_string();
+        let t = service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Hello", "candidates": 3, "autoIntegrate": true})).unwrap();
+        assert_eq!(t["candidates"], 3);
+        assert_eq!(t["max_attempts"], 3);
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "three runners", |s| s.attempts.len() == 3);
+        let members: std::collections::HashSet<String> = snap.attempts.iter().map(|a| a.member_id.clone()).collect();
+        assert_eq!(members.len(), 3, "one runner per member");
+        let snap = wait_for(&service, "completed", |s| s.quests[0].state == QuestState::Completed);
+        let task = &snap.tasks[0];
+        assert_eq!(task.state, TaskState::Completed);
+        let winner = task.winner_attempt_id.clone().expect("a winner");
+        assert_eq!(snap.attempts.iter().filter(|a| a.state == AttemptState::Passed).count(), 1);
+        assert!(snap.attempts.iter().filter(|a| a.id != winner).all(|a| a.state == AttemptState::Failed && a.failure.as_deref().unwrap().starts_with("not selected")));
+        assert!(snap.attempts.iter().all(|a| a.candidate.is_some()), "every runner left a candidate");
+        let kinds: Vec<String> = service.store.lock().unwrap().events_after(0, 2000).unwrap().into_iter().map(|e| e.kind).collect();
+        assert_eq!(kinds.iter().filter(|k| *k == "merge.completed").count(), 1, "one merge");
+        assert_eq!(kinds.iter().filter(|k| *k == "candidate.rejected").count(), 2);
+        assert!(kinds.contains(&"race.finished".to_string()));
+        assert!(workspaces::git(&repo, &["ls-tree", "--name-only", &snap.quests[0].integration_ref]).unwrap().contains("hello.txt"));
     }
 
     #[test]
