@@ -284,6 +284,14 @@ pub fn run() {
     let refusal = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"You've hit your session limit · resets 2:20pm (America/Santiago)"}]},"quotaLimits":{"status":"rejected","resetsAt":1790094600},"error":"rate_limit","isApiErrorMessage":true}"#;
     assert_eq!(limit_in_tail(&format!("{}\n{refusal}", r#"{"type":"user","message":{"content":"hola"}}"#)), Some(Some(1790094600)), "Limit row not read");
     assert_eq!(limit_in_tail(&format!("{refusal}\n{}", r#"{"type":"user","message":{"content":"sigue"}}"#)), None, "A later prompt ends the limit");
+    // A background shell finishing after the refusal writes a tool_result as a
+    // `user` row; auto mode is still trapped under the limit, not moving on.
+    let tool_result = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}}"#;
+    assert_eq!(limit_in_tail(&format!("{refusal}\n{tool_result}")), Some(Some(1790094600)), "A tool result must not end the limit");
+    // Auto mode keeps thinking, calling tools and replying while it waits for
+    // the reset: ordinary rows after the refusal must not end the limit.
+    let churn = format!("{}\n{}\n{tool_result}", r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"…"}]}}"#, r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#);
+    assert_eq!(limit_in_tail(&format!("{refusal}\n{churn}")), Some(Some(1790094600)), "Auto-mode churn must not end the limit");
     assert_eq!(limit_in_tail(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#), None);
     assert!(is_limit_text("rate limited — wait and retry · You've hit your session limit") && is_limit_text("Claude usage limit reached.") && !is_limit_text("Done, under the limit"));
     use chrono::TimeZone;

@@ -526,16 +526,35 @@ pub fn limit_in_tail(tail: &str) -> Option<Option<i64>> {
                     .map(|c| c.iter().filter_map(|b| str_of(b, "text")).collect::<Vec<_>>().join(" "))
                     .unwrap_or_default();
                 let api_error = row.get("isApiErrorMessage").and_then(Value::as_bool).unwrap_or(false);
-                if str_of(&row, "error") != Some("rate_limit") && !(api_error && is_limit_text(&text)) { return None; }
+                // A normal reply is not the end of the limit: in auto mode the
+                // agent keeps thinking, calling tools and retrying while it
+                // waits for the reset, writing ordinary rows after the refusal.
+                // Keep scanning back for the refusal itself; a reset already in
+                // the past is dropped by `session_limit`.
+                if str_of(&row, "error") != Some("rate_limit") && !(api_error && is_limit_text(&text)) { continue; }
                 let resets = row.get("quotaLimits").and_then(|q| q.get("resetsAt")).and_then(Value::as_i64)
                     .or_else(|| resets_from_text(&text, chrono::Local::now()));
                 return Some(resets);
             }
+            // A tool result is the agent's own turn, not you moving on; keep
+            // scanning. A real prompt you typed ends the limit.
+            Some("user") if user_is_only_tool_result(&row) => continue,
             Some("user") => return None,
             _ => continue,
         }
     }
     None
+}
+
+/// A `user` row that carries nothing but tool results (no text the user
+/// typed): the harness's own turn, not a prompt from you.
+fn user_is_only_tool_result(row: &Value) -> bool {
+    match row.get("message").and_then(|m| m.get("content")) {
+        Some(Value::Array(blocks)) if !blocks.is_empty() => {
+            blocks.iter().all(|b| str_of(b, "type") == Some("tool_result"))
+        }
+        _ => false,
+    }
 }
 
 /// The usage limit a Claude Code session is stuck on, if it has not reset yet.
