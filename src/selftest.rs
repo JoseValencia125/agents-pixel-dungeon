@@ -262,6 +262,14 @@ pub fn run() {
     assert!(flowed[2].starts_with("Tipografía") && flowed[2].ends_with("capturas.") && flowed[3].starts_with("  - Primer paso") && flowed[3].ends_with("de HP.") && flowed[4] == "❯ 1. Yes");
     assert!(job_state("blocked", Some("active"), false) == "working" && job_state("blocked", Some("idle"), false) == "idle" && job_state("blocked", Some("idle"), true) == "blocked" && job_state("working", Some("blocked"), false) == "blocked" && job_state("blocked", None, false) == "blocked", "Job tempo must decide its state");
     let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    for command in ["agent", "/Users/me/.local/bin/agent", "cursor-agent"] {
+        assert_eq!(identify(&args(&[command])), Some("cursor"));
+    }
+    assert_eq!(identify(&args(&["node", "--use-system-ca", "/Users/me/.local/share/cursor-agent/versions/2026.10.14/index.js"])), Some("cursor"));
+    assert_eq!(identify(&args(&["agent", "--version"])), None);
+    assert_eq!(crate::herdr::harness_for("cursor-project-1234"), "cursor");
+    assert_eq!(crate::herdr::harness_for("agent"), "cursor");
+    assert_eq!(crate::herdr::harness_for("unknown-agent"), "hero");
     assert_eq!(identify(&args(&["claude"])), Some("claude"));
     assert_eq!(identify(&args(&["/Users/me/.local/share/claude/versions/2.1.295", "--resume", "x"])), Some("claude"));
     assert_eq!(identify(&args(&["node", "/usr/lib/node_modules/@openai/codex/bin/codex.js"])), Some("codex"));

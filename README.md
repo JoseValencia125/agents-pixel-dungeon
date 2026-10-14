@@ -49,6 +49,7 @@ This shell is independent from the agent's chat and runs your login shell (`$SHE
 | **codex** (OpenAI Codex) | <img src="docs/media/hero_codex.png" width="64" alt="Monochrome alchemist"> | Monochrome hooded alchemist with a glowing flask |
 | **kiro** (Amazon Kiro) | <img src="docs/media/hero_kiro.png" width="64" alt="Purple-hooded rogue"> | Purple-hooded rogue with a ghost face |
 | **gemini** (Google Gemini CLI) | <img src="docs/media/hero_gemini.png" width="64" alt="Blue star cleric"> | Blue star cleric |
+| **cursor** (Cursor Agent: `agent`) | <img src="docs/media/hero_cursor.png" width="64" alt="Silver scout"> | Silver scout with a cursor-shaped blade |
 | any other | <img src="docs/media/hero_hero.png" width="64" alt="Green adventurer"> | Green adventurer |
 
 Original pixel art drawn in Aseprite (sources in `art/`), coloured after each tool's brand; no logos are reproduced.
