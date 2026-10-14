@@ -657,7 +657,8 @@ pub fn board(ctx: &Context, view: &mut GuildView) -> BoardAction {
             .inner_margin(Margin::same(10))
             .shadow(egui::epaint::Shadow { offset: [0, 2], blur: 6, spread: 0, color: Color32::from_rgba_unmultiplied(0, 0, 0, 128) })
             .show(ui, |ui| {
-                ui.set_width(340.0);
+                crate::guild_studio::parchment(ui);
+                ui.set_width((ctx.screen_rect().width() - 40.0).clamp(160.0, 340.0));
                 ui.spacing_mut().item_spacing = vec2(5.0, 5.0);
                 ui.horizontal(|ui| {
                     ui.label(mono(&tr("Tablón de misiones"), 12.0).strong().color(ink));

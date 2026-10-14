@@ -160,9 +160,12 @@ impl Pattern {
 }
 
 /// The field's colours: bright enough on the app's dark background, from
-/// the Endesga-32 palette the rooms are drawn with. The hash picks among
-/// these, never any RGB.
-pub const COLOURS: [(&str, Color32); 12] = [
+/// the Endesga-32 palette the rooms are drawn with, plus a burgundy and the
+/// brand colours of Saludtech (its primary teal blue) and Proser (its blue).
+/// The hash picks among the first `DRAWN`, never any RGB; the brand colours
+/// after them are chosen by hand in the editor, or taken when the drawn
+/// ones are all in use.
+pub const COLOURS: [(&str, Color32); 15] = [
     ("red", Color32::from_rgb(228, 59, 68)),
     ("orange", Color32::from_rgb(247, 118, 34)),
     ("amber", Color32::from_rgb(254, 174, 52)),
@@ -175,7 +178,13 @@ pub const COLOURS: [(&str, Color32); 12] = [
     ("pink", Color32::from_rgb(246, 117, 122)),
     ("steel", Color32::from_rgb(139, 155, 180)),
     ("tan", Color32::from_rgb(228, 166, 114)),
+    ("burgundy", Color32::from_rgb(128, 0, 32)),
+    ("saludtech", Color32::from_rgb(40, 83, 107)),
+    ("proser", Color32::from_rgb(0, 81, 160)),
 ];
+
+/// How many of `COLOURS`, from the first, a repo's hash draws from.
+pub const DRAWN: usize = 12;
 
 /// The partition's colours: heraldry's metals and dark tinctures, so the
 /// second colour always stands apart from the first (`identity` only takes
@@ -231,8 +240,8 @@ pub struct SavedEmblem {
 /// every colour taken, the least used one.
 pub fn free_colour(key: &str, wanted: usize, taken: &[usize]) -> usize {
     if !taken.contains(&wanted) { return wanted; }
-    let start = (draw(stable_hash(key), 6) % COLOURS.len() as u64) as usize;
-    let order: Vec<usize> = (0..COLOURS.len()).map(|i| (start + i) % COLOURS.len()).collect();
+    let start = (draw(stable_hash(key), 6) % DRAWN as u64) as usize;
+    let order: Vec<usize> = (0..DRAWN).map(|i| (start + i) % DRAWN).chain(DRAWN..COLOURS.len()).collect();
     order.iter().copied().find(|c| !taken.contains(c))
         .unwrap_or_else(|| order.iter().copied().min_by_key(|c| taken.iter().filter(|t| *t == c).count()).unwrap_or(wanted))
 }
@@ -330,7 +339,7 @@ fn lightness(c: Color32) -> f32 {
 /// per owner) while the rest stays per repo.
 pub fn identity(meta: &ProjectMeta) -> Identity {
     let hash = stable_hash(&meta.key);
-    let primary = (draw(hash, 1) % COLOURS.len() as u64) as usize;
+    let primary = (draw(hash, 1) % DRAWN as u64) as usize;
     let light = lightness(COLOURS[primary].1);
     let apart: Vec<usize> = (0..METALS.len()).filter(|&i| (lightness(METALS[i].1) - light).abs() > 0.3).collect();
     let secondary = apart[(draw(hash, 2) % apart.len() as u64) as usize];
@@ -552,7 +561,7 @@ mod tests {
     #[test]
     fn colours_stay_apart() {
         let mut kept = std::collections::BTreeMap::new();
-        for i in 0..12 {
+        for i in 0..COLOURS.len() {
             let m = meta(&format!("o/r{i}"), Kind::Unknown);
             let e = identity(&m);
             let taken = SavedEmblem::colours_of(kept.values());
@@ -563,7 +572,7 @@ mod tests {
             kept.insert(m.key.clone(), saved);
         }
         let colours: HashSet<String> = kept.values().map(|e| e.color.clone()).collect();
-        assert_eq!(colours.len(), 12, "twelve repos, twelve colours");
+        assert_eq!(colours.len(), COLOURS.len(), "as many repos as colours, each with its own");
         // Two kept with the same colour: the second by key moves.
         let mut twins = std::collections::BTreeMap::new();
         let base = SavedEmblem::of(&identity(&meta("a/one", Kind::Unknown)));

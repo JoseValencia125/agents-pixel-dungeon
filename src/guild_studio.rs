@@ -144,6 +144,7 @@ pub fn studio(ctx: &Context, view: &mut GuildView) -> StudioAction {
     let mut commands: Vec<(&'static str, Value)> = vec![];
     let Some(snap) = view.snapshot.clone() else {
         egui::Window::new(mono(&tr("Gremio"), 12.0).strong()).id(egui::Id::new("guild-studio")).collapsible(false).resizable(false).frame(paper()).show(ctx, |ui| {
+            parchment(ui);
             ui.label(mono(&tr("Servicio de la guild apagado"), 11.0).color(FAINT));
             if small(ui, &tr("Arrancar el servicio")) { view.start_service(); }
             if small(ui, &tr("Cerrar")) { action.close = true; }
@@ -169,6 +170,7 @@ pub fn studio(ctx: &Context, view: &mut GuildView) -> StudioAction {
     let width = (screen.width() - 24.0).clamp(180.0, 720.0);
     let height = (screen.height() - 64.0).clamp(200.0, 600.0);
     egui::Window::new(mono(&tr("Gremio"), 12.0).strong()).id(egui::Id::new("guild-studio")).collapsible(false).resizable(false).fixed_size([width, height]).constrain_to(screen).frame(paper()).show(ctx, |ui| {
+        parchment(ui);
         ui.set_width(width - 20.0);
         ui.spacing_mut().item_spacing = vec2(6.0, 5.0);
         // Header: project, tabs, close.
@@ -279,6 +281,35 @@ pub fn studio(ctx: &Context, view: &mut GuildView) -> StudioAction {
     });
     for (method, params) in commands { view.command(method, params); }
     action
+}
+
+/// Widgets readable on parchment: cream fields with dark ink, light
+/// combo boxes, a brown selection. egui's dark defaults vanish here.
+pub fn parchment(ui: &mut Ui) {
+    let cream = Color32::from_rgb(250, 242, 224);
+    let v = &mut ui.style_mut().visuals;
+    v.override_text_color = None;
+    v.extreme_bg_color = cream;
+    v.faint_bg_color = PAPER_DARK;
+    v.window_fill = PAPER;
+    v.panel_fill = PAPER;
+    v.selection.bg_fill = Color32::from_rgb(140, 80, 30);
+    v.selection.stroke = Stroke::new(1.0_f32, cream);
+    v.hyperlink_color = Color32::from_rgb(140, 80, 30);
+    for (w, fill, stroke) in [
+        (&mut v.widgets.noninteractive, PAPER, RUST),
+        (&mut v.widgets.inactive, cream, RUST),
+        (&mut v.widgets.hovered, Color32::from_rgb(255, 250, 238), Color32::from_rgb(140, 80, 30)),
+        (&mut v.widgets.active, Color32::from_rgb(232, 208, 160), Color32::from_rgb(140, 80, 30)),
+        (&mut v.widgets.open, cream, Color32::from_rgb(140, 80, 30)),
+    ] {
+        w.bg_fill = fill;
+        w.weak_bg_fill = fill;
+        w.bg_stroke = Stroke::new(1.0_f32, stroke);
+        w.fg_stroke = Stroke::new(1.0_f32, INK);
+    }
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, FAINT);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, RUST);
 }
 
 fn paper() -> Frame {
