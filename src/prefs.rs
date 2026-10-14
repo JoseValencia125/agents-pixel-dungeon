@@ -39,6 +39,9 @@ pub struct Prefs {
     pub claude_usage_live: bool,
     /// How tall full screen draws its rooms: "large", "medium" or "small".
     pub room_size: String,
+    /// Full screen's rooms in the order the user dragged them to: their
+    /// project folders, top first. Rooms not in it follow, by pane.
+    pub room_order: Vec<String>,
     /// Full screen's guild HP shows each harness's bars; closed, one line.
     pub guild_hp_open: bool,
     /// Folders starred in the summon panel, offered first.
@@ -79,6 +82,7 @@ impl Default for Prefs {
             claude_usage_live: false,
             guild_hp_open: false,
             room_size: "medium".into(),
+            room_order: vec![],
             favorite_folders: vec![],
             projects: Default::default(),
             emblems: Default::default(),
