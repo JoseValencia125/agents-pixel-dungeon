@@ -1,10 +1,13 @@
 //! The contract every harness adapter honours, and the adapters: a
-//! deterministic mock for tests and Kiro over ACP for real work. Guild
-//! persists the event stream itself; it never relies on the provider
-//! replaying it.
+//! deterministic mock for tests, Kiro over ACP, Codex over `codex exec
+//! --json` and Claude Code over stream-json. Guild persists the event
+//! stream itself; it never relies on the provider replaying it.
 
+pub mod claude_stream;
+pub mod codex_exec;
 pub mod kiro_acp;
 pub mod mock;
+pub mod proc;
 
 use crate::domain::{HarnessKind, ModelOption, PermissionOption};
 use serde_json::Value;
@@ -86,6 +89,9 @@ pub enum HarnessEvent {
     /// `paths` are the files the tool touches, when the harness says.
     Tool { id: String, title: String, kind: String, status: String, action: String, paths: Vec<String> },
     Plan(Value),
+    /// The harness's own id for the session, once it exists (some only
+    /// create it with the first turn); the guild keeps it to resume.
+    SessionId(String),
     ModelChanged { effective: String, reason: String },
     PermissionRequested { request_id: String, title: String, detail: String, options: Vec<PermissionOption> },
     /// Anything else the provider sent, verbatim.

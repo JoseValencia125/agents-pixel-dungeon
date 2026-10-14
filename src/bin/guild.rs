@@ -25,7 +25,7 @@ USAGE
 
   guild project add <path> [--id ID] [--name NAME]
   guild member add <id> --harness kiro|codex|claude|mock [--role R]... [--model M] [--mode MODE] [--name N]
-  guild models [kiro|mock]           the models the harness announces
+  guild models [kiro|codex|claude|mock]  the models the harness announces
 
   guild quest new <project> <title> [--description TEXT]
   guild task new <quest> <title> [--instructions TEXT] [--accept TEXT]... [--depends ID,ID]
@@ -45,6 +45,7 @@ ENVIRONMENT
   HPD_GUILD_HOME     data directory (database, worktrees, artifacts, socket)
   HPD_GUILD_SOCKET   socket path
   KIRO_CLI_BIN       kiro-cli binary
+  CODEX_BIN          codex binary        CLAUDE_BIN  claude binary
 ";
 
 fn main() -> ExitCode {
@@ -125,6 +126,8 @@ fn serve(args: &[String]) -> Result<(), String> {
     let service = Service::new(store, settings);
     service.log_to(&paths::log_path());
     service.register(Arc::new(KiroAcp::new()));
+    service.register(Arc::new(guild::harness::codex_exec::CodexExec::new()));
+    service.register(Arc::new(guild::harness::claude_stream::ClaudeStream::new()));
     service.register(Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "GUILD_MOCK.md".into(), content: "The mock harness was here.\n".into() })));
     service.log(&format!("guild service {} starting, home {}", service::SERVICE_VERSION, paths::home().display()));
     let result = service::run(service.clone(), &paths::socket_path()).map_err(|e| e.to_string());

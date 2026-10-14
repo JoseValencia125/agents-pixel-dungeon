@@ -104,6 +104,7 @@ impl HarnessAdapter for MockHarness {
         std::thread::Builder::new()
             .name("mock-harness".into())
             .spawn(move || {
+                let _ = ev_tx.send(HarnessEvent::SessionId(format!("mock-{session_id}")));
                 let finish = |file: &str, content: &str| {
                     let _ = ev_tx.send(HarnessEvent::Tool { id: "t1".into(), title: "read_file".into(), kind: "read".into(), status: "completed".into(), action: "read".into(), paths: vec![] });
                     std::thread::sleep(Duration::from_millis(delay));

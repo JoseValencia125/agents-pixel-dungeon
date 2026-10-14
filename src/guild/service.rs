@@ -614,6 +614,18 @@ impl Service {
                 let _ = self.update_attempt(attempt_id, |a| a.action = Some("plan".into()));
                 self.emit(Event::new("plan.updated", "harness").about_attempt(attempt).with(json!({"entries": entries})));
             }
+            HarnessEvent::SessionId(native) => {
+                let store = self.store.lock().unwrap();
+                let session_id = store.attempt(attempt_id).ok().flatten().and_then(|a| a.session_id);
+                if let Ok(Some(mut s)) = session_id.as_deref().map(|id| store.session(id)).unwrap_or(Ok(None)) {
+                    if s.native_id.as_deref() != Some(native.as_str()) {
+                        s.native_id = Some(native.clone());
+                        s.updated_at = now();
+                        let _ = store.put_session(&s);
+                        self.emit_locked(&store, Event::new("session.identified", "harness").about_attempt(attempt).with(json!({"nativeId": native})));
+                    }
+                }
+            }
             HarnessEvent::ModelChanged { effective, reason } => {
                 let _ = self.update_attempt(attempt_id, |a| a.model_effective = Some(effective.clone()));
                 self.emit(Event::new("model.changed", "harness").about_attempt(attempt).with(json!({"effective": effective, "reason": reason})));
