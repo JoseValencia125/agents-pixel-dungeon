@@ -399,10 +399,11 @@ pub fn enrich(agents: Vec<Agent>) -> Vec<Agent> {
 }
 
 /// One classic RPG hero per harness. Any other harness gets the plain hero.
-pub const HERO_ORDER: [&str; 5] = ["claude", "codex", "kiro", "gemini", "hero"];
+pub const HERO_ORDER: [&str; 6] = ["claude", "codex", "kiro", "gemini", "cursor", "hero"];
 
 pub fn harness_for(agent: &str) -> &'static str {
     let name = agent.to_lowercase();
+    if name == "agent" { return "cursor"; }
     HERO_ORDER.iter().copied().find(|h| *h != "hero" && name.contains(h)).unwrap_or("hero")
 }
 
@@ -798,8 +799,8 @@ pub fn installed_kinds() -> Vec<&'static str> {
     dirs.extend([".local/bin", ".cargo/bin", ".bun/bin", ".npm-global/bin", ".volta/bin", ".opencode/bin"].iter().map(|d| home.join(d)));
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].iter().map(PathBuf::from));
     let found: Vec<&'static str> = CREATABLE_KINDS.iter().copied().filter(|kind| {
-        let command = match *kind { "kiro" => "kiro-cli", "cursor" => "cursor-agent", other => other };
-        dirs.iter().any(|d| d.join(command).is_file())
+        let commands: &[&str] = match *kind { "kiro" => &["kiro-cli"], "cursor" => &["agent", "cursor-agent"], _ => std::slice::from_ref(kind) };
+        dirs.iter().any(|d| commands.iter().any(|command| d.join(command).is_file()))
     }).collect();
     if found.is_empty() { CREATABLE_KINDS.to_vec() } else { found }
 }

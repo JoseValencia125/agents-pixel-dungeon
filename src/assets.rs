@@ -113,7 +113,7 @@ impl Assets {
                 rooms.insert(name, ctx.load_texture(name, image, nearest));
             }
         }
-        let heroes_image = decode_png(HEROES_PNG).unwrap_or_else(|| ColorImage::new([48, 160], Color32::TRANSPARENT));
+        let heroes_image = decode_png(HEROES_PNG).unwrap_or_else(|| ColorImage::new([48, HERO_ORDER.len() * 32], Color32::TRANSPARENT));
         let heroes = ctx.load_texture("heroes", heroes_image.clone(), nearest);
         let heroes_image = &heroes_image;
         let mut sleepers = HashMap::new();
@@ -246,6 +246,7 @@ fn arm_image(harness: &str) -> ColorImage {
         "codex" => rgb(0.227, 0.267, 0.4),
         "kiro" => rgb(0.408, 0.22, 0.424),
         "gemini" => rgb(0.071, 0.306, 0.537),
+        "cursor" => rgb(0.32, 0.35, 0.40),
         _ => rgb(0.243, 0.537, 0.282),
     };
     let hand = if harness == "codex" { rgb(0.753, 0.796, 0.863) } else { rgb(0.91, 0.718, 0.588) };

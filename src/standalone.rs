@@ -33,7 +33,7 @@ pub fn identify(args: &[String]) -> Option<&'static str> {
             "claude" | "claude-code" => "claude",
             "codex" => "codex",
             "gemini" => "gemini",
-            "cursor" | "cursor-agent" => "cursor",
+            "agent" | "cursor" | "cursor-agent" => "cursor",
             "devin" | "devin-cli" => "devin",
             "agy" | "antigravity" | "antigravity-cli" => "antigravity",
             "cline" | ".cline" => "cline",
@@ -68,6 +68,7 @@ pub fn identify(args: &[String]) -> Option<&'static str> {
     if ["node", "bun", "deno", "python", "python3", "sh", "bash", "zsh"].contains(&name.as_str()) {
         for arg in rest.iter().take(2) {
             if let Some(agent) = lookup(&basename(arg)) { return Some(agent); }
+            if arg.contains("/cursor-agent/versions/") && basename(arg) == "index.js" { return Some("cursor"); }
             if arg.contains("/claude/versions/") { return Some("claude"); }
         }
     }
