@@ -828,11 +828,11 @@ fn demo_snapshot(tick: usize) -> Snapshot {
     let member = |id: &str, name: &str, harness: HarnessKind, model: &str, role: &str| Member { id: id.into(), name: name.into(), roles: vec![role.into()], harness, model_id: Some(model.into()), mode: None, role_prompt: String::new(), enabled: true };
     let task = |id: &str, title: &str, state: TaskState, deps: &[&str]| Task {
         id: id.into(), quest_id: "q1".into(), title: tr(title), instructions: String::new(), acceptance: vec![], depends_on: deps.iter().map(|s| s.to_string()).collect(), role: "implementer".into(),
-        member_id: None, model_id: None, priority: 0, state, block_reason: None, attempts_made: 1, max_attempts: 2, candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1, created_at: t.clone(), updated_at: t.clone(),
+        member_id: None, model_id: None, priority: 0, state, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1, created_at: t.clone(), updated_at: t.clone(),
     };
     let attempt = |id: &str, task: &str, member: &str, harness: HarnessKind, model: &str, state: AttemptState| Attempt {
         id: id.into(), task_id: task.into(), task_version: 1, quest_id: "q1".into(), project_id: "verbrawl".into(), member_id: member.into(), harness, model_requested: Some(model.into()), model_effective: Some(model.into()),
-        state, workspace_id: Some(format!("w-{id}")), session_id: None, generation: 1, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 1, resumed: 0,
+        kind: AttemptKind::Work, state, workspace_id: Some(format!("w-{id}")), session_id: None, generation: 1, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 1, resumed: 0,
         started_at: Some(t.clone()), finished_at: None, created_at: t.clone(), updated_at: t.clone(),
     };
     let workspace = |id: &str, branch: &str| Workspace { id: format!("w-{id}"), project_id: "verbrawl".into(), attempt_id: id.into(), path: format!("~/demo/verbrawl/worktrees/{id}"), branch: branch.into(), base_sha: "490acd6".into(), state: WorkspaceState::Active, created_at: t.clone(), updated_at: t.clone() };
@@ -859,6 +859,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         last_seq: 0,
         service_version: "demo".into(),
         projects: vec![Project { id: "verbrawl".into(), name: "Verbrawl".into(), repo_path: "~/demo/verbrawl".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], created_at: t.clone() }],
+        decisions: vec![],
         designs: vec![guild::design::template("verbrawl", "Verbrawl", "videogame")],
         roles: guild::config::role_catalog(),
         quests: vec![Quest { id: "q1".into(), project_id: "verbrawl".into(), title: tr("Efectos de estado"), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some("490acd6".into()), plan_version: 1, created_at: t.clone(), updated_at: t.clone() }],

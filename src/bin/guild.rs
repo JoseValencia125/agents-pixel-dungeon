@@ -33,7 +33,10 @@ USAGE
   guild quest new <project> <title> [--description TEXT]
   guild task new <quest> <title> [--instructions TEXT] [--accept TEXT]... [--depends ID,ID]
                                      [--role R] [--member ID] [--model M] [--priority N] [--max-attempts N] [--id ID]
-                                     [--candidates N] [--auto-integrate]   N members race; the best passing candidate is merged alone
+                                     [--strategy single|reviewed|race] [--candidates N] [--select policy|judge|user] [--auto-integrate]
+                                     a race runs N members at once; the selection picks among the candidates that passed the verifiers
+  guild decisions <task>             how each candidate was chosen: by the policy, a judge or you
+  guild records [--project ID] [--task ID]   one row per finished attempt: strategy, member, harness, model, duration, size, verifiers, judge score, winner
   guild start <quest>  |  guild pause <quest>  |  guild resume <quest>  |  guild cancel-quest <quest>
 
   guild accept <task> [--integrate] [--attempt ID]  the latest (or that) candidate passes; --integrate squashes it into the quest branch
@@ -277,6 +280,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                 "dependsOn": depends, "role": a.flag("role"), "memberId": a.flag("member"), "modelId": a.flag("model"), "id": a.flag("id"),
                 "priority": a.flag("priority").and_then(|s| s.parse::<i64>().ok()), "maxAttempts": a.flag("max-attempts").and_then(|s| s.parse::<u64>().ok()),
                 "candidates": a.flag("candidates").and_then(|s| s.parse::<u64>().ok()), "autoIntegrate": a.has("auto-integrate"),
+                "strategy": a.flag("strategy"), "selection": a.flag("select"),
             });
             let r = call(&ensure_running()?, "task.create", params)?;
             println!("task {} · {} ({})", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""), r["state"].as_str().unwrap_or(""));
@@ -316,6 +320,28 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
         "cancel" => {
             let r = call(&ensure_running()?, "attempt.cancel", json!({"attemptId": a.pos(0, "attempt")?}))?;
             println!("{}", summarize(&r));
+            Ok(())
+        }
+        "records" => {
+            let rows = call(&ensure_running()?, "records.list", json!({"projectId": a.flag("project"), "taskId": a.flag("task")}))?;
+            println!("{:<10} {:<22} {:<16} {:<8} {:<7} {:<22} {:>7} {:>5} {:>4} {:>4} {:>5} {:>5} {:>5} {:<8}", "kind", "task", "strategy", "member", "harness", "model", "ms", "turns", "res", "files", "±", "pass", "score", "result");
+            for r in rows.as_array().into_iter().flatten() {
+                let size = format!("{}/{}", r["insertions"].as_u64().unwrap_or(0), r["deletions"].as_u64().unwrap_or(0));
+                let win = match r["winner"] { Value::Bool(true) => " ★", Value::Bool(false) => " ✗", _ => "" };
+                println!("{:<10} {:<22} {:<16} {:<8} {:<7} {:<22} {:>7} {:>5} {:>4} {:>4} {:>5} {:>5} {:>5} {:<8}{}", r["kind"].as_str().unwrap_or(""), r["task_title"].as_str().unwrap_or("").chars().take(22).collect::<String>(), format!("{}/{}", r["strategy"].as_str().unwrap_or(""), r["selection"].as_str().unwrap_or("")), r["member_id"].as_str().unwrap_or(""), r["harness"].as_str().unwrap_or(""), r["model"].as_str().unwrap_or("-").chars().take(22).collect::<String>(), r["duration_ms"].as_i64().unwrap_or(0), r["turns"], r["resumed"], r["files_changed"].as_u64().unwrap_or(0), size, r["verifiers_passed"], r["judge_score"].as_f64().map(|s| format!("{s:.0}")).unwrap_or("-".into()), r["result"].as_str().unwrap_or(""), win);
+            }
+            Ok(())
+        }
+        "decisions" => {
+            let snap = call(&ensure_running()?, "guild.snapshot", json!({}))?;
+            let task = a.pos(0, "task")?;
+            for d in snap["decisions"].as_array().into_iter().flatten().filter(|d| d["task_id"] == task) {
+                println!("{} by {} · winner {} · confidence {} · {}", d["created_at"].as_str().unwrap_or(""), d["by"].as_str().unwrap_or(""), d["winner_attempt_id"].as_str().unwrap_or("none"), d["confidence"], d["reason"].as_str().unwrap_or(""));
+                for c in d["candidates"].as_array().into_iter().flatten() {
+                    println!("  {} {:<10} gates {} · +{} -{} · score {}", c["label"].as_str().unwrap_or(""), c["member_id"].as_str().unwrap_or(""), c["verifiers_passed"], c["insertions"], c["deletions"], c["score"]);
+                }
+                if d["human_override"] == true { println!("  (the user chose against an earlier decision)"); }
+            }
             Ok(())
         }
         "interrupt" => {

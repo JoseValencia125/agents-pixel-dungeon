@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, attempt_id TEXT, json
 CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, type TEXT NOT NULL, attempt_id TEXT, task_id TEXT, quest_id TEXT, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS commands (idempotency_key TEXT PRIMARY KEY, result TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS designs (id TEXT PRIMARY KEY, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS decisions (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS tasks_quest ON tasks(quest_id, state);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id, state);
 CREATE INDEX IF NOT EXISTS events_attempt ON events(attempt_id);
@@ -112,6 +114,18 @@ impl Store {
 
     pub fn put_member(&self, m: &Member) -> StoreResult<()> { self.put("members", &m.id, &[], m) }
     pub fn put_design(&self, d: &crate::design::GameDesign) -> StoreResult<()> { self.put("designs", &d.project_id, &[], d) }
+    pub fn put_decision(&self, d: &RaceDecision) -> StoreResult<()> { self.put("decisions", &d.id, &[("task_id", d.task_id.clone())], d) }
+    pub fn put_record(&self, r: &AttemptRecord) -> StoreResult<()> { self.put("records", &r.attempt_id, &[("project_id", r.project_id.clone()), ("task_id", r.task_id.clone())], r) }
+    pub fn record(&self, attempt_id: &str) -> StoreResult<Option<AttemptRecord>> { self.get("records", attempt_id) }
+    pub fn records(&self, project_id: Option<&str>, task_id: Option<&str>) -> StoreResult<Vec<AttemptRecord>> {
+        match (project_id, task_id) {
+            (_, Some(t)) => self.list("SELECT json FROM records WHERE task_id = ?1 ORDER BY id", &[t]),
+            (Some(p), None) => self.list("SELECT json FROM records WHERE project_id = ?1 ORDER BY id", &[p]),
+            (None, None) => self.list("SELECT json FROM records ORDER BY id", &[]),
+        }
+    }
+    pub fn decisions(&self) -> StoreResult<Vec<RaceDecision>> { self.list("SELECT json FROM decisions ORDER BY id", &[]) }
+    pub fn decisions_of_task(&self, task_id: &str) -> StoreResult<Vec<RaceDecision>> { self.list("SELECT json FROM decisions WHERE task_id = ?1 ORDER BY id", &[task_id]) }
     pub fn design(&self, project_id: &str) -> StoreResult<Option<crate::design::GameDesign>> { self.get("designs", project_id) }
     pub fn designs(&self) -> StoreResult<Vec<crate::design::GameDesign>> { self.list("SELECT json FROM designs ORDER BY id", &[]) }
     pub fn member(&self, id: &str) -> StoreResult<Option<Member>> { self.get("members", id) }
@@ -266,6 +280,7 @@ impl Store {
             attempts: self.attempts()?,
             workspaces: self.workspaces()?,
             harnesses,
+            decisions: self.decisions()?,
             designs: self.designs()?,
             roles: vec![],
         })

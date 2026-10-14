@@ -124,8 +124,12 @@ pub struct Task {
     pub block_reason: Option<String>,
     pub attempts_made: u32,
     pub max_attempts: u32,
-    /// How many attempts race for this task at once (1: no race). Each
-    /// runs on its own member and worktree and is verified on its own.
+    /// How the task is executed and how its candidate is chosen.
+    #[serde(default)]
+    pub strategy: ExecutionStrategy,
+    /// How many attempts race for this task at once (1: no race); derived
+    /// from the strategy. Each runs on its own member and worktree and is
+    /// verified on its own.
     #[serde(default = "one")]
     pub candidates: u32,
     /// Integrate the best passing candidate without asking.
@@ -165,6 +169,134 @@ impl AttemptState {
     pub fn is_active(self) -> bool { !self.is_terminal() }
 }
 
+/// What a task asks of the guild: one attempt, one attempt reviewed by a
+/// judge, a race of candidates, or an experiment (a race whose variants
+/// are compared by what they make the game do, not by code quality).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyKind { #[default] Single, Reviewed, CandidateRace, Experiment }
+
+/// Who picks among the candidates that passed the hard gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Selection { #[default] User, Policy, Judge }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionStrategy {
+    #[serde(rename = "type", default)]
+    pub kind: StrategyKind,
+    #[serde(default = "one")]
+    pub candidates: u32,
+    #[serde(default)]
+    pub selection: Selection,
+    /// Integrate the chosen candidate without asking.
+    #[serde(default)]
+    pub auto_integrate: bool,
+}
+
+impl Default for ExecutionStrategy {
+    fn default() -> Self { ExecutionStrategy { kind: StrategyKind::Single, candidates: 1, selection: Selection::User, auto_integrate: false } }
+}
+
+impl ExecutionStrategy {
+    /// Runners the strategy wants at once.
+    pub fn runners(&self) -> u32 {
+        match self.kind { StrategyKind::CandidateRace | StrategyKind::Experiment => self.candidates.max(1), _ => 1 }
+    }
+    /// `reviewed` is a single attempt a judge looks at.
+    pub fn selection(&self) -> Selection {
+        if self.kind == StrategyKind::Reviewed { Selection::Judge } else { self.selection }
+    }
+}
+
+/// Work attempts make candidates; a judge attempt reads them and decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptKind { #[default] Work, Judge }
+
+/// One candidate as a decision saw it: anonymous to the judge.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DecisionCandidate {
+    pub label: String,
+    pub attempt_id: String,
+    pub member_id: String,
+    pub verifiers_passed: bool,
+    pub insertions: u32,
+    pub deletions: u32,
+    #[serde(default)]
+    pub score: Option<f64>,
+}
+
+/// Why a candidate was chosen: by the policy, a judge or the user. Durable,
+/// one per decision, so a choice can be audited and learned from.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RaceDecision {
+    pub id: String,
+    pub task_id: String,
+    pub quest_id: String,
+    pub project_id: String,
+    /// policy, judge or user
+    pub by: String,
+    #[serde(default)]
+    pub judge_attempt_id: Option<String>,
+    pub candidates: Vec<DecisionCandidate>,
+    /// Per label, the rubric's scores, as the judge gave them.
+    #[serde(default)]
+    pub scores: serde_json::Value,
+    #[serde(default)]
+    pub findings: serde_json::Value,
+    #[serde(default)]
+    pub tradeoffs: String,
+    pub winner_attempt_id: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+    pub reason: String,
+    /// The user chose against an earlier judge or policy decision.
+    #[serde(default)]
+    pub human_override: bool,
+    pub created_at: String,
+}
+
+/// One row per finished attempt: what was asked, who did it, how it
+/// went and how it was judged. The dataset routing will learn from; no
+/// learning yet, only honest rows.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AttemptRecord {
+    pub attempt_id: String,
+    pub task_id: String,
+    pub quest_id: String,
+    pub project_id: String,
+    pub task_title: String,
+    pub role: String,
+    pub strategy: StrategyKind,
+    pub candidates: u32,
+    pub selection: Selection,
+    pub kind: AttemptKind,
+    pub member_id: String,
+    pub harness: HarnessId,
+    pub model: Option<String>,
+    pub result: AttemptState,
+    pub attempt_number: u32,
+    pub duration_ms: Option<i64>,
+    pub turns: u32,
+    pub resumed: u32,
+    /// What the harness reported, when it did (tokens, cost…).
+    #[serde(default)]
+    pub usage: Option<serde_json::Value>,
+    pub files_changed: Option<u32>,
+    pub insertions: Option<u32>,
+    pub deletions: Option<u32>,
+    pub verifiers_passed: u32,
+    pub verifiers_failed: u32,
+    pub judge_score: Option<f64>,
+    /// Some(true) when chosen, Some(false) when another candidate was; None when no decision applied.
+    pub winner: Option<bool>,
+    pub decided_by: Option<String>,
+    pub human_override: bool,
+    pub failure: Option<String>,
+    pub created_at: String,
+}
+
 /// A commit the attempt left in its worktree, with the shas a proof needs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Candidate {
@@ -188,6 +320,8 @@ pub struct Attempt {
     pub harness: HarnessKind,
     pub model_requested: Option<String>,
     pub model_effective: Option<String>,
+    #[serde(default)]
+    pub kind: AttemptKind,
     pub state: AttemptState,
     pub workspace_id: Option<String>,
     pub session_id: Option<String>,
@@ -359,6 +493,8 @@ pub struct Snapshot {
     pub harnesses: Vec<HarnessStatus>,
     /// One per project that has one.
     #[serde(default)]
+    pub decisions: Vec<RaceDecision>,
+    #[serde(default)]
     pub designs: Vec<crate::design::GameDesign>,
     #[serde(default)]
     pub roles: Vec<crate::config::Role>,
@@ -483,7 +619,7 @@ mod tests {
         Task {
             id: id.into(), quest_id: "q".into(), title: id.into(), instructions: String::new(), acceptance: vec![],
             depends_on: deps.iter().map(|s| s.to_string()).collect(), role: "implementer".into(), member_id: None, model_id: None,
-            priority: 0, state: TaskState::Pending, block_reason: None, attempts_made: 0, max_attempts: 2, candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1,
+            priority: 0, state: TaskState::Pending, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1,
             created_at: now(), updated_at: now(),
         }
     }

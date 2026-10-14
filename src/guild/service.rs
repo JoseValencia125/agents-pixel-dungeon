@@ -239,6 +239,20 @@ impl Service {
                 let f = chrono::DateTime::parse_from_rfc3339(f).ok()?;
                 Some((f - s).num_milliseconds())
             });
+            let decision = store.decisions_of_task(&a.task_id)?.into_iter().rev().find(|d| d.winner_attempt_id.is_some());
+            let label_score = decision.as_ref().and_then(|d| d.candidates.iter().find(|c| c.attempt_id == a.id)).and_then(|c| c.score);
+            let record = AttemptRecord {
+                attempt_id: a.id.clone(), task_id: a.task_id.clone(), quest_id: a.quest_id.clone(), project_id: a.project_id.clone(),
+                task_title: task.as_ref().map(|t| t.title.clone()).unwrap_or_default(), role: task.as_ref().map(|t| t.role.clone()).unwrap_or_default(),
+                strategy: task.as_ref().map(|t| t.strategy.kind).unwrap_or_default(), candidates: task.as_ref().map(|t| t.candidates).unwrap_or(1), selection: task.as_ref().map(|t| t.strategy.selection()).unwrap_or_default(),
+                kind: a.kind, member_id: a.member_id.clone(), harness: a.harness.clone(), model: a.model_effective.clone().or(a.model_requested.clone()), result: to,
+                attempt_number: task.as_ref().map(|t| t.attempts_made).unwrap_or(0), duration_ms, turns: a.turns, resumed: a.resumed, usage: None,
+                files_changed: a.candidate.as_ref().map(|c| c.files_changed), insertions: a.candidate.as_ref().map(|c| c.insertions), deletions: a.candidate.as_ref().map(|c| c.deletions),
+                verifiers_passed: a.verifier_results.iter().filter(|v| v.status == "passed").count() as u32, verifiers_failed: a.verifier_results.iter().filter(|v| v.status != "passed").count() as u32,
+                judge_score: label_score, winner: decision.as_ref().map(|d| d.winner_attempt_id.as_deref() == Some(a.id.as_str())).filter(|_| a.kind == AttemptKind::Work),
+                decided_by: decision.as_ref().map(|d| d.by.clone()), human_override: decision.as_ref().map(|d| d.human_override).unwrap_or(false), failure: a.failure.clone(), created_at: now(),
+            };
+            store.put_record(&record)?;
             self.emit_locked(&store, Event::new("attempt.finished", "guild").about_attempt(&a).with(json!({
                 "result": to,
                 "role": task.as_ref().map(|t| t.role.clone()),
@@ -342,7 +356,7 @@ impl Service {
         // A race that lost every runner (a restart, a failure) is settled here too.
         for t in tasks.iter().filter(|t| t.candidates > 1 && t.state == TaskState::Running && t.attempts_made >= t.candidates) {
             let pending = self.store.lock().unwrap().attempts_of_task(&t.id)?.into_iter().any(|a| a.state.is_active() && a.state != AttemptState::Submitted);
-            if !pending { self.settle_race(&t.id)?; }
+            if !pending { self.settle_task(&t.id)?; }
         }
         let mut slots: Vec<(&Task, u32)> = scheduler::ready_in_order(&tasks, &running_quests).into_iter().map(|t| (t, t.candidates.max(1))).collect();
         // Racing tasks already running still want their remaining runners.
@@ -382,6 +396,7 @@ impl Service {
                     harness: member.harness.clone(),
                     model_requested: model,
                     model_effective: None,
+                    kind: AttemptKind::Work,
                     state: AttemptState::Queued,
                     workspace_id: None,
                     session_id: None,
@@ -417,37 +432,224 @@ impl Service {
         Ok(())
     }
 
-    /// A race ends when every runner has submitted or dropped out. With
-    /// `auto_integrate` the best candidate whose required verifiers passed
-    /// wins (smallest change, then the earliest); the rest are rejected
-    /// and the winner is integrated. Otherwise the user picks on the board.
-    fn settle_race(self: &Arc<Service>, task_id: &str) -> Res<()> {
+    /// The work attempts of a task are done (submitted or dropped out):
+    /// decide what the strategy says. The hard gates come first: only
+    /// candidates whose required verifiers passed can be chosen. Then the
+    /// policy picks (smallest change, then the earliest), a judge is asked,
+    /// or the user is left to choose on the board.
+    fn settle_task(self: &Arc<Service>, task_id: &str) -> Res<()> {
         let (task, attempts) = {
             let store = self.store.lock().unwrap();
             let t = store.task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
             (t.clone(), store.attempts_of_task(task_id)?)
         };
-        if task.state != TaskState::Running { return Ok(()); }
-        if attempts.iter().any(|a| a.state.is_active() && a.state != AttemptState::Submitted) { return Ok(()); }
+        if !matches!(task.state, TaskState::Running | TaskState::Verifying) { return Ok(()); }
+        if task.state == TaskState::Verifying && (task.strategy.selection() == Selection::User || attempts.iter().any(|a| a.kind == AttemptKind::Judge && a.state.is_active())) { return Ok(()); }
+        if task.state == TaskState::Verifying && self.store.lock().unwrap().decisions_of_task(task_id)?.iter().any(|d| d.winner_attempt_id.is_some()) { return Ok(()); }
+        let work: Vec<&Attempt> = attempts.iter().filter(|a| a.kind == AttemptKind::Work).collect();
+        if work.iter().any(|a| a.state.is_active() && a.state != AttemptState::Submitted) { return Ok(()); }
         if task.attempts_made < task.candidates { return Ok(()); }
-        let submitted: Vec<&Attempt> = attempts.iter().filter(|a| a.state == AttemptState::Submitted).collect();
+        let submitted: Vec<&Attempt> = work.iter().copied().filter(|a| a.state == AttemptState::Submitted).collect();
+        let project_id = attempts.first().map(|a| a.project_id.clone()).unwrap_or_default();
         if submitted.is_empty() {
-            self.emit(Event::new("race.finished", "guild").about_task(&task, &attempts.first().map(|a| a.project_id.clone()).unwrap_or_default()).with(json!({"candidates": task.candidates, "submitted": 0})));
-            return self.after_failed_attempt(&task, "no candidate survived the race");
+            if task.candidates > 1 { self.emit(Event::new("race.finished", "guild").about_task(&task, &project_id).with(json!({"candidates": task.candidates, "submitted": 0}))); }
+            return self.after_failed_attempt(&task, "no candidate survived");
         }
-        self.move_task(task_id, TaskState::Verifying, None)?;
-        let passing: Vec<&Attempt> = submitted.iter().copied().filter(|a| a.candidate.is_some() && a.verifier_results.iter().filter(|r| r.required).all(|r| r.status == "passed")).collect();
-        self.emit(Event::new("race.finished", "guild").about_task(&task, &submitted[0].project_id).with(json!({"candidates": task.candidates, "submitted": submitted.len(), "passing": passing.len(), "autoIntegrate": task.auto_integrate})));
-        if !task.auto_integrate { return Ok(()); }
+        if task.state == TaskState::Running { self.move_task(task_id, TaskState::Verifying, None)?; }
+        let passing: Vec<&Attempt> = submitted.iter().copied().filter(|a| passes_gates(a)).collect();
+        if task.candidates > 1 {
+            self.emit(Event::new("race.finished", "guild").about_task(&task, &project_id).with(json!({"candidates": task.candidates, "submitted": submitted.len(), "passing": passing.len(), "selection": task.strategy.selection(), "autoIntegrate": task.auto_integrate})));
+        }
+        match task.strategy.selection() {
+            Selection::User => Ok(()),
+            Selection::Policy => self.decide_by_policy(task_id, "policy", None),
+            Selection::Judge => {
+                if passing.is_empty() { self.log(&format!("task {task_id}: nothing passed the gates; waiting for the user")); return Ok(()); }
+                match self.start_judge(&task, &passing)? {
+                    true => Ok(()),
+                    false => self.decide_by_policy(task_id, "policy", Some("no judge available".into())),
+                }
+            }
+        }
+    }
+
+    /// The baseline selection: among the candidates that passed the hard
+    /// gates, the smallest change, then the earliest. Records the decision.
+    fn decide_by_policy(self: &Arc<Service>, task_id: &str, by: &str, note: Option<String>) -> Res<()> {
+        let (task, attempts, decided) = {
+            let store = self.store.lock().unwrap();
+            (store.task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?, store.attempts_of_task(task_id)?, store.decisions_of_task(task_id)?.iter().any(|d| d.winner_attempt_id.is_some()))
+        };
+        if decided || task.winner_attempt_id.is_some() { self.log(&format!("task {task_id}: already decided")); return Ok(()); }
+        let submitted: Vec<&Attempt> = attempts.iter().filter(|a| a.kind == AttemptKind::Work && a.state == AttemptState::Submitted).collect();
+        let passing: Vec<&Attempt> = submitted.iter().copied().filter(|a| passes_gates(a)).collect();
         let Some(winner) = passing.iter().min_by_key(|a| (a.candidate.as_ref().map(|c| c.insertions + c.deletions).unwrap_or(u32::MAX), a.finished_at.clone().unwrap_or_default(), a.id.clone())) else {
-            self.log(&format!("race {task_id}: no candidate passed the verifiers; waiting for the user"));
+            self.log(&format!("task {task_id}: no candidate passed the verifiers; waiting for the user"));
             return Ok(());
         };
+        let reason = match note { Some(n) => format!("{n}; smallest passing change, then the earliest"), None => "smallest passing change, then the earliest".into() };
+        let decision = RaceDecision {
+            id: new_id(), task_id: task_id.into(), quest_id: task.quest_id.clone(), project_id: winner.project_id.clone(), by: by.into(), judge_attempt_id: None,
+            candidates: submitted.iter().map(|a| decision_candidate(a, &label_for(&submitted, a))).collect(),
+            scores: json!({}), findings: json!({}), tradeoffs: String::new(), winner_attempt_id: Some(winner.id.clone()), confidence: None, reason, human_override: false, created_at: now(),
+        };
         let winner_id = winner.id.clone();
-        self.select_candidate(task_id, &winner_id, "policy")?;
-        match self.task_integrate(task_id) {
-            Ok(_) => Ok(()),
-            Err(e) => { self.log(&format!("race {task_id}: integration failed: {}", e.message)); Ok(()) }
+        self.record_decision(&decision)?;
+        self.select_candidate(task_id, &winner_id, by)?;
+        if task.auto_integrate {
+            if let Err(e) = self.task_integrate(task_id) { self.log(&format!("task {task_id}: integration failed: {}", e.message)); }
+        }
+        Ok(())
+    }
+
+    fn record_decision(&self, d: &RaceDecision) -> Res<()> {
+        let store = self.store.lock().unwrap();
+        self.atomic(&store, || {
+            store.put_decision(d)?;
+            for c in &d.candidates {
+                if let Some(mut r) = store.record(&c.attempt_id)? {
+                    r.winner = Some(d.winner_attempt_id.as_deref() == Some(c.attempt_id.as_str()));
+                    r.decided_by = Some(d.by.clone());
+                    r.human_override = d.human_override;
+                    if c.score.is_some() { r.judge_score = c.score; }
+                    store.put_record(&r)?;
+                }
+            }
+            let task = store.task(&d.task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
+            self.emit_locked(&store, Event::new("race.decided", &d.by).about_task(&task, &d.project_id).with(json!({"decisionId": d.id, "by": d.by, "winner": d.winner_attempt_id, "confidence": d.confidence, "candidates": d.candidates.len(), "reason": d.reason, "humanOverride": d.human_override})));
+            Ok(())
+        })
+    }
+
+    /// Start a judge attempt for the task: a free member with the judge role
+    /// (or reviewer), preferably not one of the candidates' authors. False
+    /// when nobody can judge.
+    fn start_judge(self: &Arc<Service>, task: &Task, passing: &[&Attempt]) -> Res<bool> {
+        let attempt = {
+            let store = self.store.lock().unwrap();
+            let members = store.members()?;
+            let available = self.available_harnesses();
+            let busy: Vec<String> = store.active_attempts()?.into_iter().map(|a| a.member_id).collect();
+            let authors: Vec<String> = passing.iter().map(|a| a.member_id.clone()).collect();
+            let mut wanted = task.clone();
+            wanted.member_id = None;
+            let mut pick = |role: &str, busy: &[String]| { wanted.role = role.into(); scheduler::pick_member(&wanted, &members, busy, &available).cloned() };
+            let mut with_authors = busy.clone();
+            with_authors.extend(authors.iter().cloned());
+            let member = pick("judge", &with_authors).or_else(|| pick("reviewer", &with_authors)).or_else(|| pick("judge", &busy)).or_else(|| pick("reviewer", &busy));
+            let Some(member) = member else { return Ok(false) };
+            let quest = store.quest(&task.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
+            let attempt = Attempt {
+                id: new_id(), task_id: task.id.clone(), task_version: task.version, quest_id: quest.id.clone(), project_id: quest.project_id.clone(), member_id: member.id.clone(),
+                harness: member.harness.clone(), model_requested: member.model_id.clone(), model_effective: None, kind: AttemptKind::Judge, state: AttemptState::Queued, workspace_id: None, session_id: None,
+                generation: 0, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 0, resumed: 0,
+                started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
+            };
+            self.atomic(&store, || {
+                store.put_attempt(&attempt)?;
+                self.emit_locked(&store, Event::new("judge.started", "guild").about_attempt(&attempt).with(json!({"member": member.name, "harness": member.harness, "candidates": passing.len(), "task": task.title})));
+                Ok(())
+            })?;
+            attempt
+        };
+        self.spawn_driver(attempt.id.clone());
+        Ok(true)
+    }
+
+    /// What the judge reads: the task, its acceptance criteria, the design,
+    /// and each passing candidate's diff under an anonymous label.
+    fn compose_judge_prompt(&self, role_prompt: &str, task: &Task, design: Option<&crate::design::GameDesign>) -> Res<String> {
+        let (attempts, diffs) = {
+            let store = self.store.lock().unwrap();
+            let attempts: Vec<Attempt> = store.attempts_of_task(&task.id)?.into_iter().filter(|a| a.kind == AttemptKind::Work && a.state == AttemptState::Submitted && passes_gates(a)).collect();
+            let mut diffs = vec![];
+            for a in &attempts {
+                let text = a.candidate.as_ref().and_then(|c| c.diff_artifact_id.as_ref()).and_then(|id| store.artifact(id).ok().flatten()).and_then(|art| std::fs::read_to_string(&art.path).ok()).unwrap_or_default();
+                diffs.push(text);
+            }
+            (attempts, diffs)
+        };
+        let refs: Vec<&Attempt> = attempts.iter().collect();
+        let mut s = String::new();
+        s.push_str(role_prompt.trim());
+        s.push_str(&format!("\n\n# Task: {}\n\n{}\n", task.title, task.instructions.trim()));
+        if !task.acceptance.is_empty() {
+            s.push_str("\n## Acceptance criteria\n");
+            for ac in &task.acceptance { s.push_str(&format!("- {}: {}\n", ac.id, ac.text)); }
+        }
+        if let Some(d) = design { s.push_str(&crate::design::prompt_context(d)); }
+        s.push_str("\n## Candidates\n");
+        for (a, diff) in attempts.iter().zip(diffs.iter()) {
+            let label = label_for(&refs, a);
+            let c = a.candidate.as_ref();
+            let verifiers: Vec<String> = a.verifier_results.iter().map(|v| format!("{} {}", v.id, v.status)).collect();
+            s.push_str(&format!("\n### Candidate {label}\nfiles changed: {} · +{} −{} · verifiers: {}\n", c.map(|c| c.files_changed).unwrap_or(0), c.map(|c| c.insertions).unwrap_or(0), c.map(|c| c.deletions).unwrap_or(0), if verifiers.is_empty() { "none".to_string() } else { verifiers.join(", ") }));
+            let mut d: String = diff.chars().take(14_000).collect();
+            if diff.chars().count() > 14_000 { d.push_str("\n… (diff truncated)"); }
+            s.push_str("```diff\n");
+            s.push_str(&d);
+            s.push_str("\n```\n");
+        }
+        s.push_str("\nCompare the candidates on the rubric and answer with the JSON block only.\n");
+        Ok(s)
+    }
+
+    /// The judge's turn ended: read its decision, or fall back to the policy.
+    fn finish_judge(self: &Arc<Service>, attempt: &Attempt, task: &Task, outcome: TurnOutcome) -> Res<()> {
+        let attempt_id = attempt.id.as_str();
+        let text: String = match &outcome {
+            TurnOutcome::Completed { .. } => self.store.lock().unwrap().events_of_attempt(attempt_id, 5000)?.into_iter().filter(|e| e.kind == "turn.text").map(|e| e.payload["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join(""),
+            _ => String::new(),
+        };
+        let (attempts, labels): (Vec<Attempt>, Vec<(String, Attempt)>) = {
+            let store = self.store.lock().unwrap();
+            let all: Vec<Attempt> = store.attempts_of_task(&task.id)?.into_iter().filter(|a| a.kind == AttemptKind::Work && a.state == AttemptState::Submitted).collect();
+            let passing: Vec<&Attempt> = all.iter().filter(|a| passes_gates(a)).collect();
+            let labels = passing.iter().map(|a| (label_for(&passing, a), (*a).clone())).collect();
+            (all, labels)
+        };
+        let parsed = match &outcome {
+            TurnOutcome::Completed { .. } => parse_judge_output(&text),
+            TurnOutcome::Failed { reason } => Err(format!("judge failed: {reason}")),
+            TurnOutcome::Cancelled => Err("judge cancelled".into()),
+        };
+        match parsed {
+            Ok(v) => {
+                let winner_label = v["winner"].as_str().unwrap_or("").trim().to_uppercase();
+                let Some((_, winner)) = labels.iter().find(|(l, _)| *l == winner_label) else {
+                    self.move_attempt(attempt_id, AttemptState::Failed, Some(format!("judge named an unknown candidate: {winner_label:?}")))?;
+                    return self.decide_by_policy(&task.id, "policy", Some("judge named an unknown candidate".into()));
+                };
+                let refs: Vec<&Attempt> = attempts.iter().collect();
+                let mut candidates: Vec<DecisionCandidate> = attempts.iter().map(|a| decision_candidate(a, &label_for(&refs, a))).collect();
+                for c in candidates.iter_mut() {
+                    c.score = v["scores"].get(&c.label).and_then(Value::as_object).map(|o| o.values().filter_map(Value::as_f64).sum::<f64>());
+                }
+                let decision = RaceDecision {
+                    id: new_id(), task_id: task.id.clone(), quest_id: task.quest_id.clone(), project_id: attempt.project_id.clone(), by: "judge".into(), judge_attempt_id: Some(attempt_id.into()),
+                    candidates, scores: v["scores"].clone(), findings: v["findings"].clone(), tradeoffs: v["tradeoffs"].as_str().unwrap_or("").into(),
+                    winner_attempt_id: Some(winner.id.clone()), confidence: v["confidence"].as_f64(), reason: v["reason"].as_str().unwrap_or("").into(), human_override: false, created_at: now(),
+                };
+                let winner_id = winner.id.clone();
+                let artifact = self.write_artifact(Some(attempt_id), "race.decision", serde_json::to_string_pretty(&decision).unwrap_or_default().as_bytes())?;
+                self.record_decision(&decision)?;
+                self.update_attempt(attempt_id, |a| { a.summary = format!("Candidate {winner_label} wins"); a.failure = None; })?;
+                // A judge's verdict is its candidate: submitted, then passed.
+                let _ = self.move_attempt(attempt_id, AttemptState::Submitted, None);
+                self.move_attempt(attempt_id, AttemptState::Passed, None)?;
+                self.emit(Event::new("judge.finished", "guild").about_attempt(attempt).with(json!({"decisionId": decision.id, "artifactId": artifact.id, "winner": winner_label})));
+                self.select_candidate(&task.id, &winner_id, "judge")?;
+                if task.auto_integrate {
+                    if let Err(e) = self.task_integrate(&task.id) { self.log(&format!("task {}: integration failed: {}", task.id, e.message)); }
+                }
+                Ok(())
+            }
+            Err(reason) => {
+                let state = match &outcome { TurnOutcome::Cancelled => AttemptState::Cancelled, _ => AttemptState::Failed };
+                self.move_attempt(attempt_id, state, Some(reason.clone()))?;
+                self.emit(Event::new("judge.finished", "guild").about_attempt(attempt).with(json!({"failure": reason})));
+                self.decide_by_policy(&task.id, "policy", Some(format!("judge unusable: {reason}")))
+            }
         }
     }
 
@@ -469,7 +671,7 @@ impl Service {
             t.updated_at = now();
             store.put_task(&t)?;
             self.move_task_locked(&store, task_id, TaskState::Accepted, None)?;
-            self.emit_locked(&store, Event::new("candidate.selected", by).about_attempt(&winner).with(json!({"by": by, "candidates": attempts.len()})));
+            self.emit_locked(&store, Event::new("candidate.selected", by).about_attempt(&winner).with(json!({"by": by, "candidates": attempts.iter().filter(|a| a.kind == AttemptKind::Work).count()})));
             Ok(winner)
         })
     }
@@ -553,11 +755,16 @@ impl Service {
         }
         if self.cancel_requested(attempt_id) { return self.finish_attempt(attempt_id, TurnOutcome::Cancelled); }
         let adapter = self.adapter(member.harness.clone())?;
-        let role_prompt = if member.role_prompt.trim().is_empty() { config::default_role_prompt(&task.role) } else { member.role_prompt.clone() };
+        let role_for_prompt = if attempt.kind == AttemptKind::Judge { "judge".to_string() } else { task.role.clone() };
+        let role_prompt = if member.role_prompt.trim().is_empty() || attempt.kind == AttemptKind::Judge { config::default_role_prompt(&role_for_prompt) } else { member.role_prompt.clone() };
         let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_requested.clone(), mode: member.mode.clone(), role_prompt: role_prompt.clone() };
         let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
         let design = self.store.lock().unwrap().design(&project.id)?;
-        let prompt = compose_prompt(&role_prompt, &task, &workspace, design.as_ref());
+        let prompt = if attempt.kind == AttemptKind::Judge {
+            self.compose_judge_prompt(&role_prompt, &task, design.as_ref())?
+        } else {
+            compose_prompt(&role_prompt, &task, &workspace, design.as_ref())
+        };
         self.run_turn(attempt_id, &attempt, &member, &adapter, session, &prompt)
     }
 
@@ -793,6 +1000,7 @@ impl Service {
             self.log(&format!("attempt {attempt_id}: left {:?} for the next start", attempt.state));
             return Ok(());
         }
+        if attempt.kind == AttemptKind::Judge { return self.finish_judge(&attempt, &task, outcome); }
         match outcome {
             TurnOutcome::Completed { stop_reason } => {
                 self.emit(Event::new("turn.completed", "harness").about_attempt(&attempt).with(json!({"stopReason": stop_reason})));
@@ -846,17 +1054,16 @@ impl Service {
                         })?;
                     }
                 }
-                if task.candidates > 1 { self.settle_race(&task.id)?; }
-                Ok(())
+                self.settle_task(&task.id)
             }
             TurnOutcome::Failed { reason } => {
                 self.move_attempt(attempt_id, if reason == "timed out" { AttemptState::TimedOut } else { AttemptState::Failed }, Some(reason.clone()))?;
-                if task.candidates > 1 { return self.settle_race(&task.id); }
+                if task.candidates > 1 { return self.settle_task(&task.id); }
                 self.after_failed_attempt(&task, &reason)
             }
             TurnOutcome::Cancelled => {
                 self.move_attempt(attempt_id, AttemptState::Cancelled, Some("cancelled".into()))?;
-                if task.candidates > 1 { return self.settle_race(&task.id); }
+                if task.candidates > 1 { return self.settle_task(&task.id); }
                 let _ = self.move_task(&task.id, TaskState::Blocked, Some("attempt cancelled; retry to continue".into()));
                 Ok(())
             }
@@ -866,7 +1073,7 @@ impl Service {
     /// A runner ended without a candidate: a race settles with the rest,
     /// a single attempt follows the retry policy.
     fn after_runner_dropped(self: &Arc<Service>, task: &Task, reason: &str) -> Res<()> {
-        if task.candidates > 1 { self.settle_race(&task.id) } else { self.after_failed_attempt(task, reason) }
+        if task.candidates > 1 { self.settle_task(&task.id) } else { self.after_failed_attempt(task, reason) }
     }
 
     fn after_failed_attempt(&self, task: &Task, reason: &str) -> Res<()> {
@@ -940,6 +1147,10 @@ impl Service {
                     let _ = self.update_attempt(&a.id, |x| { x.candidate = Some(candidate.clone()); x.failure = Some("recovered after a restart".into()); });
                     let _ = self.move_attempt(&a.id, AttemptState::Submitted, None);
                     if let Some(t) = &task { let _ = self.move_task(&t.id, TaskState::Verifying, None); }
+                }
+                (None, _) if a.kind == AttemptKind::Judge => {
+                    let _ = self.move_attempt(&a.id, AttemptState::Lost, Some("the service restarted while it judged".into()));
+                    let _ = self.decide_by_policy(&a.task_id, "policy", Some("judge lost in a restart".into()));
                 }
                 (None, _) => {
                     let _ = self.move_attempt(&a.id, AttemptState::Lost, Some("the service restarted while it ran".into()));
@@ -1024,6 +1235,10 @@ impl Service {
                 Ok(serde_json::to_value(self.store.lock().unwrap().design(id)?).unwrap())
             }
             "design.set" => self.design_set(params),
+            "records.list" => {
+                let rows = self.store.lock().unwrap().records(p_opt(params, "projectId").as_deref(), p_opt(params, "taskId").as_deref())?;
+                Ok(serde_json::to_value(rows).unwrap())
+            }
             "design.template" => self.design_template(params),
             "design.export" => {
                 let id = p_str(params, "projectId")?;
@@ -1252,6 +1467,7 @@ impl Service {
             })
             .unwrap_or_default();
         let state = if quest.state == QuestState::Draft { TaskState::Draft } else { TaskState::Pending };
+        let strategy = parse_strategy(params)?;
         let task = Task {
             id: p_opt(params, "id").unwrap_or_else(new_id),
             quest_id: quest_id.into(),
@@ -1267,9 +1483,10 @@ impl Service {
             block_reason: None,
             attempts_made: 0,
             // A race needs one attempt per runner before any retry counts.
-            max_attempts: (params.get("maxAttempts").and_then(Value::as_u64).unwrap_or(2) as u32).max(params.get("candidates").and_then(Value::as_u64).unwrap_or(1).clamp(1, 8) as u32),
-            candidates: params.get("candidates").and_then(Value::as_u64).unwrap_or(1).clamp(1, 8) as u32,
-            auto_integrate: params.get("autoIntegrate").and_then(Value::as_bool).unwrap_or(false),
+            max_attempts: (params.get("maxAttempts").and_then(Value::as_u64).unwrap_or(2) as u32).max(strategy.runners()),
+            candidates: strategy.runners(),
+            auto_integrate: strategy.auto_integrate,
+            strategy,
             winner_attempt_id: None,
             version: 1,
             created_at: now(),
@@ -1456,7 +1673,7 @@ impl Service {
         store
             .attempts_of_task(task_id)?
             .into_iter()
-            .filter(|a| matches!(a.state, AttemptState::Submitted | AttemptState::Verifying))
+            .filter(|a| a.kind == AttemptKind::Work && matches!(a.state, AttemptState::Submitted | AttemptState::Verifying))
             .max_by(|a, b| a.created_at.cmp(&b.created_at))
             .ok_or_else(|| ApiError::conflict("the task has no submitted candidate"))
     }
@@ -1464,6 +1681,21 @@ impl Service {
     fn task_accept(self: &Arc<Service>, params: &Value) -> ApiResult {
         let task_id = p_str(params, "taskId")?;
         let attempt = match p_opt(params, "attemptId") { Some(id) => id, None => self.latest_submitted(task_id)?.id };
+        {
+            let store = self.store.lock().unwrap();
+            let task = store.task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
+            let submitted: Vec<Attempt> = store.attempts_of_task(task_id)?.into_iter().filter(|a| a.kind == AttemptKind::Work && matches!(a.state, AttemptState::Submitted | AttemptState::Verifying)).collect();
+            let refs: Vec<&Attempt> = submitted.iter().collect();
+            let earlier = store.decisions_of_task(task_id)?;
+            let override_ = earlier.iter().any(|d| d.winner_attempt_id.as_deref() != Some(attempt.as_str()));
+            if let Some(w) = submitted.iter().find(|a| a.id == attempt) {
+                let d = RaceDecision { id: new_id(), task_id: task_id.into(), quest_id: task.quest_id.clone(), project_id: w.project_id.clone(), by: "user".into(), judge_attempt_id: None,
+                    candidates: submitted.iter().map(|a| decision_candidate(a, &label_for(&refs, a))).collect(), scores: json!({}), findings: json!({}), tradeoffs: String::new(),
+                    winner_attempt_id: Some(w.id.clone()), confidence: None, reason: p_opt(params, "reason").unwrap_or_else(|| "chosen by the user".into()), human_override: override_, created_at: now() };
+                drop(store);
+                self.record_decision(&d)?;
+            }
+        }
         let attempt = self.select_candidate(task_id, &attempt, "user")?;
         if params.get("integrate").and_then(Value::as_bool).unwrap_or(false) {
             return self.task_integrate(task_id);
@@ -1495,7 +1727,7 @@ impl Service {
             if !matches!(t.state, TaskState::Accepted | TaskState::Blocked) { return Err(ApiError::conflict(format!("task is {:?}, accept it first", t.state))); }
             let q = store.quest(&t.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
             let p = store.project(&q.project_id)?.ok_or_else(|| ApiError::not_found("project"))?;
-            let a = store.attempts_of_task(task_id)?.into_iter().filter(|a| a.state == AttemptState::Passed).max_by(|a, b| a.created_at.cmp(&b.created_at)).ok_or_else(|| ApiError::conflict("no accepted attempt"))?;
+            let a = store.attempts_of_task(task_id)?.into_iter().filter(|a| a.kind == AttemptKind::Work && a.state == AttemptState::Passed).max_by(|a, b| a.created_at.cmp(&b.created_at)).ok_or_else(|| ApiError::conflict("no accepted attempt"))?;
             (t, q, p, a)
         };
         self.move_task(task_id, TaskState::Integrating, None)?;
@@ -1530,6 +1762,75 @@ impl Service {
             }
         }
     }
+}
+
+/// The hard gates: a candidate commit whose required verifiers all passed.
+fn passes_gates(a: &Attempt) -> bool {
+    a.candidate.is_some() && a.verifier_results.iter().filter(|r| r.required).all(|r| r.status == "passed")
+}
+
+/// The anonymous label of a candidate among its peers: A, B, C… in an
+/// order that says nothing about who made it (sorted by a hash of the id).
+fn label_for(candidates: &[&Attempt], a: &Attempt) -> String {
+    let key = |id: &str| { let h = <sha2::Sha256 as sha2::Digest>::digest(id.as_bytes()); format!("{:x}", h) };
+    let mut keys: Vec<(String, String)> = candidates.iter().map(|c| (key(&c.id), c.id.clone())).collect();
+    keys.sort();
+    let pos = keys.iter().position(|(_, id)| *id == a.id).unwrap_or(0);
+    ((b'A' + (pos as u8 % 26)) as char).to_string()
+}
+
+fn decision_candidate(a: &Attempt, label: &str) -> DecisionCandidate {
+    DecisionCandidate { label: label.into(), attempt_id: a.id.clone(), member_id: a.member_id.clone(), verifiers_passed: passes_gates(a), insertions: a.candidate.as_ref().map(|c| c.insertions).unwrap_or(0), deletions: a.candidate.as_ref().map(|c| c.deletions).unwrap_or(0), score: None }
+}
+
+/// The judge's answer: the last fenced JSON block, or the last balanced
+/// object in the text, with a `winner`.
+fn parse_judge_output(text: &str) -> Result<Value, String> {
+    let mut candidates: Vec<&str> = vec![];
+    let mut rest = text;
+    while let Some(start) = rest.find("```") {
+        let after = &rest[start + 3..];
+        let body_start = after.find('\n').map(|i| i + 1).unwrap_or(0);
+        let body = &after[body_start..];
+        let Some(end) = body.find("```") else { break };
+        candidates.push(body[..end].trim());
+        rest = &body[end + 3..];
+    }
+    if candidates.is_empty() {
+        if let (Some(s), Some(e)) = (text.find('{'), text.rfind('}')) { if e > s { candidates.push(text[s..=e].trim()); } }
+    }
+    for c in candidates.iter().rev() {
+        if let Ok(v) = serde_json::from_str::<Value>(c) {
+            if v.get("winner").and_then(Value::as_str).is_some() { return Ok(v); }
+        }
+    }
+    Err("no JSON block with a winner".into())
+}
+
+/// `strategy: {type, candidates, selection, autoIntegrate}`, or the older
+/// `candidates` / `autoIntegrate` flags, which mean a policy-selected race.
+fn parse_strategy(params: &Value) -> Res<ExecutionStrategy> {
+    if let Some(s) = params.get("strategy") {
+        if let Some(text) = s.as_str() {
+            let kind = match text { "single" => StrategyKind::Single, "reviewed" => StrategyKind::Reviewed, "race" | "candidate_race" => StrategyKind::CandidateRace, "experiment" => StrategyKind::Experiment, other => return Err(ApiError::invalid(format!("unknown strategy {other}"))) };
+            let candidates = params.get("candidates").and_then(Value::as_u64).unwrap_or(if kind == StrategyKind::Single || kind == StrategyKind::Reviewed { 1 } else { 3 }).clamp(1, 8) as u32;
+            let selection = match params.get("selection").and_then(Value::as_str) { Some("policy") => Selection::Policy, Some("judge") => Selection::Judge, Some("user") => Selection::User, Some(other) => return Err(ApiError::invalid(format!("unknown selection {other}"))), None => if kind == StrategyKind::Single { Selection::User } else { Selection::Policy } };
+            let auto_integrate = params.get("autoIntegrate").and_then(Value::as_bool).unwrap_or(false);
+            return Ok(ExecutionStrategy { kind, candidates, selection, auto_integrate });
+        }
+        let mut st: ExecutionStrategy = serde_json::from_value(s.clone()).map_err(|e| ApiError::invalid(format!("strategy: {e}")))?;
+        st.candidates = st.candidates.clamp(1, 8);
+        return Ok(st);
+    }
+    let candidates = params.get("candidates").and_then(Value::as_u64).unwrap_or(1).clamp(1, 8) as u32;
+    let auto_integrate = params.get("autoIntegrate").and_then(Value::as_bool).unwrap_or(false);
+    Ok(if candidates > 1 {
+        ExecutionStrategy { kind: StrategyKind::CandidateRace, candidates, selection: Selection::Policy, auto_integrate }
+    } else if auto_integrate {
+        ExecutionStrategy { kind: StrategyKind::Single, candidates: 1, selection: Selection::Policy, auto_integrate }
+    } else {
+        ExecutionStrategy::default()
+    })
 }
 
 fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>) -> String {
@@ -1818,7 +2119,7 @@ mod tests {
         assert_eq!(saved["version"], 2);
         assert_eq!(saved["loops"][2]["id"], "loop-3");
         let design: crate::design::GameDesign = serde_json::from_value(saved).unwrap();
-        let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now() };
+        let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now() };
         let ws = Workspace { id: "w".into(), attempt_id: "a".into(), project_id: design.project_id.clone(), path: "/tmp/w".into(), branch: "guild/x".into(), base_sha: "0".into(), state: WorkspaceState::Ready, created_at: now(), updated_at: now() };
         let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design));
         assert!(prompt.contains("Avoid: a dominant strategy; always choosing the longest word; obvious decisions; grinding"));
@@ -1951,7 +2252,7 @@ mod tests {
         let verified = candidate.is_some() && matches!(state, AttemptState::Submitted | AttemptState::Passed);
         let attempt = Attempt {
             id: id.clone(), task_id: task.id.clone(), task_version: task.version, quest_id: quest.id.clone(), project_id: project.id.clone(), member_id: member.into(),
-            harness: HarnessId::named("mock"), model_requested: Some("mock-fast".into()), model_effective: Some("mock-fast".into()), state, workspace_id: Some(ws.id.clone()),
+            harness: HarnessId::named("mock"), model_requested: Some("mock-fast".into()), model_effective: Some("mock-fast".into()), kind: AttemptKind::Work, state, workspace_id: Some(ws.id.clone()),
             session_id, generation, candidate, summary: String::new(), action: None, pending_permission: None, failure: None,
             verifier_results: if verified { vec![VerifierResult { id: "v".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1, log_artifact_id: None, tail: String::new() }] } else { vec![] },
             turns: 1, resumed: 0, started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
@@ -2106,12 +2407,124 @@ mod tests {
         drop(first);
         let (second, _) = takeover(&db, MockBehaviour::Hang);
         wait_for(&second, "resumed once", |s| s.attempts[0].resumed == 1 && s.attempts[0].state == AttemptState::Running);
+        // The second life ends as a real one would: sessions closed, the attempt left running.
+        second.shutdown();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(second.snapshot().unwrap().attempts[0].state, AttemptState::Running);
         let (third, _) = takeover(&db, MockBehaviour::Succeed { file: "done.txt".into(), content: "ok\n".into() });
         let snap = wait_for(&third, "resumed twice and done", |s| s.attempts[0].state == AttemptState::Submitted);
         assert_eq!(snap.attempts[0].id, a.id);
         assert_eq!(snap.attempts[0].resumed, 2);
         assert_eq!(snap.attempts[0].generation, 3);
-        let _ = second.handle("attempt.cancel", &json!({"attemptId": a.id}));
+    }
+
+    fn race_setup(behaviour: MockBehaviour) -> (TempHome, Arc<Service>, Arc<MockHarness>, String) {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let service = Service::new(Store::open_in_memory().unwrap(), Settings { concurrency: 4, ..Settings::default() });
+        let mock = Arc::new(MockHarness::new(behaviour));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        for id in ["aria", "bram", "cora"] {
+            service.handle("member.add", &json!({"id": id, "harness": "mock", "roles": ["implementer"], "model": "mock-fast"})).unwrap();
+        }
+        service.handle("member.add", &json!({"id": "themis", "harness": "mock", "roles": ["judge"], "model": "mock-fast"})).unwrap();
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Judged"})).unwrap()["id"].as_str().unwrap().to_string();
+        (home, service, mock, quest_id)
+    }
+
+    #[test]
+    fn a_judge_picks_the_winner_of_a_race_and_its_decision_is_kept() {
+        let (_home, service, mock, quest_id) = race_setup(MockBehaviour::Succeed { file: "hello.txt".into(), content: "hello\n".into() });
+        let t = service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Hello", "strategy": "race", "candidates": 3, "selection": "judge", "autoIntegrate": true})).unwrap();
+        assert_eq!(t["strategy"]["type"], "candidate_race");
+        assert_eq!(t["strategy"]["selection"], "judge");
+        // The judge prefers B whatever B is; the labels hide the authors.
+        mock.set_judge_reply("Looking at the three.\n```json\n{\"scores\": {\"A\": {\"correctness\": 4}, \"B\": {\"correctness\": 5}, \"C\": {\"correctness\": 3}}, \"findings\": {\"B\": [\"cleanest\"]}, \"tradeoffs\": \"none\", \"winner\": \"B\", \"confidence\": 0.8, \"reason\": \"B is the cleanest\"}\n```\n");
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "completed", |s| s.quests[0].state == QuestState::Completed);
+        let judge = snap.attempts.iter().find(|a| a.kind == AttemptKind::Judge).expect("a judge attempt");
+        assert_eq!(judge.member_id, "themis");
+        assert_eq!(judge.state, AttemptState::Passed, "judge failure: {:?} · decisions {:?}", judge.failure, snap.decisions.iter().map(|d| (d.by.clone(), d.reason.clone())).collect::<Vec<_>>());
+        assert_eq!(snap.decisions.len(), 1);
+        let d = &snap.decisions[0];
+        assert_eq!(d.by, "judge");
+        assert_eq!(d.candidates.len(), 3);
+        assert_eq!(d.confidence, Some(0.8));
+        let winner = d.candidates.iter().find(|c| c.label == "B").unwrap();
+        assert_eq!(d.winner_attempt_id.as_deref(), Some(winner.attempt_id.as_str()));
+        assert_eq!(winner.score, Some(5.0));
+        assert_eq!(snap.tasks[0].winner_attempt_id, d.winner_attempt_id);
+        assert_eq!(snap.attempts.iter().filter(|a| a.kind == AttemptKind::Work && a.state == AttemptState::Passed).count(), 1);
+        let kinds: Vec<String> = service.store.lock().unwrap().events_after(0, 5000).unwrap().into_iter().map(|e| e.kind).collect();
+        for k in ["judge.started", "judge.finished", "race.decided", "merge.completed"] { assert!(kinds.contains(&k.to_string()), "missing {k}"); }
+        // The dataset: one row per finished attempt, with the decision on it.
+        let rows: Vec<AttemptRecord> = serde_json::from_value(service.handle("records.list", &json!({"projectId": "p"})).unwrap()).unwrap();
+        assert_eq!(rows.len(), 4, "three workers and a judge");
+        let winners: Vec<&AttemptRecord> = rows.iter().filter(|r| r.winner == Some(true)).collect();
+        assert_eq!(winners.len(), 1);
+        assert_eq!(winners[0].judge_score, Some(5.0));
+        assert_eq!(winners[0].decided_by.as_deref(), Some("judge"));
+        assert_eq!(winners[0].strategy, StrategyKind::CandidateRace);
+        assert!(rows.iter().filter(|r| r.kind == AttemptKind::Work).all(|r| r.winner.is_some() && r.files_changed == Some(1)));
+        assert!(rows.iter().find(|r| r.kind == AttemptKind::Judge).unwrap().winner.is_none());
+        // The judge saw labels, not names.
+        let judge_events = service.store.lock().unwrap().events_of_attempt(&judge.id, 5000).unwrap();
+        let prompt_chars = judge_events.iter().find(|e| e.kind == "turn.started").map(|e| e.payload["promptChars"].as_u64().unwrap()).unwrap();
+        assert!(prompt_chars > 200);
+    }
+
+    #[test]
+    fn an_unusable_judge_falls_back_to_the_policy_and_says_so() {
+        let (_home, service, mock, quest_id) = race_setup(MockBehaviour::Succeed { file: "hello.txt".into(), content: "hello\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Hello", "strategy": "race", "candidates": 2, "selection": "judge", "autoIntegrate": true})).unwrap();
+        mock.set_judge_reply("I cannot decide.");
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "completed", |s| s.quests[0].state == QuestState::Completed);
+        let d = &snap.decisions[0];
+        assert_eq!(d.by, "policy");
+        assert!(d.reason.contains("judge unusable"), "{}", d.reason);
+        assert!(snap.attempts.iter().any(|a| a.kind == AttemptKind::Judge && a.state == AttemptState::Failed));
+    }
+
+    #[test]
+    fn a_reviewed_task_is_one_attempt_a_judge_approves() {
+        let (_home, service, mock, quest_id) = race_setup(MockBehaviour::Succeed { file: "hello.txt".into(), content: "hello\n".into() });
+        let t = service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Hello", "strategy": "reviewed", "autoIntegrate": true})).unwrap();
+        assert_eq!(t["candidates"], 1);
+        mock.set_judge_reply("```json\n{\"scores\": {\"A\": {\"correctness\": 5}}, \"winner\": \"A\", \"confidence\": 0.9, \"reason\": \"fine\"}\n```");
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "completed", |s| s.quests[0].state == QuestState::Completed);
+        assert_eq!(snap.attempts.iter().filter(|a| a.kind == AttemptKind::Work).count(), 1);
+        assert_eq!(snap.attempts.iter().filter(|a| a.kind == AttemptKind::Judge).count(), 1);
+        assert_eq!(snap.decisions[0].by, "judge");
+    }
+
+    #[test]
+    fn the_user_choosing_against_the_judge_is_an_override_on_record() {
+        let (_home, service, mock, quest_id) = race_setup(MockBehaviour::Succeed { file: "hello.txt".into(), content: "hello\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Hello", "strategy": "race", "candidates": 2, "selection": "user"})).unwrap();
+        mock.set_judge_reply("unused");
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "both submitted", |s| s.tasks[0].state == TaskState::Verifying && s.attempts.iter().filter(|a| a.state == AttemptState::Submitted).count() == 2);
+        assert!(snap.decisions.is_empty(), "the user decides");
+        let chosen = snap.attempts.iter().find(|a| a.member_id == "bram").unwrap().id.clone();
+        service.handle("task.accept", &json!({"taskId": "t1", "attemptId": chosen, "integrate": true})).unwrap();
+        let snap = wait_for(&service, "completed", |s| s.quests[0].state == QuestState::Completed);
+        assert_eq!(snap.decisions.len(), 1);
+        assert_eq!(snap.decisions[0].by, "user");
+        assert!(!snap.decisions[0].human_override, "no earlier decision to override");
+        assert_eq!(snap.tasks[0].winner_attempt_id.as_deref(), Some(chosen.as_str()));
+    }
+
+    #[test]
+    fn judge_output_is_found_in_fenced_blocks_or_bare_objects() {
+        assert_eq!(parse_judge_output("```json\n{\"winner\": \"A\"}\n```").unwrap()["winner"], "A");
+        assert_eq!(parse_judge_output("thinking… ```json\n{\"x\": 1}\n``` then ```\n{\"winner\": \"C\", \"confidence\": 0.5}\n``` done").unwrap()["winner"], "C");
+        assert_eq!(parse_judge_output("Verdict: {\"winner\": \"B\"} ok").unwrap()["winner"], "B");
+        assert!(parse_judge_output("no decision").is_err());
+        assert!(parse_judge_output("```json\n{\"scores\": {}}\n```").is_err());
     }
 
     #[test]
