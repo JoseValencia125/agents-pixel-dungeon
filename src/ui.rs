@@ -1039,20 +1039,25 @@ fn input_height(rows: usize, font: f32, roomy: bool) -> f32 {
 /// picker such as /model rather than a prompt.
 /// A line starting with the prompt's marker: whether it is a numbered
 /// option, and whether nothing follows the marker (an empty prompt).
-fn marked(line: &[Span]) -> Option<(bool, bool)> {
+/// A line that starts with a highlight marker: whether it is a numbered
+/// option, whether nothing follows the marker (an empty prompt), and
+/// whether the marker only ever points at a menu's option (Cursor's →
+/// and ▶), never at a prompt.
+fn marked(line: &[Span]) -> Option<(bool, bool, bool)> {
     let text: String = line.iter().map(|s| s.text.as_str()).collect();
     let text = text.trim();
     let mut chars = text.chars();
-    let marked = matches!(chars.next(), Some('❯' | '›' | '>')) && matches!(chars.next(), None | Some(' ' | '\u{a0}'));
-    marked.then(|| (crate::herdr::is_option(text), chars.as_str().trim().is_empty()))
+    let first = chars.next();
+    let marked = matches!(first, Some('❯' | '›' | '>' | '→' | '▶')) && matches!(chars.next(), None | Some(' ' | '\u{a0}'));
+    marked.then(|| (crate::herdr::is_option(text), chars.as_str().trim().is_empty(), matches!(first, Some('→' | '▶'))))
 }
 
 /// A narrow pane keeps the empty prompt in sight under a picker's options:
 /// the picker still takes the keys, so an empty prompt counts as the picker
 /// when one is open just above it (a highlighted option, or its footer).
 fn last_marked_line(screen: &[Vec<Span>]) -> Option<(usize, bool)> {
-    let (index, option, bare) = screen.iter().enumerate().rev().find_map(|(i, l)| marked(l).map(|(o, b)| (i, o, b)))?;
-    if option { return Some((index, true)); }
+    let (index, option, bare, menu_only) = screen.iter().enumerate().rev().find_map(|(i, l)| marked(l).map(|(o, b, m)| (i, o, b, m)))?;
+    if option || (menu_only && !bare) { return Some((index, true)); }
     // An option without a number ("❯ auto", Kiro's /model) has the
     // picker's footer below it; typed text on a prompt does not.
     if !bare {
