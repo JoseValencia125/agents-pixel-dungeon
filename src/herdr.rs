@@ -1296,15 +1296,21 @@ pub fn shell_blocker(screen: &str) -> Option<String> {
 /// The hint under a menu driven by arrow keys ("Enter to confirm · Esc to
 /// cancel"; Kiro's "↑↓ to navigate · ↵ to select" and "esc to close · Enter
 /// to see more options"; Codex's "enter select · esc back" and "Press enter
-/// to confirm or esc to cancel"), in any case.
+/// to confirm or esc to cancel"; Cursor's "Use arrow keys to navigate,
+/// Enter to select, or press the key shown"), in any case.
 pub fn is_menu_footer(trimmed: &str) -> bool {
     let lower = trimmed.to_lowercase();
-    ["enter to confirm", "enter to select", "esc to cancel", "enter to continue", "↑↓ to navigate", "↵ to select", "enter to see more options", "enter select · esc"].iter().any(|s| lower.contains(s))
+    ["enter to confirm", "enter to select", "esc to cancel", "enter to continue", "↑↓ to navigate", "↵ to select", "enter to see more options", "enter select · esc", "use arrow keys to navigate", "press the key shown"].iter().any(|s| lower.contains(s))
 }
 
 /// What a terminal points at its highlighted option with: ❯ (Claude Code,
-/// Kiro) or › (Codex, which also marks its prompt and past messages so).
-const MARKERS: [char; 2] = ['❯', '›'];
+/// Kiro), › (Codex, which also marks its prompt and past messages so),
+/// → (Cursor's command approval) or ▶ (Cursor's workspace trust).
+const MARKERS: [char; 4] = ['❯', '›', '→', '▶'];
+
+/// Markers that only ever point at a menu's option, never at a prompt or
+/// a past message, so a menu is read from them without a footer.
+const MENU_ONLY_MARKERS: [char; 3] = ['❯', '→', '▶'];
 
 /// The text after a leading highlight marker, if the line starts with one.
 fn after_marker(trimmed: &str) -> Option<&str> {
@@ -1329,7 +1335,7 @@ impl MenuOptions {
         let footer = footer_at.unwrap_or(lines.len());
         let Some(marked) = lines[..footer].iter().rposition(|l| {
             let t = l.trim_start();
-            after_marker(t).is_some_and(|rest| !rest.trim().is_empty()) && (t.starts_with('❯') || footer_at.is_some())
+            after_marker(t).is_some_and(|rest| !rest.trim().is_empty()) && (t.starts_with(MENU_ONLY_MARKERS) || footer_at.is_some())
         }) else { return menu };
         let marker = lines[marked].chars().take_while(|c| c.is_whitespace()).count();
         let column = marker + 1 + lines[marked].chars().skip(marker + 1).take_while(|c| c.is_whitespace()).count();

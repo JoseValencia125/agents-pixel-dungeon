@@ -205,6 +205,23 @@ pub fn run() {
     let head = crate::herdr::menu_head(&models, models.len() - 12);
     let menu = MenuOptions::new(&models[head..]);
     assert_eq!((menu.options.len(), menu.highlighted, menu.options[9].text.split_whitespace().take(2).collect::<Vec<_>>().join(" ")), (10, Some(1), "Opus 4.8".to_string()), "A long menu lost its first or last option");
+    // Cursor (2026.10): its command approval points with → and has no footer;
+    // its workspace trust points with ▶ at lettered options under a footer.
+    let cursor_approval: Vec<String> = [" $  cat README.md in .", " Run this command?", " Not in allowlist: cat", "  → Run (once) (y)", "    Add Shell(cat) to allowlist? (tab)", "    Run Everything (shift+tab)", "    Skip & tell the agent what to do instead (esc or n)"].map(String::from).to_vec();
+    let menu = MenuOptions::new(&cursor_approval);
+    assert_eq!((menu.options.len(), menu.highlighted, menu.options[0].text.as_str()), (4, Some(0), "Run (once) (y)"), "Cursor's approval not read as a menu: {menu:?}");
+    assert_eq!((menu.keys_choosing(2), menu.tell_instead()), (vec!["down".to_string(), "down".to_string(), "enter".to_string()], Some(3)), "Cursor's approval would be answered with text, not arrows");
+    let cursor_screen = crate::ansi::parse(&cursor_approval.join("\n"));
+    assert_eq!((crate::ui::prompt_line(&cursor_screen), crate::ui::picker_open(&cursor_screen)), (None, true), "Cursor's approval not seen as a picker, so arrows would not reach it");
+    let cursor_trust: Vec<String> = ["  │  Do you trust the contents of this directory?", "  │", "  │    /Users/me/proj", "  │", "  │", "  │  ▶ [a] Trust this workspace", "  │    [q] Quit", "  │", "  │  Use arrow keys to navigate, Enter to select, or press the key shown"].map(|l| l.trim_start_matches("  │").to_string()).to_vec();
+    let menu = MenuOptions::new(&cursor_trust);
+    assert_eq!((menu.options.len(), menu.highlighted, menu.options[1].text.as_str()), (2, Some(0), "[q] Quit"), "Cursor's trust dialog not read as a menu: {menu:?}");
+    assert!(is_menu_footer("Use arrow keys to navigate, Enter to select, or press the key shown"), "Cursor's menu footer not recognised");
+    // Cursor's /model picker: → with two spaces before the highlighted model, a filter line, a footer.
+    let cursor_models = crate::ansi::parse(" Available models                                   Max mode: OFF\n Filter: \n →  Auto\n    Grok 4.7                 256K High Fast\n    Composer 2.5             Fast\n    Claude Opus 5.5          300K Medium\n 1-10 of 44\n Type to filter • Enter to select • Tab to edit");
+    assert_eq!((crate::ui::prompt_line(&cursor_models), crate::ui::picker_open(&cursor_models)), (None, true), "Cursor's /model picker not seen as a picker");
+    let cursor_slash = crate::commands::slash_commands("cursor", "/nonexistent", std::path::Path::new("/nonexistent"));
+    assert!(cursor_slash.iter().any(|c| c.name == "model") && cursor_slash.iter().any(|c| c.name == "resume"), "Cursor's slash commands missing");
     // Folder trust starts on "No, exit": accepting picks the yes.
     let trust: Vec<String> = [" Claude Code'll be able to read, edit, and execute files here.", " ❯ No, exit", "   Yes, I trust this folder", " Enter to confirm · Esc to cancel"].map(String::from).to_vec();
     assert_eq!(MenuOptions::new(&trust).affirmative(), Some(1), "Accepting Claude's folder trust would exit it");
