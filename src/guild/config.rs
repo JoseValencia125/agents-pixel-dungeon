@@ -19,6 +19,8 @@ pub struct GuildFile {
     pub verifiers: Vec<VerifierSection>,
     #[serde(default)]
     pub playtest: Option<PlaytestSection>,
+    #[serde(default)]
+    pub play: Option<PlaytestSection>,
 }
 
 #[derive(Debug, Deserialize)]

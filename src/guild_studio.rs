@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Tab { #[default] Guild, Concept, Experience, Loops, Systems, Parts, Questions, Decisions }
+pub enum Tab { #[default] Guild, Concept, Experience, Loops, Systems, Parts, Play, Laboratory, Questions, Decisions }
 
 #[derive(Clone, Default)]
 pub struct MemberRow {
@@ -47,6 +47,8 @@ pub struct Studio {
     /// Per-member edits on the guild tab, until applied.
     member_edits: HashMap<String, MemberRow>,
     pub chamber: crate::guild_chamber::ChamberState,
+    /// The tallest the window grows (600 points unless set).
+    pub max_height: Option<f32>,
 }
 
 #[derive(Default)]
@@ -99,6 +101,8 @@ pub fn videogame_members(harnesses: &[String]) -> Vec<MemberRow> {
 pub fn studio(ctx: &Context, view: &mut GuildView) -> StudioAction {
     let mut action = StudioAction::default();
     let mut commands: Vec<(&'static str, Value)> = vec![];
+    let mut requests: Vec<(&'static str, Value, &'static str)> = vec![];
+    let results = view.results.clone();
     let Some(snap) = view.snapshot.clone() else {
         egui::Window::new(mono(&tr("Gremio"), 12.0).strong()).id(egui::Id::new("guild-studio")).collapsible(false).resizable(false).frame(paper()).show(ctx, |ui| {
             parchment(ui);
@@ -125,7 +129,7 @@ pub fn studio(ctx: &Context, view: &mut GuildView) -> StudioAction {
     // Fit the widget's window: the dungeon is often a narrow strip.
     let screen = ctx.screen_rect();
     let width = (screen.width() - 24.0).clamp(180.0, 720.0);
-    let height = (screen.height() - 64.0).clamp(200.0, 600.0);
+    let height = (screen.height() - 64.0).clamp(200.0, studio.max_height.unwrap_or(600.0));
     egui::Window::new(mono(&tr("Gremio"), 12.0).strong()).id(egui::Id::new("guild-studio")).collapsible(false).resizable(false).fixed_size([width, height]).constrain_to(screen).frame(paper()).show(ctx, |ui| {
         parchment(ui);
         ui.set_width(width - 20.0);
@@ -147,7 +151,7 @@ pub fn studio(ctx: &Context, view: &mut GuildView) -> StudioAction {
             });
         });
         ui.horizontal_wrapped(|ui| {
-            for (tab, label) in [(Tab::Guild, tr("Gremio")), (Tab::Concept, tr("Concepto")), (Tab::Experience, tr("Experiencia")), (Tab::Loops, tr("Loops")), (Tab::Systems, tr("Sistemas")), (Tab::Parts, tr("Partes")), (Tab::Questions, tr("Preguntas")), (Tab::Decisions, tr("Decisiones"))] {
+            for (tab, label) in [(Tab::Guild, tr("Gremio")), (Tab::Concept, tr("Concepto")), (Tab::Experience, tr("Experiencia")), (Tab::Loops, tr("Loops")), (Tab::Systems, tr("Sistemas")), (Tab::Parts, tr("Partes")), (Tab::Play, tr("Jugar")), (Tab::Laboratory, tr("Laboratorio")), (Tab::Questions, tr("Preguntas")), (Tab::Decisions, tr("Decisiones"))] {
                 let on = studio.tab == tab;
                 let fill = if on { Color32::from_rgb(140, 80, 30) } else { Color32::from_rgb(222, 196, 140) };
                 let color = if on { Color32::from_rgb(250, 240, 220) } else { INK };
@@ -166,10 +170,12 @@ pub fn studio(ctx: &Context, view: &mut GuildView) -> StudioAction {
                 Tab::Parts => crate::guild_chamber::parts_tab(ui, &mut studio.draft, &mut studio.dirty),
                 Tab::Questions => crate::guild_chamber::questions_tab(ui, &mut studio.chamber, &snap, &studio.project_id, &studio.draft.systems, &mut commands),
                 Tab::Decisions => crate::guild_chamber::decisions_tab(ui, &snap, &studio.project_id),
+                Tab::Play => crate::guild_chamber::play_tab(ui, &mut studio.chamber, &snap, &studio.project_id, &results, &mut commands, &mut requests),
+                Tab::Laboratory => crate::guild_chamber::laboratory_tab(ui, &mut studio.chamber, &snap, &studio.project_id, &mut commands, &mut requests),
             }
         });
         // Footer for the design tabs.
-        if !matches!(studio.tab, Tab::Guild | Tab::Questions | Tab::Decisions) && !studio.project_id.is_empty() {
+        if !matches!(studio.tab, Tab::Guild | Tab::Questions | Tab::Decisions | Tab::Play | Tab::Laboratory) && !studio.project_id.is_empty() {
             ui.separator();
             ui.horizontal(|ui| {
                 if primary(ui, &tr("Guardar diseño")) {
@@ -188,6 +194,7 @@ pub fn studio(ctx: &Context, view: &mut GuildView) -> StudioAction {
         }
     });
     for (method, params) in commands { view.command(method, params); }
+    for (method, params, tag) in requests { view.request(method, params, tag); }
     action
 }
 
@@ -377,6 +384,38 @@ fn member_row(ui: &mut Ui, m: &mut MemberRow, roles: &[Role], harnesses: &[Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every piece of text a frame of the guild window draws, on a tab of the demo.
+    fn texts_on(tab: Tab) -> String {
+        let ctx = egui::Context::default();
+        let mut view = GuildView::new(std::sync::Arc::new(|| {}));
+        view.set_demo(true);
+        view.poll();
+        view.studio.tab = tab;
+        view.studio.max_height = Some(3900.0);
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(760.0, 4000.0))), ..Default::default() };
+        let mut out = String::new();
+        for _ in 0..2 {
+            let output = ctx.run(input.clone(), |ctx| { studio(ctx, &mut view); });
+            out.clear();
+            for clipped in output.shapes {
+                if let egui::Shape::Text(t) = clipped.shape { out.push_str(&t.galley.job.text); out.push('\n'); }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_laboratory_shows_the_decision_to_take_and_play_shows_the_session() {
+        let lab = texts_on(Tab::Laboratory);
+        for needle in ["decisión requerida", "Problema:", "Analista:", "★ semantic 1.6", "flat length", "▶ Jugar", "Adoptar", "Aceptar", "Iterar", "Rechazar", "2 humanos"] {
+            assert!(lab.contains(needle), "laboratory lacks {needle:?}:\n{lab}");
+        }
+        let play = texts_on(Tab::Play);
+        for needle in ["▶ Jugar la build actual", "En juego", "Gran momento", "Terminar sesión", "Observaciones (3)", "→ Q-001", "→ Pregunta", "Observado vs deseado"] {
+            assert!(play.contains(needle), "play lacks {needle:?}:\n{play}");
+        }
+    }
 
     #[test]
     fn the_draft_round_trips_and_drops_empty_rows() {

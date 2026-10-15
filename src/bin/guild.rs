@@ -47,6 +47,13 @@ USAGE
                                      [--profiles a,b,c] [--runs N] [--seeds 1,2,3]
   guild experiment start|show|accept|reject|iterate <experiment> [--variant ID] [--note TEXT]
   guild playtests <experiment>       every playtest of the experiment, with its metrics
+  guild play <project> [--experiment E --variant V] [--ref REF] [--player NAME]
+                                     play the build here; the session ends when the game does
+  guild play finish <playtest>       close a session the dungeon or another terminal started
+  guild observe <project> --kind confusing|frustrating|interesting|great_moment|bug|comment [--text T] [--playtest P]
+  guild observations <project>       what humans noticed, and the questions it raised
+  guild observation promote <project> <OBS-id> [--question T] [--system ID]
+  guild signals <project> [--experiment E] [--variant V] [--kind human|synthetic]
   guild records [--project ID] [--task ID]   one row per finished attempt: strategy, member, harness, model, duration, size, verifiers, judge score, winner
   guild start <quest>  |  guild pause <quest>  |  guild resume <quest>  |  guild cancel-quest <quest>
 
@@ -434,6 +441,50 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                     Ok(())
                 }
             }
+        }
+        "play" => {
+            let client = ensure_running()?;
+            if a.positional.first().copied() == Some("finish") {
+                let r = call(&client, "play.finish", json!({"playtestId": a.pos(1, "playtest")?}))?;
+                println!("playtest {} · {} events · {}", r["id"].as_str().unwrap_or(""), r["event_count"], r["status"].as_str().unwrap_or(""));
+                return Ok(());
+            }
+            let r = call(&client, "play.start", json!({"projectId": a.pos(0, "project")?, "experimentId": a.flag("experiment"), "variantId": a.flag("variant"), "ref": a.flag("ref"), "player": a.flag("player")}))?;
+            let argv: Vec<String> = serde_json::from_value(r["argv"].clone()).map_err(|e| e.to_string())?;
+            let pid = r["playtest"]["id"].as_str().unwrap_or("").to_string();
+            eprintln!("playing {} in {} (playtest {pid}); `guild observe` from another terminal notes what you see", r["playtest"]["build_sha"].as_str().map(|s| &s[..s.len().min(8)]).unwrap_or("?"), r["cwd"].as_str().unwrap_or(""));
+            let status = std::process::Command::new(&argv[0]).args(&argv[1..]).current_dir(r["cwd"].as_str().unwrap_or(".")).env("GUILD_TELEMETRY", r["env"]["GUILD_TELEMETRY"].as_str().unwrap_or("")).env("GUILD_PLAYTEST", &pid).status();
+            if let Err(e) = status { eprintln!("could not start the game: {e}"); }
+            let done = call(&client, "play.finish", json!({"playtestId": pid}))?;
+            println!("playtest {pid} · {} events · {}", done["event_count"], done["status"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        "observe" => {
+            let r = call(&ensure_running()?, "observation.create", json!({"projectId": a.pos(0, "project")?, "kind": a.flag("kind").unwrap_or("comment"), "text": a.flag("text"), "playtestId": a.flag("playtest")}))?;
+            println!("{} [{}] {}{}", r["id"].as_str().unwrap_or(""), r["kind"].as_str().unwrap_or(""), r["text"].as_str().unwrap_or(""), r["round"].as_u64().map(|n| format!(" · round {n}")).unwrap_or_default());
+            Ok(())
+        }
+        "observations" => {
+            let snap = call(&ensure_running()?, "guild.snapshot", json!({}))?;
+            let project = a.pos(0, "project")?;
+            for o in snap["observations"].as_array().into_iter().flatten().filter(|o| o["project_id"] == project) {
+                println!("{} [{}] {}{}{}", o["id"].as_str().unwrap_or(""), o["kind"].as_str().unwrap_or(""), o["text"].as_str().unwrap_or(""), o["round"].as_u64().map(|n| format!(" · round {n}")).unwrap_or_default(), o["question_id"].as_str().map(|q| format!(" → {q}")).unwrap_or_default());
+            }
+            Ok(())
+        }
+        "observation" => {
+            if a.pos(0, "subcommand")? != "promote" { return Err(USAGE.into()); }
+            let r = call(&ensure_running()?, "observation.promote", json!({"projectId": a.pos(1, "project")?, "observationId": a.pos(2, "observation")?, "question": a.flag("question"), "systemId": a.flag("system")}))?;
+            println!("{} → {} · {}", r["observation"]["id"].as_str().unwrap_or(""), r["question"]["id"].as_str().unwrap_or(""), r["question"]["question"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        "signals" => {
+            let r = call(&ensure_running()?, "signals", json!({"projectId": a.pos(0, "project")?, "experimentId": a.flag("experiment"), "variantId": a.flag("variant"), "kind": a.flag("kind")}))?;
+            println!("{} playtests ({} human, {} synthetic)", r["playtests"], r["human"], r["synthetic"]);
+            for s in r["signals"].as_array().into_iter().flatten() { println!("· {}\n    → {}", s["statement"].as_str().unwrap_or(""), s["suggested_question"].as_str().unwrap_or("")); }
+            for d in r["desired"].as_array().into_iter().flatten() { println!("  desired: {}", d.as_str().unwrap_or("")); }
+            for d in r["avoid"].as_array().into_iter().flatten() { println!("  avoid:   {}", d.as_str().unwrap_or("")); }
+            Ok(())
         }
         "playtests" => {
             let snap = call(&ensure_running()?, "guild.snapshot", json!({}))?;

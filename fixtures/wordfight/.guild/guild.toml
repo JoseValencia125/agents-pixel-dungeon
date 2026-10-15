@@ -7,6 +7,11 @@ name = "Wordfight"
 argv = ["python3", "wordfight.py", "profile={profile}", "seed={seed}", "runs={runs}"]
 timeout_seconds = 120
 
+# How a human plays the current build; the guild opens it in a terminal
+# with GUILD_TELEMETRY pointing at the file the game writes its events to.
+[play]
+argv = ["python3", "wordfight.py", "profile=human", "seed={seed}"]
+
 [[verifiers]]
 id = "balance"
 argv = ["python3", "-c", "import json; b=json.load(open('balance.json')); assert 0.5 <= b['length_multiplier'] <= 3 and 0.5 <= b['semantic_multiplier'] <= 3"]

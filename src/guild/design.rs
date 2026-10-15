@@ -477,6 +477,8 @@ pub struct DesignBundle {
     pub hypotheses: Vec<crate::experiment::Hypothesis>,
     #[serde(default)]
     pub experiments: Vec<crate::experiment::Experiment>,
+    #[serde(default)]
+    pub observations: Vec<crate::experiment::Observation>,
 }
 
 fn md_list(items: &[String]) -> String { items.iter().map(|i| format!("- {i}\n")).collect() }
@@ -538,6 +540,10 @@ pub fn export(repo: &Path, b: &DesignBundle) -> std::io::Result<Vec<String>> {
     for dec in &b.decisions { o.push_str(&format!("- [{}](decisions/{}.md): {}\n", dec.id, file_id(&dec.id), dec.decision)); }
     if !b.hypotheses.is_empty() { o.push_str("\n## Hypotheses\n\n"); for h in &b.hypotheses { o.push_str(&format!("- [{}](hypotheses/{}.md) [{:?}]: {}\n", h.id, file_id(&h.id), h.status, h.hypothesis)); } }
     if !b.experiments.is_empty() { o.push_str("\n## Experiments\n\n"); for e in &b.experiments { o.push_str(&format!("- [{}](experiments/{}.md) [{:?}]: {}\n", e.id, file_id(&e.id), e.status, e.title)); } }
+    if !b.observations.is_empty() {
+        o.push_str(&format!("\n## Playtest observations ({})\n\n", b.observations.len()));
+        for ob in &b.observations { o.push_str(&format!("- {} [{}] {}{}\n", ob.id, ob.kind, ob.text, ob.question_id.as_ref().map(|q| format!(" → [{q}](questions/{}.md)", file_id(q))).unwrap_or_default())); }
+    }
     write("overview.md", o)?;
     let mut pe = "# Player experience\n\n".to_string();
     pe.push_str(&section("Fantasy", &d.experience.fantasy));

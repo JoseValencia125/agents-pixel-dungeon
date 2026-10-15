@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS questions (id TEXT PRIMARY KEY, project_id TEXT NOT N
 CREATE TABLE IF NOT EXISTS design_decisions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS experiments (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS playtests (id TEXT PRIMARY KEY, experiment_id TEXT, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS tasks_quest ON tasks(quest_id, state);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id, state);
 CREATE INDEX IF NOT EXISTS events_attempt ON events(attempt_id);
@@ -134,6 +135,11 @@ impl Store {
     pub fn experiment(&self, id: &str) -> StoreResult<Option<crate::experiment::Experiment>> { self.get("experiments", id) }
     pub fn experiments(&self) -> StoreResult<Vec<crate::experiment::Experiment>> { self.list("SELECT json FROM experiments ORDER BY id", &[]) }
     pub fn put_playtest(&self, p: &crate::experiment::Playtest) -> StoreResult<()> { self.put("playtests", &p.id, &[("experiment_id", p.experiment_id.clone().unwrap_or_default())], p) }
+    pub fn playtest(&self, id: &str) -> StoreResult<Option<crate::experiment::Playtest>> { self.get("playtests", id) }
+    pub fn put_observation(&self, o: &crate::experiment::Observation) -> StoreResult<()> { self.put("observations", &format!("{}:{}", o.project_id, o.id), &[("project_id", o.project_id.clone())], o) }
+    pub fn observation(&self, project_id: &str, id: &str) -> StoreResult<Option<crate::experiment::Observation>> { self.get("observations", &format!("{project_id}:{id}")) }
+    pub fn observations(&self) -> StoreResult<Vec<crate::experiment::Observation>> { self.list("SELECT json FROM observations ORDER BY id", &[]) }
+    pub fn observations_of(&self, project_id: &str) -> StoreResult<Vec<crate::experiment::Observation>> { self.list("SELECT json FROM observations WHERE project_id = ?1 ORDER BY id", &[project_id]) }
     pub fn playtests(&self) -> StoreResult<Vec<crate::experiment::Playtest>> { self.list("SELECT json FROM playtests ORDER BY id", &[]) }
     pub fn playtests_of_experiment(&self, id: &str) -> StoreResult<Vec<crate::experiment::Playtest>> { self.list("SELECT json FROM playtests WHERE experiment_id = ?1 ORDER BY id", &[id]) }
     pub fn put_record(&self, r: &AttemptRecord) -> StoreResult<()> { self.put("records", &r.attempt_id, &[("project_id", r.project_id.clone()), ("task_id", r.task_id.clone())], r) }
@@ -307,6 +313,7 @@ impl Store {
             design_decisions: self.design_decisions()?,
             experiments: self.experiments()?,
             playtests: self.playtests()?,
+            observations: self.observations()?,
             designs: self.designs()?,
             roles: vec![],
         })

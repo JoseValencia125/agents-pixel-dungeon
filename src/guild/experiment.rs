@@ -194,6 +194,171 @@ pub struct Playtest {
     pub failure: Option<String>,
     #[serde(default)]
     pub created_at: String,
+    /// A human session: who played (an anonymous id is fine).
+    #[serde(default)]
+    pub player: Option<String>,
+    /// The commit that was played and the design version it was played against.
+    #[serde(default)]
+    pub build_sha: Option<String>,
+    #[serde(default)]
+    pub design_version: Option<u32>,
+    /// Where the game appends its events while a human plays.
+    #[serde(default)]
+    pub telemetry_path: Option<String>,
+    /// The checkout the session plays in, when the guild made one for it.
+    #[serde(default)]
+    pub play_dir: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+}
+
+/// What a human noticed while playing, with where it happened. Kept as
+/// evidence; promoted, it becomes a design question that points back here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct Observation {
+    /// OBS-001, OBS-002… per project.
+    pub id: String,
+    pub project_id: String,
+    /// confusing, frustrating, interesting, great_moment, bug, comment
+    pub kind: String,
+    pub text: String,
+    #[serde(default)]
+    pub playtest_id: Option<String>,
+    #[serde(default)]
+    pub build_sha: Option<String>,
+    #[serde(default)]
+    pub design_version: Option<u32>,
+    #[serde(default)]
+    pub experiment_id: Option<String>,
+    #[serde(default)]
+    pub variant_id: Option<String>,
+    /// The run and round the game was in, read from its telemetry.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub round: Option<u64>,
+    /// How many game events had happened: where in the run it was.
+    #[serde(default)]
+    pub event_index: Option<u32>,
+    #[serde(default)]
+    pub question_id: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+pub const OBSERVATION_KINDS: [&str; 6] = ["confusing", "frustrating", "interesting", "great_moment", "bug", "comment"];
+
+/// A fact the raw telemetry shows, computed, never guessed: a dominant
+/// choice, an option attribute that always wins, options nobody takes,
+/// runs that almost never or always end well. Each comes with the
+/// question it suggests; turning it into one is the human's call.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct Signal {
+    /// Stable for the same finding: dominant_choice, max_attribute:<attr>, never_chosen, completion.
+    pub key: String,
+    pub statement: String,
+    pub value: f64,
+    /// How many observations the value rests on.
+    pub n: u64,
+    #[serde(default)]
+    pub baseline: Option<f64>,
+    pub suggested_question: String,
+    #[serde(default)]
+    pub playtests: u32,
+}
+
+/// The option a `choice.selected` names: `choice`, `word`, `option` or `action`.
+fn selected_name(data: &Value) -> Option<String> {
+    ["choice", "word", "option", "action"].iter().find_map(|k| data.get(*k).and_then(Value::as_str)).map(str::to_string)
+}
+
+/// Each presented option as a name and its numeric attributes: a string
+/// option has its `length`; an object, its numeric fields.
+fn option_attributes(option: &Value) -> Option<(String, BTreeMap<String, f64>)> {
+    match option {
+        Value::String(s) => Some((s.clone(), BTreeMap::from([("length".to_string(), s.chars().count() as f64)]))),
+        Value::Object(o) => {
+            let name = ["id", "name", "word", "choice"].iter().find_map(|k| o.get(*k).and_then(Value::as_str))?.to_string();
+            let attrs = o.iter().filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n))).collect();
+            Some((name, attrs))
+        }
+        _ => None,
+    }
+}
+
+/// The signals in the events of a set of playtests (one Vec per playtest).
+pub fn signals(playtests: &[Vec<Value>]) -> Vec<Signal> {
+    let mut out = vec![];
+    let count = playtests.len() as u32;
+    // Choices: how often each was taken, and how the taken one ranked.
+    let mut taken: BTreeMap<String, u64> = BTreeMap::new();
+    let mut offered: BTreeMap<String, u64> = BTreeMap::new();
+    let mut total = 0u64;
+    let mut max_hits: BTreeMap<String, (u64, u64, f64)> = BTreeMap::new();
+    let (mut runs, mut completed) = (0u64, 0u64);
+    for events in playtests {
+        let mut presented: Option<Vec<(String, BTreeMap<String, f64>)>> = None;
+        for e in events {
+            let data = e.get("data").cloned().unwrap_or(Value::Null);
+            match e["event"].as_str().unwrap_or("") {
+                "run.started" => runs += 1,
+                "run.completed" => completed += 1,
+                "choice.presented" => {
+                    presented = data.get("options").and_then(Value::as_array).map(|a| a.iter().filter_map(option_attributes).collect());
+                    for (name, _) in presented.iter().flatten() { *offered.entry(name.clone()).or_default() += 1; }
+                }
+                "choice.selected" => {
+                    let Some(name) = selected_name(&data) else { continue };
+                    *taken.entry(name.clone()).or_default() += 1;
+                    total += 1;
+                    let Some(options) = presented.take() else { continue };
+                    let Some((_, chosen)) = options.iter().find(|(n, _)| *n == name) else { continue };
+                    for (attr, value) in chosen {
+                        let values: Vec<f64> = options.iter().filter_map(|(_, a)| a.get(attr).copied()).collect();
+                        let max = values.iter().cloned().fold(f64::MIN, f64::max);
+                        let min = values.iter().cloned().fold(f64::MAX, f64::min);
+                        if values.len() < 2 || (max - min).abs() < f64::EPSILON { continue; }
+                        let ties = values.iter().filter(|v| (**v - max).abs() < f64::EPSILON).count() as f64;
+                        let entry = max_hits.entry(attr.clone()).or_insert((0, 0, 0.0));
+                        entry.1 += 1;
+                        entry.2 += ties / values.len() as f64;
+                        if (*value - max).abs() < f64::EPSILON { entry.0 += 1; }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if total >= 8 {
+        if let Some((name, n)) = taken.iter().max_by_key(|(_, n)| **n) {
+            let share = *n as f64 / total as f64;
+            if share >= 0.5 {
+                out.push(Signal { key: "dominant_choice".into(), statement: format!("\"{name}\" was chosen in {:.0}% of {total} choices", share * 100.0), value: share, n: total, baseline: None, suggested_question: format!("Is \"{name}\" a dominant choice?"), playtests: count });
+            }
+        }
+    }
+    for (attr, (hits, n, chance)) in &max_hits {
+        if *n < 8 { continue; }
+        let share = *hits as f64 / *n as f64;
+        let baseline = chance / *n as f64;
+        if share >= 0.7 && share >= baseline + 0.25 {
+            out.push(Signal { key: format!("max_attribute:{attr}"), statement: format!("The chosen option had the highest {attr} in {:.0}% of {n} choices (about {:.0}% if chosen at random)", share * 100.0, baseline * 100.0), value: share, n: *n, baseline: Some(baseline), suggested_question: format!("Does the highest {attr} always win?"), playtests: count });
+        }
+    }
+    let never: Vec<String> = offered.iter().filter(|(name, n)| **n >= 5 && !taken.contains_key(*name)).map(|(name, _)| name.clone()).collect();
+    if !never.is_empty() && total >= 8 {
+        let shown: Vec<String> = never.iter().take(6).cloned().collect();
+        out.push(Signal { key: "never_chosen".into(), statement: format!("Offered at least 5 times and never chosen: {}", shown.join(", ")), value: never.len() as f64, n: total, baseline: None, suggested_question: format!("Why does nobody choose {}?", shown.join(", ")), playtests: count });
+    }
+    if runs >= 3 {
+        let rate = completed as f64 / runs as f64;
+        if rate <= 0.34 {
+            out.push(Signal { key: "completion".into(), statement: format!("Only {:.0}% of {runs} runs were completed", rate * 100.0), value: rate, n: runs, baseline: None, suggested_question: "Is the game too hard at this point?".into(), playtests: count });
+        } else if rate >= 0.999 && runs >= 5 {
+            out.push(Signal { key: "completion".into(), statement: format!("All {runs} runs were completed"), value: rate, n: runs, baseline: None, suggested_question: "Is the game too easy at this point?".into(), playtests: count });
+        }
+    }
+    out
 }
 
 /// The telemetry contract: one JSON object per line on the player's
@@ -347,6 +512,27 @@ mod tests {
         assert_eq!(agg["runs"]["started"], 2);
         assert_eq!(agg["choices"]["distinct"], 2);
         assert_eq!(agg["playtests"], 2);
+    }
+
+    #[test]
+    fn signals_find_the_attribute_that_always_wins_and_options_nobody_takes() {
+        let mut events = vec![];
+        for r in 0..10 {
+            events.push(serde_json::json!({"type": "game.event", "runId": format!("r{r}"), "event": "run.started", "data": {}}));
+            events.push(serde_json::json!({"type": "game.event", "runId": format!("r{r}"), "event": "choice.presented", "data": {"options": ["ash", "glacier", "ore", "spark", "whirlwind"]}}));
+            events.push(serde_json::json!({"type": "game.event", "runId": format!("r{r}"), "event": "choice.selected", "data": {"word": "whirlwind"}}));
+            events.push(serde_json::json!({"type": "game.event", "runId": format!("r{r}"), "event": "run.completed", "data": {}}));
+        }
+        let found = signals(&[events]);
+        let keys: Vec<&str> = found.iter().map(|s| s.key.as_str()).collect();
+        assert!(keys.contains(&"dominant_choice"), "{keys:?}");
+        let longest = found.iter().find(|s| s.key == "max_attribute:length").expect("length always wins");
+        assert_eq!(longest.value, 1.0);
+        assert!((longest.baseline.unwrap() - 0.2).abs() < 1e-9);
+        assert!(found.iter().any(|s| s.key == "never_chosen" && s.statement.contains("ash")));
+        assert!(found.iter().any(|s| s.key == "completion" && s.suggested_question.contains("too easy")));
+        // Too few choices say nothing.
+        assert!(signals(&[vec![]]).is_empty());
     }
 
     #[test]

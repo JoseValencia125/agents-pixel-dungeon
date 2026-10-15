@@ -23,6 +23,7 @@ enum Msg {
     Transcript(String, Vec<Event>),
     Note(String, &'static str),
     Artifact(String, String),
+    Result(String, Value),
 }
 
 /// The board's form for a new quest, kept between frames.
@@ -80,6 +81,8 @@ pub struct GuildView {
     pub diff_open: bool,
     pub form: QuestForm,
     pub studio: crate::guild_studio::Studio,
+    /// Answers to `request`, by tag, until taken or replaced.
+    pub results: std::collections::HashMap<String, Value>,
 }
 
 impl GuildView {
@@ -104,6 +107,7 @@ impl GuildView {
             diff_open: false,
             form: QuestForm::default(),
             studio: Default::default(),
+            results: Default::default(),
         }
     }
 
@@ -150,6 +154,7 @@ impl GuildView {
                 }
                 Msg::Note(text, tone) => self.notes.push((text, tone)),
                 Msg::Artifact(id, text) => self.diff = Some((id, text)),
+                Msg::Result(tag, value) => { self.results.insert(tag, value); changed = true; }
             }
         }
         if self.demo && self.snapshot.as_ref().map(|s| s.service_version != "demo").unwrap_or(true) {
@@ -197,6 +202,28 @@ impl GuildView {
             }
         });
     }
+
+    /// Send a command whose answer the UI needs; it lands in `results`
+    /// under `tag`. Failures go to the activity log, as for `command`.
+    pub fn request(&mut self, method: &str, params: Value, tag: &str) {
+        if self.demo {
+            if let Some(v) = demo_result(method) { self.results.insert(tag.into(), v); }
+            return;
+        }
+        let client = self.client.clone();
+        let outbox = self.outbox.clone();
+        let wake = self.wake.clone();
+        let (method, tag) = (method.to_string(), tag.to_string());
+        std::thread::spawn(move || {
+            match client.call(&method, params) {
+                Ok(v) => { let _ = outbox.send(Msg::Result(tag, v)); }
+                Err(e) => { let _ = outbox.send(Msg::Note(trf("Guild: {}", &[&e.message]), "blocked")); }
+            }
+            wake();
+        });
+    }
+
+    pub fn take_result(&mut self, tag: &str) -> Option<Value> { self.results.remove(tag) }
 
     /// Fetch an artifact's text (a candidate diff) on a thread.
     pub fn fetch_artifact(&mut self, id: &str) {
@@ -823,6 +850,61 @@ fn small(ui: &mut Ui, text: &str, ink: Color32) -> bool {
 
 // ---- Demo
 
+fn demo_hypotheses(t: &str) -> Vec<guild::experiment::Hypothesis> {
+    vec![guild::experiment::Hypothesis { id: "h1".into(), project_id: "verbrawl".into(), question_id: Some("Q-001".into()), problem: tr("Los jugadores siempre eligen la palabra más larga"), evidence: "OBS-002 · max_attribute:length 81%".into(), level: guild::experiment::DesignLevel::Loop,
+        hypothesis: tr("Subir la sinergia semántica hace competitivas las palabras cortas temáticas"), expected_effect: tr("más diversidad de palabras"), proposed_change: "semantic_multiplier 1.2 → 1.6".into(), measurements: vec!["choices.top_share".into(), "max_attribute:length".into()], related_systems: vec!["combat".into()], status: guild::experiment::HypothesisStatus::Experimenting, created_at: t.into(), updated_at: t.into() }]
+}
+
+fn demo_experiments(t: &str) -> Vec<guild::experiment::Experiment> {
+    use guild::experiment::*;
+    let variant = |id: &str, name: &str, l: f64, s: f64| Variant { id: id.into(), name: name.into(), params: [("length_multiplier".to_string(), json!(l)), ("semantic_multiplier".to_string(), json!(s))].into_iter().collect(), instructions: String::new(), task_id: Some(format!("t-{id}")), attempt_id: Some(format!("a-{id}")) };
+    let metrics = json!({
+        "control": {"name": "control", "params": {}, "profiles": {"greedy": {"playtests": 2, "runs": {"completion_rate": 1.0}, "choices": {"top": "whirlwind", "top_share": 0.42}}, "explorer": {"playtests": 2, "runs": {"completion_rate": 0.5}, "choices": {"top": "ice", "top_share": 0.3}}, "human": {"playtests": 1, "runs": {"completion_rate": 1.0}, "choices": {"top": "inferno", "top_share": 0.5}}}},
+        "a": {"name": "semantic 1.6", "params": {}, "profiles": {"greedy": {"playtests": 2, "runs": {"completion_rate": 1.0}, "choices": {"top": "whirlwind", "top_share": 0.38}}, "explorer": {"playtests": 2, "runs": {"completion_rate": 1.0}, "choices": {"top": "chill", "top_share": 0.25}}}},
+        "b": {"name": "flat length", "params": {}, "profiles": {"greedy": {"playtests": 2, "runs": {"completion_rate": 0.5}, "choices": {"top": "whirlwind", "top_share": 0.4}}, "explorer": {"playtests": 2, "runs": {"completion_rate": 1.0}, "choices": {"top": "spark", "top_share": 0.2}}, "human": {"playtests": 1, "runs": {"completion_rate": 1.0}, "choices": {"top": "chill", "top_share": 0.25}}}}
+    });
+    vec![Experiment { id: "e1".into(), project_id: "verbrawl".into(), hypothesis_id: "h1".into(), title: tr("Bono semántico"), status: ExperimentStatus::Decided, quest_id: None,
+        variants: vec![variant("control", "control", 1.35, 1.2), variant("a", "semantic 1.6", 1.35, 1.6), variant("b", "flat length", 1.0, 1.6)],
+        plan: PlaytestPlan { profiles: vec!["greedy".into(), "explorer".into()], runs_per_profile: 2, seeds: vec![] }, analysis_task_id: None,
+        result: Some(ExperimentResult { verdict: "supports".into(), evidence: vec![tr("explorer completa más runs en a y b"), tr("en b la palabra más larga deja de ganar siempre")], unexpected: vec![tr("greedy pierde la mitad de sus runs en b")], recommended_variant: Some("a".into()), recommended_next: tr("probar semantic 1.8 con length 1.2"), confidence: Some(0.6), analyst_attempt_id: None, metrics, created_at: t.into() }),
+        decision: None, failure: None, created_at: t.into(), updated_at: t.into() }]
+}
+
+fn demo_playtests(t: &str) -> Vec<guild::experiment::Playtest> {
+    use guild::experiment::*;
+    let mut out = vec![];
+    for (i, (v, profile, kind)) in [("control", "greedy", PlaytestKind::Simulation), ("a", "greedy", PlaytestKind::Simulation), ("b", "explorer", PlaytestKind::Simulation), ("control", "human", PlaytestKind::Human), ("b", "human", PlaytestKind::Human)].iter().enumerate() {
+        out.push(Playtest { id: format!("pt{i}"), project_id: "verbrawl".into(), experiment_id: Some("e1".into()), variant_id: Some(v.to_string()), kind: *kind, profile: profile.to_string(), status: "finished".into(), event_count: 40, created_at: t.into(), ..Default::default() });
+    }
+    out.push(Playtest { id: "pt-live".into(), project_id: "verbrawl".into(), kind: PlaytestKind::Human, profile: "human".into(), status: "running".into(), player: Some("nacho".into()), build_sha: Some("490acd6f00".into()), design_version: Some(1), created_at: t.into(), ..Default::default() });
+    out
+}
+
+fn demo_observations(t: &str) -> Vec<guild::experiment::Observation> {
+    use guild::experiment::Observation;
+    vec![
+        Observation { id: "OBS-001".into(), project_id: "verbrawl".into(), kind: "great_moment".into(), text: tr("Ganar con «ice» sobre un enemigo de hielo se sintió genial"), playtest_id: Some("pt3".into()), run_id: Some("human-12".into()), round: Some(3), created_at: t.into(), ..Default::default() },
+        Observation { id: "OBS-002".into(), project_id: "verbrawl".into(), kind: "frustrating".into(), text: tr("Siempre termino eligiendo la palabra más larga"), playtest_id: Some("pt3".into()), run_id: Some("human-12".into()), round: Some(5), question_id: Some("Q-001".into()), created_at: t.into(), ..Default::default() },
+        Observation { id: "OBS-003".into(), project_id: "verbrawl".into(), kind: "confusing".into(), text: tr("No entiendo por qué esta palabra hizo tanto daño"), playtest_id: Some("pt-live".into()), run_id: Some("human-31".into()), round: Some(2), created_at: t.into(), ..Default::default() },
+    ]
+}
+
+/// What the demo answers to a request, so the chamber's screens fill.
+fn demo_result(method: &str) -> Option<Value> {
+    match method {
+        "signals" => Some(json!({
+            "playtests": 14, "human": 2, "synthetic": 12,
+            "desired": ["consider several words before committing", "take risks on rare letters"],
+            "avoid": ["a dominant strategy", "always choosing the longest word"],
+            "signals": [
+                {"key": "max_attribute:length", "statement": "The chosen option had the highest length in 81% of 96 choices (about 24% if chosen at random)", "value": 0.81, "n": 96, "baseline": 0.24, "suggested_question": "Does the highest length always win?", "playtests": 14},
+                {"key": "never_chosen", "statement": "Offered at least 5 times and never chosen: ash, ice, ore", "value": 3.0, "n": 96, "suggested_question": "Why does nobody choose ash, ice, ore?", "playtests": 14}
+            ]
+        })),
+        _ => None,
+    }
+}
+
 fn demo_snapshot(tick: usize) -> Snapshot {
     let t = now();
     let member = |id: &str, name: &str, harness: HarnessKind, model: &str, role: &str| Member { id: id.into(), name: name.into(), roles: vec![role.into()], harness, model_id: Some(model.into()), mode: None, role_prompt: String::new(), enabled: true };
@@ -858,13 +940,14 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         schema_version: SCHEMA_VERSION,
         last_seq: 0,
         service_version: "demo".into(),
-        projects: vec![Project { id: "verbrawl".into(), name: "Verbrawl".into(), repo_path: "~/demo/verbrawl".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, created_at: t.clone() }],
+        projects: vec![Project { id: "verbrawl".into(), name: "Verbrawl".into(), repo_path: "~/demo/verbrawl".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=human".into(), "seed={seed}".into()], timeout_seconds: 300 }), created_at: t.clone() }],
         decisions: vec![],
-        hypotheses: vec![],
-        questions: vec![],
+        hypotheses: demo_hypotheses(&t),
+        questions: vec![guild::design::DesignQuestion { id: "Q-001".into(), project_id: "verbrawl".into(), question: tr("¿Las palabras largas son demasiado dominantes?"), context: "OBS-002".into(), system_id: Some("combat".into()), status: "open".into(), raised_by: "playtest".into(), source: Some("OBS-002".into()), hypothesis_ids: vec!["h1".into()], experiment_ids: vec!["e1".into()], decision_id: None, answer: String::new(), created_at: t.clone(), resolved_at: None }],
         design_decisions: vec![],
-        experiments: vec![],
-        playtests: vec![],
+        experiments: demo_experiments(&t),
+        playtests: demo_playtests(&t),
+        observations: demo_observations(&t),
         designs: vec![guild::design::template("verbrawl", "Verbrawl", "videogame")],
         roles: guild::config::role_catalog(),
         quests: vec![Quest { id: "q1".into(), project_id: "verbrawl".into(), title: tr("Efectos de estado"), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some("490acd6".into()), plan_version: 1, created_at: t.clone(), updated_at: t.clone() }],

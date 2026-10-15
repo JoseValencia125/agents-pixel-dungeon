@@ -224,6 +224,24 @@ pub fn publish(project: &Project, ref_name: &str, base: &str, message: &str, wri
     result
 }
 
+/// A detached checkout of `sha` at `dir`, for a human to play; never the
+/// user's checkout.
+pub fn checkout_detached(project: &Project, sha: &str, dir: &Path) -> GitResult<()> {
+    let repo = Path::new(&project.repo_path);
+    if dir.exists() { let _ = git(repo, &["worktree", "remove", "--force", &dir.display().to_string()]); }
+    let _ = git(repo, &["worktree", "prune"]);
+    if let Some(parent) = dir.parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+    git(repo, &["worktree", "add", "--detach", &dir.display().to_string(), sha]).map(|_| ())
+}
+
+/// Remove a checkout made by `checkout_detached`; only under the guild's worktrees.
+pub fn remove_checkout(project: &Project, dir: &Path) {
+    if !dir.starts_with(crate::paths::worktrees_dir()) { return; }
+    let repo = Path::new(&project.repo_path);
+    let _ = git(repo, &["worktree", "remove", "--force", &dir.display().to_string()]);
+    let _ = git(repo, &["worktree", "prune"]);
+}
+
 /// Run `read` on a temporary checkout of `rev`; None when it does not exist.
 pub fn read_ref<T>(project: &Project, rev: &str, read: impl FnOnce(&Path) -> T) -> Option<T> {
     let repo = Path::new(&project.repo_path);
@@ -279,7 +297,7 @@ mod tests {
         std::fs::write(repo.join("README.md"), "hello\n").unwrap();
         git(&repo, &["add", "-A"]).unwrap();
         git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]).unwrap();
-        let project = Project { id: "p".into(), name: "p".into(), repo_path: repo.display().to_string(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, created_at: now() };
+        let project = Project { id: "p".into(), name: "p".into(), repo_path: repo.display().to_string(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, created_at: now() };
         (dir, project)
     }
 

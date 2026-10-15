@@ -130,6 +130,28 @@ pub struct ChamberState {
     /// Which systems are unfolded.
     pub open_systems: Vec<String>,
     pub show_resolved: bool,
+    /// What the player is noting during a session.
+    pub obs_text: String,
+    /// The laboratory's forms.
+    pub hyp_open: bool,
+    pub hyp_problem: String,
+    pub hyp_evidence: String,
+    pub hyp_text: String,
+    pub hyp_level: String,
+    pub hyp_expected: String,
+    pub hyp_change: String,
+    pub hyp_measures: String,
+    pub hyp_question: String,
+    pub hyp_systems: String,
+    pub exp_open: bool,
+    pub exp_hypothesis: String,
+    pub exp_title: String,
+    pub exp_variants: String,
+    pub exp_profiles: String,
+    pub exp_runs: String,
+    /// Per experiment: the variant chosen to accept, and the note.
+    pub decide_variant: std::collections::HashMap<String, String>,
+    pub decide_note: String,
 }
 
 pub fn maturity_label(m: Maturity) -> String {
@@ -161,9 +183,11 @@ fn maturity_combo(ui: &mut Ui, id: &str, m: &mut Maturity) -> bool {
 pub fn header(ui: &mut Ui, snap: &Snapshot, design: Option<&LivingGameDesign>, project_id: &str) {
     let Some(d) = design else { return };
     let percent = guild::design::maturity_percent(d);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(mono(&tr("Madurez del diseño"), 10.5).color(FAINT));
-        let (rect, _) = ui.allocate_exact_size(vec2(140.0, 10.0), egui::Sense::hover());
+        // The bar takes what is left of the row, so a narrow dungeon never widens.
+        let bar = (ui.available_width() - 40.0).clamp(40.0, 140.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(bar, 10.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, 2.0, Color32::from_rgb(222, 196, 140));
         let mut fill = rect;
         fill.set_width(rect.width() * percent as f32 / 100.0);
@@ -434,6 +458,327 @@ pub fn decisions_tab(ui: &mut Ui, snap: &Snapshot, project_id: &str) {
             });
         });
     }
+}
+
+// ---- Play: the game, the session, what the player noticed
+
+pub fn observation_label(kind: &str) -> String {
+    tr(match kind { "confusing" => "Confuso", "frustrating" => "Frustrante", "interesting" => "Interesante", "great_moment" => "Gran momento", "bug" => "Bug", _ => "Comentario" })
+}
+
+fn observation_color(kind: &str) -> Color32 {
+    match kind {
+        "confusing" => Color32::from_rgb(190, 120, 30),
+        "frustrating" => Color32::from_rgb(190, 40, 30),
+        "interesting" => Color32::from_rgb(40, 110, 170),
+        "great_moment" => Color32::from_rgb(30, 140, 60),
+        "bug" => Color32::from_rgb(150, 40, 120),
+        _ => FAINT,
+    }
+}
+
+fn short(id: &str) -> &str { if id.len() > 8 { &id[..8] } else { id } }
+
+/// Play the current build, note what you notice while playing, and see
+/// what the telemetry shows next to the experience the design wants.
+pub fn play_tab(ui: &mut Ui, state: &mut ChamberState, snap: &Snapshot, project_id: &str, results: &std::collections::HashMap<String, Value>, commands: &mut Vec<(&'static str, Value)>, requests: &mut Vec<(&'static str, Value, &'static str)>) {
+    ui.label(mono(&tr("Juega la build y anota lo que notas mientras juegas: cada nota queda ligada a la build, la versión del diseño, la run y la ronda."), 10.5).color(FAINT));
+    let project = snap.projects.iter().find(|p| p.id == project_id);
+    match project.and_then(|p| p.play.as_ref()) {
+        Some(_) => {
+            if primary(ui, &tr("▶ Jugar la build actual")) { requests.push(("play.start", json!({"projectId": project_id}), "play")); }
+        }
+        None => {
+            ui.label(mono(&tr("El proyecto no dice cómo se juega. Añade a .guild/guild.toml:"), 10.0).color(Color32::from_rgb(190, 40, 30)));
+            ui.label(mono("[play]\nargv = [\"python3\", \"game.py\", \"seed={seed}\"]", 9.5).color(INK));
+        }
+    }
+    // Sessions running now.
+    let live: Vec<&guild::experiment::Playtest> = snap.playtests.iter().filter(|p| p.project_id == project_id && p.kind == guild::experiment::PlaytestKind::Human && p.status == "running").collect();
+    for pt in live {
+        Frame::new().fill(PAPER_DARK).stroke(Stroke::new(1.5_f32, Color32::from_rgb(30, 140, 60))).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(mono(&tr("En juego"), 10.5).strong().color(Color32::from_rgb(30, 140, 60)));
+                if let Some(sha) = &pt.build_sha { ui.label(mono(&trf("build {}", &[&short(sha)]), 10.0).color(FAINT)); }
+                if let Some(v) = &pt.variant_id { ui.label(mono(&trf("variante {}", &[v]), 10.0).color(FAINT)); }
+                if let Some(v) = pt.design_version { ui.label(mono(&format!("v{v}"), 10.0).color(FAINT)); }
+            });
+            area(ui, &tr("Qué notaste (opcional)"), &mut state.obs_text, 2);
+            ui.horizontal_wrapped(|ui| {
+                for kind in guild::experiment::OBSERVATION_KINDS {
+                    let label = observation_label(kind);
+                    if ui.add(egui::Button::new(mono(&label, 10.0).strong().color(Color32::WHITE)).fill(observation_color(kind)).corner_radius(CornerRadius::same(3))).clicked() {
+                        commands.push(("observation.create", json!({"projectId": project_id, "playtestId": pt.id, "kind": kind, "text": state.obs_text.trim()})));
+                        state.obs_text.clear();
+                    }
+                }
+            });
+            if small(ui, &tr("Terminar sesión")) { commands.push(("play.finish", json!({"playtestId": pt.id}))); }
+        });
+    }
+    // What players noticed.
+    let notes: Vec<&guild::experiment::Observation> = snap.observations.iter().filter(|o| o.project_id == project_id).collect();
+    ui.label(mono(&trf("Observaciones ({})", &[&notes.len()]), 10.5).strong());
+    for o in notes.iter().rev().take(30) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(mono(&o.id, 10.0).color(FAINT));
+            ui.label(mono(&observation_label(&o.kind), 10.0).strong().color(observation_color(&o.kind)));
+            ui.label(mono(if o.text.is_empty() { "—" } else { &o.text }, 10.0));
+            if let Some(r) = o.round { ui.label(mono(&trf("ronda {}", &[&r]), 9.5).color(FAINT)); }
+            if let Some(v) = &o.variant_id { ui.label(mono(&trf("variante {}", &[v]), 9.5).color(FAINT)); }
+            match &o.question_id {
+                Some(q) => { ui.label(mono(&format!("→ {q}"), 9.5).color(RUST)); }
+                None => { if small(ui, &tr("→ Pregunta")) { commands.push(("observation.promote", json!({"projectId": project_id, "observationId": o.id}))); } }
+            }
+        });
+    }
+    // Observed against desired.
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(mono(&tr("Observado vs deseado"), 10.5).strong());
+        if small(ui, &tr("Analizar playtests")) { requests.push(("signals", json!({"projectId": project_id}), "signals")); }
+    });
+    let Some(found) = results.get("signals") else {
+        ui.label(mono(&tr("Calcula, sin IA, lo que muestran los eventos de las partidas jugadas: opciones dominantes, atributos que siempre ganan, opciones que nadie elige."), 10.0).color(FAINT));
+        return;
+    };
+    ui.label(mono(&trf("{} playtests ({} humanos, {} sintéticos)", &[&found["playtests"], &found["human"], &found["synthetic"]]), 10.0).color(FAINT));
+    let list = |ui: &mut Ui, title: String, items: &Value| {
+        ui.label(mono(&title, 10.0).strong());
+        for i in items.as_array().into_iter().flatten() { ui.label(mono(&format!("· {}", i.as_str().unwrap_or("")), 10.0)); }
+    };
+    Frame::new().fill(PAPER_DARK).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
+        list(ui, tr("El diseño quiere"), &found["desired"]);
+        list(ui, tr("El diseño evita"), &found["avoid"]);
+    });
+    let signals = found["signals"].as_array().cloned().unwrap_or_default();
+    if signals.is_empty() { ui.label(mono(&tr("Nada destacable en los eventos todavía."), 10.0).color(FAINT)); }
+    for s in signals {
+        let key = s["key"].as_str().unwrap_or("").to_string();
+        let source = format!("signal:{key}");
+        Frame::new().fill(PAPER_DARK).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
+            ui.label(mono(s["statement"].as_str().unwrap_or(""), 10.5));
+            ui.horizontal_wrapped(|ui| {
+                let asked = snap.questions.iter().find(|q| q.project_id == project_id && q.source.as_deref() == Some(source.as_str()));
+                match asked {
+                    Some(q) => { ui.label(mono(&format!("→ {} ({})", q.id, q.status), 10.0).color(RUST)); }
+                    None => {
+                        ui.label(mono(&format!("→ {}", s["suggested_question"].as_str().unwrap_or("")), 10.0).color(FAINT));
+                        if small(ui, &tr("Abrir pregunta")) {
+                            commands.push(("question.create", json!({"projectId": project_id, "question": s["suggested_question"], "context": format!("{} ({} playtests)", s["statement"].as_str().unwrap_or(""), s["playtests"]), "raisedBy": "guild", "source": source})));
+                        }
+                    }
+                }
+            });
+        });
+    }
+}
+
+// ---- Laboratory: hypotheses, experiments, the decision
+
+fn hypothesis_label(h: guild::experiment::HypothesisStatus) -> String {
+    use guild::experiment::HypothesisStatus::*;
+    tr(match h { Proposed => "propuesta", Experimenting => "en experimento", Supported => "respaldada", Rejected => "rechazada", Inconclusive => "no concluyente" })
+}
+
+fn experiment_label(e: guild::experiment::ExperimentStatus) -> String {
+    use guild::experiment::ExperimentStatus::*;
+    tr(match e { Draft => "borrador", Building => "construyendo variantes", Playtesting => "jugando", Analysing => "analizando", Decided => "decisión requerida", Accepted => "aceptado", Rejected => "rechazado", Failed => "falló" })
+}
+
+fn verdict_label(v: &str) -> String {
+    tr(match v { "supports" => "respalda la hipótesis", "rejects" => "rechaza la hipótesis", _ => "no concluyente" })
+}
+
+/// `id: key=value, key=value` per line, as variants.
+pub fn parse_variants(text: &str) -> Vec<Value> {
+    lines(text).iter().filter_map(|line| {
+        let (id, rest) = line.split_once(':').map(|(a, b)| (a.trim(), b.trim())).unwrap_or((line.trim(), ""));
+        if id.is_empty() { return None; }
+        let params: serde_json::Map<String, Value> = rest.split(',').filter_map(|kv| kv.split_once('=')).map(|(k, v)| {
+            let v = v.trim();
+            (k.trim().to_string(), v.parse::<f64>().map(Value::from).unwrap_or_else(|_| Value::from(v)))
+        }).collect();
+        Some(json!({"id": id, "name": id, "params": params}))
+    }).collect()
+}
+
+pub fn laboratory_tab(ui: &mut Ui, state: &mut ChamberState, snap: &Snapshot, project_id: &str, commands: &mut Vec<(&'static str, Value)>, requests: &mut Vec<(&'static str, Value, &'static str)>) {
+    ui.label(mono(&tr("Una duda se vuelve hipótesis; una hipótesis, un experimento con variantes que se construyen, se juegan y se analizan. Tú decides."), 10.5).color(FAINT));
+    let hypotheses: Vec<&guild::experiment::Hypothesis> = snap.hypotheses.iter().filter(|h| h.project_id == project_id).collect();
+    // Hypotheses.
+    ui.horizontal(|ui| {
+        ui.label(mono(&trf("Hipótesis ({})", &[&hypotheses.len()]), 10.5).strong());
+        let label = if state.hyp_open { "−".to_string() } else { tr("+ hipótesis") };
+        if small(ui, &label) { state.hyp_open = !state.hyp_open; }
+    });
+    if state.hyp_open {
+        Frame::new().fill(PAPER_DARK).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
+            if state.hyp_level.is_empty() { state.hyp_level = "loop".into(); }
+            ui.horizontal_wrapped(|ui| {
+                ui.label(mono(&tr("Pregunta"), 10.5).color(FAINT));
+                let open: Vec<&DesignQuestion> = snap.questions.iter().filter(|q| q.project_id == project_id && q.status == "open").collect();
+                egui::ComboBox::from_id_salt("hyp-question").selected_text(mono(if state.hyp_question.is_empty() { "—" } else { &state.hyp_question }, 10.0)).width(90.0).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut state.hyp_question, String::new(), mono("—", 10.0));
+                    for q in open { ui.selectable_value(&mut state.hyp_question, q.id.clone(), mono(&format!("{} {}", q.id, q.question.chars().take(40).collect::<String>()), 10.0)); }
+                });
+                ui.label(mono(&tr("Nivel"), 10.5).color(FAINT));
+                for (id, label) in [("whole", tr("todo")), ("loop", tr("loop")), ("part", tr("parte"))] { ui.selectable_value(&mut state.hyp_level, id.to_string(), mono(&label, 10.0)); }
+            });
+            area(ui, &tr("Problema observado"), &mut state.hyp_problem, 2);
+            area(ui, &tr("Evidencia"), &mut state.hyp_evidence, 1);
+            area(ui, &tr("Hipótesis: qué creemos que lo resuelve y por qué"), &mut state.hyp_text, 2);
+            area(ui, &tr("Efecto esperado"), &mut state.hyp_expected, 1);
+            area(ui, &tr("Cambio propuesto"), &mut state.hyp_change, 1);
+            area(ui, &tr("Qué medir (una por línea)"), &mut state.hyp_measures, 2);
+            field(ui, &tr("Sistemas"), &mut state.hyp_systems, 200.0);
+            if !state.hyp_problem.trim().is_empty() && !state.hyp_text.trim().is_empty() && primary(ui, &tr("Crear hipótesis")) {
+                commands.push(("hypothesis.create", json!({"projectId": project_id, "problem": state.hyp_problem.trim(), "evidence": state.hyp_evidence.trim(), "hypothesis": state.hyp_text.trim(), "level": state.hyp_level,
+                    "expectedEffect": state.hyp_expected.trim(), "proposedChange": state.hyp_change.trim(), "measurements": lines(&state.hyp_measures),
+                    "relatedSystems": state.hyp_systems.split(',').map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>(), "questionId": if state.hyp_question.is_empty() { Value::Null } else { json!(state.hyp_question) }})));
+                for f in [&mut state.hyp_problem, &mut state.hyp_evidence, &mut state.hyp_text, &mut state.hyp_expected, &mut state.hyp_change, &mut state.hyp_measures, &mut state.hyp_systems, &mut state.hyp_question] { f.clear(); }
+                state.hyp_open = false;
+            }
+        });
+    }
+    for h in &hypotheses {
+        Frame::new().fill(PAPER_DARK).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(mono(&hypothesis_label(h.status), 10.0).strong().color(RUST));
+                ui.label(mono(&format!("{:?}", h.level).to_lowercase(), 9.5).color(FAINT));
+                if let Some(q) = &h.question_id { ui.label(mono(&format!("← {q}"), 9.5).color(FAINT)); }
+            });
+            ui.label(mono(&h.hypothesis, 10.5));
+            ui.label(mono(&h.problem, 10.0).color(FAINT));
+            if !h.proposed_change.is_empty() { ui.label(mono(&format!("→ {}", h.proposed_change), 10.0).color(FAINT)); }
+        });
+    }
+    // Experiments.
+    let experiments: Vec<&guild::experiment::Experiment> = snap.experiments.iter().filter(|e| e.project_id == project_id).collect();
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(mono(&trf("Experimentos ({})", &[&experiments.len()]), 10.5).strong());
+        let label = if state.exp_open { "−".to_string() } else { tr("+ experimento") };
+        if !hypotheses.is_empty() && small(ui, &label) { state.exp_open = !state.exp_open; }
+    });
+    if state.exp_open {
+        Frame::new().fill(PAPER_DARK).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
+            if state.exp_hypothesis.is_empty() { state.exp_hypothesis = hypotheses.last().map(|h| h.id.clone()).unwrap_or_default(); }
+            if state.exp_profiles.is_empty() { state.exp_profiles = "greedy, explorer".into(); }
+            if state.exp_runs.is_empty() { state.exp_runs = "3".into(); }
+            if state.exp_variants.is_empty() { state.exp_variants = "control:\na: key=value".into(); }
+            let shown = hypotheses.iter().find(|h| h.id == state.exp_hypothesis).map(|h| h.hypothesis.chars().take(40).collect::<String>()).unwrap_or_default();
+            egui::ComboBox::from_id_salt("exp-hypothesis").selected_text(mono(&shown, 10.0)).width(220.0).show_ui(ui, |ui| {
+                for h in &hypotheses { ui.selectable_value(&mut state.exp_hypothesis, h.id.clone(), mono(&h.hypothesis.chars().take(60).collect::<String>(), 10.0)); }
+            });
+            field(ui, &tr("Título"), &mut state.exp_title, 220.0);
+            area(ui, &tr("Variantes, una por línea: id: parámetro=valor, parámetro=valor (control sin parámetros es el juego tal cual)"), &mut state.exp_variants, 4);
+            field(ui, &tr("Perfiles de jugador"), &mut state.exp_profiles, 160.0);
+            field(ui, &tr("Partidas por perfil"), &mut state.exp_runs, 40.0);
+            let variants = parse_variants(&state.exp_variants);
+            ui.label(mono(&trf("{} variantes", &[&variants.len()]), 9.5).color(FAINT));
+            if !variants.is_empty() && !state.exp_hypothesis.is_empty() && primary(ui, &tr("Crear experimento")) {
+                let mut params = json!({"projectId": project_id, "hypothesisId": state.exp_hypothesis, "variants": variants,
+                    "plan": {"profiles": state.exp_profiles.split(',').map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>(), "runs_per_profile": state.exp_runs.trim().parse::<u64>().unwrap_or(3)}});
+                if !state.exp_title.trim().is_empty() { params["title"] = json!(state.exp_title.trim()); }
+                commands.push(("experiment.create", params));
+                state.exp_title.clear();
+                state.exp_variants.clear();
+                state.exp_open = false;
+            }
+        });
+    }
+    for e in experiments.iter().rev() {
+        let decided = e.status == guild::experiment::ExperimentStatus::Decided;
+        let stroke = if decided { Stroke::new(2.0_f32, Color32::from_rgb(190, 40, 30)) } else { Stroke::NONE };
+        Frame::new().fill(PAPER_DARK).stroke(stroke).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(mono(&e.title, 10.5).strong());
+                let color = if decided { Color32::from_rgb(190, 40, 30) } else { RUST };
+                ui.label(mono(&experiment_label(e.status), 10.0).strong().color(color));
+            });
+            let playtests: Vec<&guild::experiment::Playtest> = snap.playtests.iter().filter(|p| p.experiment_id.as_deref() == Some(e.id.as_str()) && p.status == "finished").collect();
+            let human = playtests.iter().filter(|p| p.kind == guild::experiment::PlaytestKind::Human).count();
+            use guild::experiment::ExperimentStatus::*;
+            match e.status {
+                Draft => {
+                    for v in &e.variants { ui.label(mono(&format!("· {}: {}", v.id, serde_json::to_string(&v.params).unwrap_or_default()), 10.0)); }
+                    if primary(ui, &tr("Iniciar: construir y jugar las variantes")) { commands.push(("experiment.start", json!({"experimentId": e.id}))); }
+                }
+                Building | Playtesting | Analysing => {
+                    let built = e.variants.iter().filter(|v| v.attempt_id.is_some()).count();
+                    let planned = e.variants.len() * e.plan.profiles.len() * e.plan.runs_per_profile.max(1) as usize;
+                    ui.label(mono(&trf("{}/{} variantes construidas · {}/{} playtests", &[&built, &e.variants.len(), &(playtests.len() - human), &planned]), 10.0).color(FAINT));
+                }
+                Failed => {
+                    ui.label(mono(e.failure.as_deref().unwrap_or(""), 10.0).color(Color32::from_rgb(190, 40, 30)));
+                    ui.horizontal(|ui| {
+                        if small(ui, &tr("Iterar")) { commands.push(("experiment.iterate", json!({"experimentId": e.id}))); }
+                        if small(ui, &tr("Rechazar")) { commands.push(("experiment.reject", json!({"experimentId": e.id}))); }
+                    });
+                }
+                Decided => decision_card(ui, state, snap, project_id, e, &playtests, human, commands, requests),
+                Accepted | Rejected => {
+                    if let Some(d) = &e.decision { ui.label(mono(&format!("{} {} · {}", d.action, d.variant_id.clone().unwrap_or_default(), d.note), 10.0)); }
+                    let dec = snap.design_decisions.iter().find(|d| d.experiment_ids.contains(&e.id));
+                    if let Some(d) = dec { ui.label(mono(&format!("→ {}: {}", d.id, d.decision), 10.0).color(Color32::from_rgb(30, 140, 60))); }
+                }
+            }
+        });
+    }
+}
+
+/// The human's decision: the problem, the evidence, the analyst's
+/// recommendation, each variant's numbers with a button to play it, and
+/// accept, iterate or reject.
+#[allow(clippy::too_many_arguments)]
+fn decision_card(ui: &mut Ui, state: &mut ChamberState, snap: &Snapshot, project_id: &str, e: &guild::experiment::Experiment, playtests: &[&guild::experiment::Playtest], human: usize, commands: &mut Vec<(&'static str, Value)>, requests: &mut Vec<(&'static str, Value, &'static str)>) {
+    let h = snap.hypotheses.iter().find(|h| h.id == e.hypothesis_id);
+    if let Some(h) = h {
+        ui.label(mono(&trf("Problema: {}", &[&h.problem]), 10.5));
+        ui.label(mono(&trf("Hipótesis: {}", &[&h.hypothesis]), 10.0).color(FAINT));
+    }
+    let notes = snap.observations.iter().filter(|o| o.experiment_id.as_deref() == Some(e.id.as_str())).count();
+    ui.label(mono(&trf("Evidencia: {} playtests sintéticos · {} humanos · {} observaciones", &[&(playtests.len() - human), &human, &notes]), 10.0).color(FAINT));
+    let result = e.result.clone().unwrap_or_default();
+    ui.label(mono(&trf("Analista: {}{}", &[&verdict_label(&result.verdict), &result.confidence.map(|c| format!(" · {:.0}%", c * 100.0)).unwrap_or_default()]), 10.5).strong());
+    for x in &result.evidence { ui.label(mono(&format!("· {x}"), 10.0)); }
+    for x in &result.unexpected { ui.label(mono(&format!("! {x}"), 10.0).color(Color32::from_rgb(190, 120, 30))); }
+    if !result.recommended_next.is_empty() { ui.label(mono(&trf("Siguiente: {}", &[&result.recommended_next]), 10.0).color(FAINT)); }
+    // Each variant, its numbers, and a way to play it: one block per
+    // variant, so a narrow dungeon reads it as well as a wide one.
+    for v in &e.variants {
+        let recommended = result.recommended_variant.as_deref() == Some(v.id.as_str());
+        let profiles = &result.metrics[&v.id]["profiles"];
+        Frame::new().stroke(Stroke::new(1.0_f32, if recommended { Color32::from_rgb(30, 140, 60) } else { RUST })).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(4)).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(mono(&format!("{}{}", if recommended { "★ " } else { "" }, v.name), 10.0).strong());
+                ui.label(mono(&serde_json::to_string(&v.params).unwrap_or_default(), 9.0).color(FAINT));
+                if v.attempt_id.is_some() && small(ui, &tr("▶ Jugar")) {
+                    requests.push(("play.start", json!({"projectId": project_id, "experimentId": e.id, "variantId": v.id}), "play"));
+                }
+            });
+            for (profile, m) in profiles.as_object().into_iter().flatten() {
+                let completion = m["runs"]["completion_rate"].as_f64().map(|r| trf("{}% completadas", &[&format!("{:.0}", r * 100.0)])).unwrap_or_default();
+                let top = match (m["choices"]["top"].as_str(), m["choices"]["top_share"].as_f64()) { (Some(c), Some(s)) => trf("más tomada: {} {}%", &[&c, &format!("{:.0}", s * 100.0)]), _ => String::new() };
+                ui.label(mono(&format!("{profile}: {completion} · {top}"), 9.5));
+            }
+        });
+    }
+    let choice = state.decide_variant.entry(e.id.clone()).or_insert_with(|| result.recommended_variant.clone().unwrap_or_else(|| e.variants.first().map(|v| v.id.clone()).unwrap_or_default()));
+    ui.horizontal_wrapped(|ui| {
+        ui.label(mono(&tr("Adoptar"), 10.5).color(FAINT));
+        egui::ComboBox::from_id_salt(("decide", &e.id)).selected_text(mono(choice, 10.0)).width(90.0).show_ui(ui, |ui| {
+            for v in &e.variants { ui.selectable_value(choice, v.id.clone(), mono(&v.name, 10.0)); }
+        });
+    });
+    area(ui, &tr("Por qué (queda en la decisión)"), &mut state.decide_note, 1);
+    let variant = choice.clone();
+    ui.horizontal_wrapped(|ui| {
+        if primary(ui, &tr("Aceptar")) { commands.push(("experiment.accept", json!({"experimentId": e.id, "variantId": variant, "note": state.decide_note.trim()}))); state.decide_note.clear(); }
+        if small(ui, &tr("Iterar")) { commands.push(("experiment.iterate", json!({"experimentId": e.id, "note": state.decide_note.trim()}))); state.decide_note.clear(); }
+        if small(ui, &tr("Rechazar")) { commands.push(("experiment.reject", json!({"experimentId": e.id, "note": state.decide_note.trim()}))); state.decide_note.clear(); }
+    });
 }
 
 /// A chip of the stroke colour, for the folded summary line of a system.
