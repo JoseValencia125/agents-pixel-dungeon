@@ -740,20 +740,23 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 7.0);
         ui.horizontal(|ui| {
-            let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
+            // The dot's colour is the status; its name shows on hover.
+            let (dot, hover) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
             ui.painter().circle_filled(dot.center(), 4.0, color);
+            hover.on_hover_text(agent.label());
             ui.label(mono(&agent.name, 12.0).strong().color(Color32::WHITE));
             if let Some(model) = &state.model { model_chip(ui, model); }
-            let mut status = agent.label();
+            // Only a reached limit says more than the dot: when it resets.
+            let mut header = agent.project.clone();
             if let Some(left) = agent.limit_left(crate::herdr::unix_now()).filter(|_| agent.status == "limited") {
-                status += &format!(" · {}", trf("se reinicia en {}", &[&crate::scene::countdown(left)]));
+                header += &format!(" · {}", trf("se reinicia en {}", &[&crate::scene::countdown(left)]));
             }
-            // The buttons on the right keep their room; the project and status end in "…".
+            // The buttons on the right keep their room; the header ends in "…".
             let reserve = if wide { 250.0 } else { 120.0 } + if state.pull.is_some() { 60.0 } else { 0.0 };
             let room = (ui.available_width() - reserve).max(0.0);
             ui.scope(|ui| {
                 ui.set_max_width(room);
-                ui.add(egui::Label::new(mono(&format!("{} · {}", agent.project, status), 11.0).color(DIM)).truncate());
+                ui.add(egui::Label::new(mono(&header, 11.0).color(DIM)).truncate());
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if wide {
