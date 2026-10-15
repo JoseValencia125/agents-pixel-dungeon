@@ -1070,7 +1070,7 @@ fn last_marked_line(screen: &[Vec<Span>]) -> Option<(usize, bool)> {
         let t = t.trim();
         !t.is_empty() && !t.chars().all(|c| matches!(c, '─' | '━' | '═' | '╌' | '┄' | '-'))
     });
-    let picker = nearest.map(|t| crate::herdr::is_menu_footer(t.trim()) || (t.trim_start().starts_with(['❯', '›']) && crate::herdr::is_option(t.trim()))).unwrap_or(false);
+    let picker = nearest.map(|t| crate::herdr::is_menu_footer(t.trim()) || (t.trim_start().starts_with(['❯', '›', '→', '▶']) && crate::herdr::is_option(t.trim()))).unwrap_or(false);
     Some((index, picker))
 }
 
