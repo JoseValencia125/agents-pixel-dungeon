@@ -115,6 +115,71 @@ Monitors the default local session. Environment variables:
 
 Command-line flags: `--demo` (fictional agents), `--fullscreen` (start in full screen), `--diagnose` (print what Herdr reports, or the standalone scan), `--self-test`.
 
+## The guild
+
+The guild is a second binary, `agents-pixel-dungeon-guild`, built next to the app. Run as `serve` it keeps a SQLite database, an append-only event log, the worktrees and the artifacts under the app's data folder (`~/Library/Application Support/agents-pixel-dungeon/guild` on macOS, `~/.config/agents-pixel-dungeon/guild` on Linux; `HPD_GUILD_HOME` overrides it) and listens on a Unix socket. Every other subcommand talks to it and starts it in the background when it is not up; **Quest board** in the menu (or ⌘G) shows it in the app, with a button to start the service.
+
+What it manages:
+
+- **Project**: a git repository. `project add <path>` reads `.guild/guild.toml` from it, if present, for members, a setup command and verifiers.
+- **Quest**: a goal in a project, with its own integration branch `refs/heads/guild/quest/<id>` created from the project's target branch when it starts.
+- **Task**: a unit of delivery with instructions, acceptance criteria, a role, optional dependencies (`--depends t1,t2`), a preferred member or model, and up to two attempts by default. A task is ready when every dependency is completed; a failed dependency blocks it.
+- **Member**: a name, roles, a harness (`kiro`, `codex`, `claude`, `mock`) and optionally a model and a mode. A member runs one attempt at a time; two run at once by default (`serve --concurrency N`).
+- **Attempt**: one try at a task. The service creates a worktree from the quest's branch, opens a session in the member's harness with the task as the prompt, follows its tools and messages, parks it when it asks for a permission (answer in the room, on the board or with `permission <attempt> <option>`), commits whatever it left when the turn ends (the candidate), runs the project's verifiers on it and leaves the task **verifying** until you `accept` (optionally `--integrate`) or `reject` it. Retry creates a new attempt; cancel interrupts the harness and waits for it to confirm; **interrupt** ends the turn now and keeps what the worktree has as the candidate. A finished attempt never runs again.
+- **Restarts**: the quests, tasks, attempts and events live in the database, not in any agent. When the service starts it reconciles: an attempt that was running is **resumed** in a reopened session when the harness persists sessions (Kiro does, through ACP's `session/load`); otherwise whatever its worktree holds becomes a recovered candidate, or the attempt is marked lost and the task retried within its attempts. `stop` closes the live sessions and leaves the attempts where they were, for the next start. Each finished attempt leaves an `attempt.finished` event with its role, harness, model, duration, turns, resumes, candidate size and verifier counts, so routing can learn from history later.
+- **Execution strategy**: every task says how it runs and who chooses. `--strategy single` (default) is one attempt you accept; `reviewed` is one attempt a judge approves; `race --candidates N` runs N attempts at once, each on a different member in its own worktree, each verified on its own, until every runner has submitted or dropped out. The hard gates come first: only candidates whose required verifiers passed can be chosen. Then `--select user` leaves the choice to you (`accept <task> --attempt <id>`; the rest are rejected), `--select policy` takes the smallest passing change (then the earliest), and `--select judge` sends the passing candidates, anonymised as A, B, C with their diffs, to a free member with the judge (or reviewer) role on any harness, who scores them on a rubric and names a winner; with `--auto-integrate` the winner is squashed in by itself. Every choice is kept as a decision (`decisions <task>`): by whom, the candidates, scores, confidence and reason, and whether you overrode an earlier one. Racing is for uncertain work; a trivial change wants one runner.
+- **Integration**: accepting then integrating squashes the candidate onto the quest's branch in a temporary checkout with compare-and-swap on the branch; a conflict blocks the task with the reason instead of touching anything.
+
+In the rooms a member is a hero of its harness in the project's room: at work in the workshop (the station follows the tool it runs), under the red "!" when it asks for a permission or failed, in the treasure chamber when its candidate was accepted. Its panel shows the task, the state and the time elapsed, the candidate's size with a **± Diff** view, each verifier's result, the permission's options, the decisions available (accept, reject, integrate, interrupt, cancel, retry), a terminal in its worktree and the attempt's transcript with the files it changed.
+
+The **quest board** (⌘G, or the menu) lists the members with a form to add one (name, harness, model, role) and a **New quest** form: the project (or a repository path to register), a title, and the tasks one per line as `Title :: instructions`, with a leading `>` for a task that depends on the one above. **Create and start** registers the project, creates the quest and its tasks and starts it; the same commands the CLI sends.
+
+The **guild window** (⌘⇧G, the menu's **Guild**, or **Guild…** on the board) is where a guild is founded and shaped. Its first tab founds one: a repository, a name, a design template (video game, blank or none) and the members, each with a role from the catalogue, a harness and a model; **Video game roles** fills a studio in one click (planner, systems designer, gameplay engineer, reviewer, art director, exploit hunter, on the harnesses available). With a guild in place the same tab edits or removes members and shows the catalogue: coordination (planner), design (systems designer, design analyst), engineering (implementer, gameplay engineer), quality (reviewer, visual QA), art (art director, asset artist, sprite animator, technical artist) and play (AI player, exploit hunter). Each role has its own prompt, which frames every attempt a member of that role makes.
+
+The other tabs are the **design chamber**: the living game design, one durable object that starts as a game concept (Sellers' concept and pitch template) and grows, system by system, into detailed design documentation as prototypes, experiments and playtests settle what was uncertain. Its head shows the design's maturity (a bar over every section's maturity) and what it still owes: open questions, active hypotheses, running experiments, experiments awaiting your decision, playtests, decisions.
+
+- **Concept**: working title, current status, the concept statement, genre, audience, selling points, world fiction, monetization, platform and scope, competition, objectives and progression, interactivity.
+- **Experience**, the whole: the fantasy, point of view, what the player should feel, the behaviours the design wants, what to avoid, the key moments, what keeps the player; and the visual and audio style.
+- **Loops**: each loop as a cycle of steps (drawn as a chain that feeds back into itself), its inputs and outputs, its feedback and when it fails.
+- **Systems**: combat, progression, economy… each with its own maturity (undefined, concept, hypothesis, prototyping, validated, production, revised), its intent, what is known, what is unknown, its current design in the present tense with numbers where they are known, and its links: loops, objects, implementation paths, questions, decisions, experiments. Every unknown has an **Ask** button that opens a question; nobody fills an unknown by guessing.
+- **Parts**: the game objects, one attribute per line as `name: type or range`.
+- **Questions**: what the design does not know yet (Q-001, Q-002…), each with its context and system; **Resolve** writes the decision that answers it (in the present tense), why, the evidence and the rejected alternatives. A resolved question stays, pointing at its decision.
+- **Decisions**: why the design is what it is (DEC-001…), each with what it was based on. Accepting an experiment also writes a decision, with its playtests as evidence, and resolves the question its hypothesis came from.
+
+**Save design** sends the current design to the service (it keeps a version); questions and decisions go at once. **Video game template** fills a small word-combat game to edit from. **Export to the repo** commits `game-design/` as linked Markdown, broadest first (`overview.md`, then `concept/`, `loops/`, `systems/`, `objects/`, `sections/`, and apart from the current design `questions/`, `decisions/`, `hypotheses/`, `experiments/`) plus `design.json`, the structured state, onto the managed branch `guild/design/<project>`, never into your checkout; merge it when you want it in `main`. `project add` reads it back from that branch or from a `game-design/` folder already in the repo. The CLI has the same: `found`, `roles`, `design <project> [get|template|export|system set]`, `question new|resolve`, `questions`, `decision new`, `hypothesis new`, `experiment new|start|accept|reject|iterate`, `playtests`.
+
+The dungeon only sees the guild's own events, never a harness's; every adapter translates to them. Lifecycle: `quest.*`, `task.*`, `attempt.*` (one per state, plus `attempt.finished` with the metrics), `workspace.ready`, `setup.*`, `session.started`, `session.resumed`, `session.closed`, `turn.started`, `turn.text`, `turn.completed`. From the agent: `agent.thinking`, `agent.working`, `agent.waiting` (once per change), `tool.started`, `tool.completed`, `file.changed`, `plan.updated`, `model.changed`, `permission.requested`, `permission.resolved`. From the guild: `candidate.committed` or `candidate.empty`, `verifier.started`, `verifier.finished`, `verification.finished`, `merge.started`, `merge.completed`, `merge.blocked`.
+
+`.guild/guild.toml`:
+
+```toml
+schema_version = 1
+
+[project]
+setup = ["pnpm", "install", "--frozen-lockfile"]   # run in each new worktree, optional
+
+[[members]]
+id = "aria"
+roles = ["implementer"]
+harness = "kiro"
+model = "claude-sonnet-5.5"                        # must be one the harness announces
+# mode = "vibe"                                    # Kiro: vibe, spec, plan, semantic_reviewer…
+
+[[verifiers]]
+id = "unit"
+argv = ["pnpm", "test", "--run"]
+required = true
+timeout_seconds = 300
+```
+
+Commands: `serve [--daemon] [--concurrency N] [--attempt-timeout MIN]`, `status`, `snapshot`, `stop`, `project add`, `found`, `roles`, `design`, `member add`, `models [kiro|mock]`, `quest new`, `task new`, `start`, `pause`, `resume`, `cancel-quest`, `accept [--integrate]`, `reject [--reason]`, `integrate`, `retry`, `cancel-task`, `cancel <attempt>`, `interrupt <attempt>`, `permission <attempt> <option-id|deny>`, `attempt <id>` (candidate, verifiers, transcript), `events [--follow] [--after SEQ] [--attempt ID]`. Run it without arguments for the details.
+
+Kiro runs over the Agent Client Protocol, `kiro-cli acp --agent-engine=v3`, one process per attempt in the attempt's worktree; the model is set with `session/set_config_option` and only an id the provider confirms counts as effective. Permission requests are Kiro's own (`session/request_permission`); the service never answers them by itself. After a restart its sessions are reopened with `session/load`. The `mock` harness writes a file and finishes, for trying the flow without a provider.
+
+**Codex** runs through `codex exec --json`, one process per turn in the attempt's worktree with Codex's `workspace-write` sandbox, and continues the same thread with `codex exec resume`; the model goes in as `-c model=…` (the account decides which ids it accepts; without one, the `model` of `~/.codex/config.toml`). Codex does not prompt for approvals in this mode, so the adapter reports permission requests as unsupported: the sandbox is the limit. **Claude Code** runs headless, `claude -p` with stream-json in and out, one process per session that takes several turns; its permission prompts reach the room (`--permission-prompt-tool stdio`) and are answered there, the session is reopened with `--resume` after a restart or a model change, and `sonnet`, `opus` and `haiku` are accepted as model ids besides full names. Both keep their stderr under the guild's `logs/`.
+
+Every adapter implements the same contract (`src/guild/harness/mod.rs`): probe its capabilities (sessions, resume, cancel, structured events, permissions, model discovery and switching, MCP, subagents, plan mode, screenshots, steering), create or resume a session, prompt, interrupt, stop, list and set models, answer a permission. The service and the dungeon only use that contract; nothing outside an adapter knows a harness's protocol, which is how the Codex and Claude Code adapters were added without touching the service or the rooms.
+
 ## Verify
 
 ```sh

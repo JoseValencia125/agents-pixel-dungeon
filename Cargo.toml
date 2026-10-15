@@ -11,7 +11,21 @@ default-run = "agents-pixel-dungeon"
 name = "agents-pixel-dungeon"
 path = "src/main.rs"
 
+# Guild: the work layer (quests, tasks, attempts, workspaces, harness
+# adapters) as a library both binaries use, and the service that runs it.
+[lib]
+name = "guild"
+path = "src/guild/lib.rs"
+
+[[bin]]
+name = "agents-pixel-dungeon-guild"
+path = "src/bin/guild.rs"
+
 [dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+toml = "0.8"
+sha2 = "0.10"
+ulid = "1"
 toml_edit = "=0.20.2"
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 egui = "0.31"

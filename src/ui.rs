@@ -1821,7 +1821,7 @@ pub enum EditorOutcome {
 }
 
 pub fn emblem_editor(ctx: &Context, editor: &mut EmblemEditor) -> EditorOutcome {
-    use crate::identity::{metal_apart, Pattern, Shape, Symbol, COLOURS};
+    use crate::identity::{lightness, metal_apart, Pattern, Shape, Symbol, COLOURS, SECONDARIES};
     let mut outcome = EditorOutcome::Open;
     let modal = egui::Modal::new(egui::Id::new("emblem-editor")).frame(Frame::popup(&ctx.style()).inner_margin(Margin::same(16))).show(ctx, |ui| {
         ui.set_width(420.0);
@@ -1856,11 +1856,24 @@ pub fn emblem_editor(ctx: &Context, editor: &mut EmblemEditor) -> EditorOutcome 
         section(ui, &tr("Color secundario"));
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-            for (i, (name, colour)) in crate::identity::METALS.iter().enumerate() {
+            for (i, (name, colour)) in SECONDARIES.iter().enumerate() {
                 let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());
                 ui.painter().rect_filled(rect.shrink(3.0), CornerRadius::same(4), *colour);
                 if editor.emblem.secondary == i { ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(2.0_f32, Color32::WHITE), egui::StrokeKind::Inside); }
                 if response.on_hover_text(*name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { editor.emblem.secondary = i; }
+            }
+        });
+        section(ui, &tr("Color del símbolo"));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            // First the automatic ink (dark or light, whichever reads on the field), then every colour.
+            let auto = editor.emblem.auto_ink();
+            for (choice, name, colour) in std::iter::once((None, tr("Automático"), auto)).chain(SECONDARIES.iter().enumerate().map(|(i, (n, c))| (Some(i), n.to_string(), *c))) {
+                let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());
+                ui.painter().rect_filled(rect.shrink(3.0), CornerRadius::same(4), colour);
+                if choice.is_none() { ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "A", FontId::monospace(fs(11.0)), if lightness(colour) > 0.55 { Color32::from_rgb(24, 20, 37) } else { Color32::WHITE }); }
+                if editor.emblem.charge == choice { ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(2.0_f32, Color32::WHITE), egui::StrokeKind::Inside); }
+                if response.on_hover_text(name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { editor.emblem.charge = choice; }
             }
         });
         let mut choice = |ui: &mut Ui, title: &str, count: usize, build: &dyn Fn(&mut crate::identity::Identity, usize), picked: &dyn Fn(&crate::identity::Identity) -> usize| {

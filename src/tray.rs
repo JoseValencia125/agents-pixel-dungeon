@@ -28,6 +28,10 @@ pub enum TrayAction {
     NotifyDone,
     Session(String),
     Demo,
+    /// The guild's quest board.
+    QuestBoard,
+    /// The guild window: found it, members and roles, the game design.
+    Guild,
     OpenHerdr,
     OpenAtStart,
     TextBigger,
@@ -152,6 +156,10 @@ fn build_menu(state: &MenuState) -> (Menu, HashMap<MenuId, TrayAction>) {
     let _ = sessions.append_items(&[&PredefinedMenuItem::separator(), &demo]);
     add(&demo, TrayAction::Demo);
 
+    let board = item(&tr("Tablón de misiones"));
+    add(&board, TrayAction::QuestBoard);
+    let studio = item(&tr("Gremio"));
+    add(&studio, TrayAction::Guild);
     let open_herdr = item(&tr("Abrir Herdr"));
     let open_at_start = check(&tr("Abrir Herdr al iniciar"), true, state.open_at_start);
     add(&open_herdr, TrayAction::OpenHerdr);
@@ -185,7 +193,7 @@ fn build_menu(state: &MenuState) -> (Menu, HashMap<MenuId, TrayAction>) {
 
     let about = item(&tr("Acerca de Agents Pixel Dungeon"));
     let quit = item(&tr("Salir"));
-    let _ = menu.append_items(&[&sounds, &notify, &text, &console, &rooms, &PredefinedMenuItem::separator(), &sessions, &open_herdr, &open_at_start, &PredefinedMenuItem::separator(), &about, &quit]);
+    let _ = menu.append_items(&[&sounds, &notify, &text, &console, &rooms, &PredefinedMenuItem::separator(), &board, &studio, &sessions, &open_herdr, &open_at_start, &PredefinedMenuItem::separator(), &about, &quit]);
     add(&about, TrayAction::About);
     add(&quit, TrayAction::Quit);
     (menu, actions)

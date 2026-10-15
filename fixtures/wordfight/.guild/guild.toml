@@ -1,0 +1,13 @@
+# The guild's view of this fixture: how to play it headless.
+[project]
+id = "wordfight"
+name = "Wordfight"
+
+[playtest]
+argv = ["python3", "wordfight.py", "profile={profile}", "seed={seed}", "runs={runs}"]
+timeout_seconds = 120
+
+[[verifiers]]
+id = "balance"
+argv = ["python3", "-c", "import json; b=json.load(open('balance.json')); assert 0.5 <= b['length_multiplier'] <= 3 and 0.5 <= b['semantic_multiplier'] <= 3"]
+required = true

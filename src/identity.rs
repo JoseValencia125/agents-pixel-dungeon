@@ -56,7 +56,7 @@ impl Kind {
             Kind::Systems => &[Gear, Anvil],
             Kind::Web => &[Scroll, Bolt, Leaf],
             Kind::Infra => &[Crate, Tower],
-            Kind::Unknown => &Symbol::ALL,
+            Kind::Unknown => &Symbol::CHARGES,
         }
     }
 
@@ -75,20 +75,39 @@ impl Kind {
     }
 }
 
-/// The emblem's charge, drawn as 6×6 pixels (`Symbol::pixels`).
+/// The emblem's charge, drawn as 6×6 pixels (`Symbol::pixels`): a figure,
+/// or a letter (the repo's initial, say) chosen by hand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Symbol {
     Gear, Anvil, Snake, Flask, Gem, Crown, Phone, Bolt, Sword, Heart,
     Scroll, Leaf, Book, Quill, Crate, Tower, Star, Moon, Eye,
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
 }
 
 impl Symbol {
-    pub const ALL: [Symbol; 19] = [
+    /// The figures a repo's hash draws from.
+    pub const CHARGES: [Symbol; 19] = [
         Symbol::Gear, Symbol::Anvil, Symbol::Snake, Symbol::Flask, Symbol::Gem, Symbol::Crown, Symbol::Phone,
         Symbol::Bolt, Symbol::Sword, Symbol::Heart, Symbol::Scroll, Symbol::Leaf, Symbol::Book, Symbol::Quill,
         Symbol::Crate, Symbol::Tower, Symbol::Star, Symbol::Moon, Symbol::Eye,
     ];
+    /// The letters, only ever chosen in the editor.
+    pub const LETTERS: [Symbol; 26] = [
+        Symbol::A, Symbol::B, Symbol::C, Symbol::D, Symbol::E, Symbol::F, Symbol::G,
+        Symbol::H, Symbol::I, Symbol::J, Symbol::K, Symbol::L, Symbol::M, Symbol::N,
+        Symbol::O, Symbol::P, Symbol::Q, Symbol::R, Symbol::S, Symbol::T, Symbol::U,
+        Symbol::V, Symbol::W, Symbol::X, Symbol::Y, Symbol::Z,
+    ];
+    /// Every charge, figures first, as the editor lists them.
+    pub const ALL: [Symbol; 45] = {
+        let mut all = [Symbol::Gear; 45];
+        let mut i = 0;
+        while i < Symbol::CHARGES.len() { all[i] = Symbol::CHARGES[i]; i += 1; }
+        let mut j = 0;
+        while j < Symbol::LETTERS.len() { all[Symbol::CHARGES.len() + j] = Symbol::LETTERS[j]; j += 1; }
+        all
+    };
 
     /// Rows of the 6×6 charge, '#' inked.
     pub fn pixels(self) -> [&'static str; 6] {
@@ -112,6 +131,32 @@ impl Symbol {
             Symbol::Star => ["..##..", "..##..", "######", ".####.", ".#..#.", "#....#"],
             Symbol::Moon => ["..###.", ".##...", "##....", "##....", ".##...", "..###."],
             Symbol::Eye => ["......", ".####.", "#.##.#", ".####.", "......", "......"],
+            Symbol::A => [".####.", "##..##", "##..##", "######", "##..##", "##..##"],
+            Symbol::B => ["#####.", "##..##", "#####.", "##..##", "##..##", "#####."],
+            Symbol::C => [".#####", "##....", "##....", "##....", "##....", ".#####"],
+            Symbol::D => ["#####.", "##..##", "##..##", "##..##", "##..##", "#####."],
+            Symbol::E => ["######", "##....", "#####.", "##....", "##....", "######"],
+            Symbol::F => ["######", "##....", "#####.", "##....", "##....", "##...."],
+            Symbol::G => [".#####", "##....", "##.###", "##..##", "##..##", ".#####"],
+            Symbol::H => ["##..##", "##..##", "######", "##..##", "##..##", "##..##"],
+            Symbol::I => ["######", "..##..", "..##..", "..##..", "..##..", "######"],
+            Symbol::J => ["..####", "....##", "....##", "....##", "##..##", ".####."],
+            Symbol::K => ["##..##", "##.##.", "####..", "####..", "##.##.", "##..##"],
+            Symbol::L => ["##....", "##....", "##....", "##....", "##....", "######"],
+            Symbol::M => ["#....#", "##..##", "######", "#.##.#", "#....#", "#....#"],
+            Symbol::N => ["##..##", "###.##", "######", "##.###", "##..##", "##..##"],
+            Symbol::O => [".####.", "##..##", "##..##", "##..##", "##..##", ".####."],
+            Symbol::P => ["#####.", "##..##", "##..##", "#####.", "##....", "##...."],
+            Symbol::Q => [".####.", "##..##", "##..##", "##.##.", ".####.", "....##"],
+            Symbol::R => ["#####.", "##..##", "##..##", "#####.", "##.##.", "##..##"],
+            Symbol::S => [".#####", "##....", ".####.", "....##", "....##", "#####."],
+            Symbol::T => ["######", "..##..", "..##..", "..##..", "..##..", "..##.."],
+            Symbol::U => ["##..##", "##..##", "##..##", "##..##", "##..##", ".####."],
+            Symbol::V => ["##..##", "##..##", "##..##", "##..##", ".####.", "..##.."],
+            Symbol::W => ["#....#", "#....#", "#.##.#", "#.##.#", "######", ".#..#."],
+            Symbol::X => ["##..##", "##..##", ".####.", ".####.", "##..##", "##..##"],
+            Symbol::Y => ["##..##", "##..##", ".####.", "..##..", "..##..", "..##.."],
+            Symbol::Z => ["######", "....##", "...##.", "..##..", ".##...", "######"],
         }
     }
 }
@@ -160,9 +205,12 @@ impl Pattern {
 }
 
 /// The field's colours: bright enough on the app's dark background, from
-/// the Endesga-32 palette the rooms are drawn with. The hash picks among
-/// these, never any RGB.
-pub const COLOURS: [(&str, Color32); 12] = [
+/// the Endesga-32 palette the rooms are drawn with, plus a burgundy and the
+/// brand colours of Saludtech (its primary teal blue) and Proser (its blue).
+/// The hash picks among the first `DRAWN`, never any RGB; the brand colours
+/// after them are chosen by hand in the editor, or taken when the drawn
+/// ones are all in use.
+pub const COLOURS: [(&str, Color32); 15] = [
     ("red", Color32::from_rgb(228, 59, 68)),
     ("orange", Color32::from_rgb(247, 118, 34)),
     ("amber", Color32::from_rgb(254, 174, 52)),
@@ -175,7 +223,13 @@ pub const COLOURS: [(&str, Color32); 12] = [
     ("pink", Color32::from_rgb(246, 117, 122)),
     ("steel", Color32::from_rgb(139, 155, 180)),
     ("tan", Color32::from_rgb(228, 166, 114)),
+    ("burgundy", Color32::from_rgb(128, 0, 32)),
+    ("saludtech", Color32::from_rgb(40, 83, 107)),
+    ("proser", Color32::from_rgb(0, 81, 160)),
 ];
+
+/// How many of `COLOURS`, from the first, a repo's hash draws from.
+pub const DRAWN: usize = 12;
 
 /// The partition's colours: heraldry's metals and dark tinctures, so the
 /// second colour always stands apart from the first (`identity` only takes
@@ -189,6 +243,19 @@ pub const METALS: [(&str, Color32); 6] = [
     ("wine", Color32::from_rgb(115, 62, 57)),
 ];
 
+/// Every colour the partition and the charge can take: the metals first
+/// (the hash only draws from those), then the field's colours. Indexed by
+/// `Identity::secondary` and `Identity::charge`; the metals keep their
+/// `METALS` indices.
+pub const SECONDARIES: [(&str, Color32); METALS.len() + COLOURS.len()] = {
+    let mut all = [("", Color32::BLACK); METALS.len() + COLOURS.len()];
+    let mut i = 0;
+    while i < METALS.len() { all[i] = METALS[i]; i += 1; }
+    let mut j = 0;
+    while j < COLOURS.len() { all[METALS.len() + j] = COLOURS[j]; j += 1; }
+    all
+};
+
 /// A repo's emblem and colours.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
@@ -197,8 +264,11 @@ pub struct Identity {
     pub kind: Kind,
     /// Index in `COLOURS`.
     pub primary: usize,
-    /// Index in `METALS`.
+    /// Index in `SECONDARIES`.
     pub secondary: usize,
+    /// The charge's colour, an index in `SECONDARIES`; None for the ink
+    /// that reads on the field (`ink`).
+    pub charge: Option<usize>,
     pub symbol: Symbol,
     pub pattern: Pattern,
     pub shape: Shape,
@@ -206,10 +276,19 @@ pub struct Identity {
 
 impl Identity {
     pub fn primary_color(&self) -> Color32 { COLOURS[self.primary].1 }
-    pub fn secondary_color(&self) -> Color32 { METALS[self.secondary].1 }
+    pub fn secondary_color(&self) -> Color32 { SECONDARIES[self.secondary].1 }
 
-    /// The charge's ink: dark on a light field, light on a dark one.
+    /// The charge's colour: the chosen one, else dark on a light field and
+    /// light on a dark one.
     pub fn ink(&self) -> Color32 {
+        match self.charge {
+            Some(charge) => SECONDARIES[charge].1,
+            None => self.auto_ink(),
+        }
+    }
+
+    /// The charge's colour when none is chosen.
+    pub fn auto_ink(&self) -> Color32 {
         if lightness(self.primary_color()) > 0.55 { Color32::from_rgb(24, 20, 37) } else { Color32::WHITE }
     }
 }
@@ -219,7 +298,11 @@ impl Identity {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedEmblem {
     pub color: String,
+    /// A `SECONDARIES` name.
     pub metal: String,
+    /// The charge's colour, a `SECONDARIES` name; none for the automatic ink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charge: Option<String>,
     pub symbol: Symbol,
     pub pattern: Pattern,
     pub shape: Shape,
@@ -231,17 +314,17 @@ pub struct SavedEmblem {
 /// every colour taken, the least used one.
 pub fn free_colour(key: &str, wanted: usize, taken: &[usize]) -> usize {
     if !taken.contains(&wanted) { return wanted; }
-    let start = (draw(stable_hash(key), 6) % COLOURS.len() as u64) as usize;
-    let order: Vec<usize> = (0..COLOURS.len()).map(|i| (start + i) % COLOURS.len()).collect();
+    let start = (draw(stable_hash(key), 6) % DRAWN as u64) as usize;
+    let order: Vec<usize> = (0..DRAWN).map(|i| (start + i) % DRAWN).chain(DRAWN..COLOURS.len()).collect();
     order.iter().copied().find(|c| !taken.contains(c))
         .unwrap_or_else(|| order.iter().copied().min_by_key(|c| taken.iter().filter(|t| *t == c).count()).unwrap_or(wanted))
 }
 
-/// The second tincture for `primary`: `metal` when it stands apart enough,
-/// else the first one that does.
+/// The second tincture for `primary`: `metal` (a `SECONDARIES` index) when
+/// it stands apart enough, else the first metal that does.
 pub fn metal_apart(primary: usize, metal: usize) -> usize {
     let light = lightness(COLOURS[primary].1);
-    if (lightness(METALS[metal].1) - light).abs() > 0.3 { return metal; }
+    if (lightness(SECONDARIES[metal].1) - light).abs() > 0.3 { return metal; }
     (0..METALS.len()).find(|&i| (lightness(METALS[i].1) - light).abs() > 0.3).unwrap_or(metal)
 }
 
@@ -255,7 +338,7 @@ pub fn spread_colours(kept: &mut std::collections::BTreeMap<String, SavedEmblem>
         let free = free_colour(key, colour, &taken);
         if free != colour {
             emblem.color = COLOURS[free].0.into();
-            if let Some(metal) = METALS.iter().position(|(n, _)| *n == emblem.metal) { emblem.metal = METALS[metal_apart(free, metal)].0.into(); }
+            if let Some(metal) = SECONDARIES.iter().position(|(n, _)| *n == emblem.metal) { emblem.metal = SECONDARIES[metal_apart(free, metal)].0.into(); }
             changed = true;
         }
         taken.push(free);
@@ -270,7 +353,7 @@ impl SavedEmblem {
     }
 
     pub fn of(emblem: &Identity) -> SavedEmblem {
-        SavedEmblem { color: COLOURS[emblem.primary].0.into(), metal: METALS[emblem.secondary].0.into(), symbol: emblem.symbol, pattern: emblem.pattern, shape: emblem.shape, kind: emblem.kind }
+        SavedEmblem { color: COLOURS[emblem.primary].0.into(), metal: SECONDARIES[emblem.secondary].0.into(), charge: emblem.charge.map(|c| SECONDARIES[c].0.into()), symbol: emblem.symbol, pattern: emblem.pattern, shape: emblem.shape, kind: emblem.kind }
     }
 
     /// The emblem back, for the repo `meta` describes (None if its colours
@@ -281,7 +364,8 @@ impl SavedEmblem {
             name: meta.name.clone(),
             kind: self.kind,
             primary: COLOURS.iter().position(|(n, _)| *n == self.color)?,
-            secondary: METALS.iter().position(|(n, _)| *n == self.metal)?,
+            secondary: SECONDARIES.iter().position(|(n, _)| *n == self.metal)?,
+            charge: self.charge.as_ref().and_then(|c| SECONDARIES.iter().position(|(n, _)| n == c)),
             symbol: self.symbol,
             pattern: self.pattern,
             shape: self.shape,
@@ -298,7 +382,9 @@ pub struct ProjectOverride {
     pub name: Option<String>,
     /// A `COLOURS` name.
     pub color: Option<String>,
-    /// A charge's name ("gear", "quill"…).
+    /// The charge's colour: a `SECONDARIES` name.
+    pub charge: Option<String>,
+    /// A charge's name ("gear", "quill", "a"…).
     pub symbol: Option<Symbol>,
     /// The kind, when the files mislead (it changes the charge's family).
     pub kind: Option<Kind>,
@@ -319,7 +405,7 @@ fn draw(hash: u64, salt: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn lightness(c: Color32) -> f32 {
+pub fn lightness(c: Color32) -> f32 {
     (0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32) / 255.0
 }
 
@@ -330,7 +416,7 @@ fn lightness(c: Color32) -> f32 {
 /// per owner) while the rest stays per repo.
 pub fn identity(meta: &ProjectMeta) -> Identity {
     let hash = stable_hash(&meta.key);
-    let primary = (draw(hash, 1) % COLOURS.len() as u64) as usize;
+    let primary = (draw(hash, 1) % DRAWN as u64) as usize;
     let light = lightness(COLOURS[primary].1);
     let apart: Vec<usize> = (0..METALS.len()).filter(|&i| (lightness(METALS[i].1) - light).abs() > 0.3).collect();
     let secondary = apart[(draw(hash, 2) % apart.len() as u64) as usize];
@@ -339,6 +425,7 @@ pub fn identity(meta: &ProjectMeta) -> Identity {
         key: meta.key.clone(),
         name: meta.name.clone(),
         kind: meta.kind,
+        charge: None,
         primary,
         secondary,
         symbol: family[(draw(hash, 3) % family.len() as u64) as usize],
@@ -358,11 +445,9 @@ pub fn apply_override(meta: &ProjectMeta, base: Identity, choice: Option<&Projec
     if let Some(name) = choice.name.as_ref().filter(|n| !n.trim().is_empty()) { emblem.name = name.trim().to_string(); }
     if let Some(primary) = choice.color.as_ref().and_then(|c| COLOURS.iter().position(|(n, _)| n.eq_ignore_ascii_case(c.trim()))) {
         emblem.primary = primary;
-        let light = lightness(COLOURS[primary].1);
-        if (lightness(METALS[emblem.secondary].1) - light).abs() <= 0.3 {
-            emblem.secondary = (0..METALS.len()).find(|&i| (lightness(METALS[i].1) - light).abs() > 0.3).unwrap_or(emblem.secondary);
-        }
+        emblem.secondary = metal_apart(primary, emblem.secondary);
     }
+    if let Some(charge) = choice.charge.as_ref().and_then(|c| SECONDARIES.iter().position(|(n, _)| n.eq_ignore_ascii_case(c.trim()))) { emblem.charge = Some(charge); }
     if let Some(symbol) = choice.symbol { emblem.symbol = symbol; }
     emblem
 }
@@ -526,9 +611,9 @@ mod tests {
     #[test]
     fn override_wins() {
         let m = meta("someone/verbrawl", Kind::Game);
-        let choice = ProjectOverride { name: Some("Verbrawl".into()), color: Some("Yellow".into()), symbol: Some(Symbol::Quill), kind: None };
+        let choice = ProjectOverride { name: Some("Verbrawl".into()), color: Some("Yellow".into()), charge: Some("Proser".into()), symbol: Some(Symbol::Quill), kind: None };
         let e = apply_override(&m, identity(&m), Some(&choice));
-        assert_eq!((e.name.as_str(), COLOURS[e.primary].0, e.symbol), ("Verbrawl", "yellow", Symbol::Quill));
+        assert_eq!((e.name.as_str(), COLOURS[e.primary].0, e.symbol, e.ink()), ("Verbrawl", "yellow", Symbol::Quill, Color32::from_rgb(0, 81, 160)));
         assert!((lightness(e.primary_color()) - lightness(e.secondary_color())).abs() > 0.3);
         assert_eq!(apply_override(&m, identity(&m), None), identity(&m));
         let parsed: ProjectOverride = serde_json::from_str(r#"{"symbol":"gear","kind":"python"}"#).unwrap();
@@ -552,18 +637,18 @@ mod tests {
     #[test]
     fn colours_stay_apart() {
         let mut kept = std::collections::BTreeMap::new();
-        for i in 0..12 {
+        for i in 0..COLOURS.len() {
             let m = meta(&format!("o/r{i}"), Kind::Unknown);
             let e = identity(&m);
             let taken = SavedEmblem::colours_of(kept.values());
             let mut saved = SavedEmblem::of(&e);
             let free = free_colour(&m.key, e.primary, &taken);
             saved.color = COLOURS[free].0.into();
-            saved.metal = METALS[metal_apart(free, e.secondary)].0.into();
+            saved.metal = SECONDARIES[metal_apart(free, e.secondary)].0.into();
             kept.insert(m.key.clone(), saved);
         }
         let colours: HashSet<String> = kept.values().map(|e| e.color.clone()).collect();
-        assert_eq!(colours.len(), 12, "twelve repos, twelve colours");
+        assert_eq!(colours.len(), COLOURS.len(), "as many repos as colours, each with its own");
         // Two kept with the same colour: the second by key moves.
         let mut twins = std::collections::BTreeMap::new();
         let base = SavedEmblem::of(&identity(&meta("a/one", Kind::Unknown)));
