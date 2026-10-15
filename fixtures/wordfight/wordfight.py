@@ -13,6 +13,9 @@ Profiles (how a synthetic player chooses):
   optimizer  the word with the highest immediate power
   explorer   prefers a semantic match, then the shortest word that still hits
   human      you: the hand is printed, you type the number of a word
+  agent      an AI player, through the guild's agent protocol: each round
+             one {"type": "agent.observation", ...} line on stdout, one
+             {"action": "<id>"} line read from stdin
 
 Telemetry: one JSON object per line,
   {"type": "game.event", "runId": "...", "event": "...", "data": {...}}
@@ -63,6 +66,26 @@ def ask_human(hand, weakness, hp, rounds, rare_budget, balance):
         print("Type a number from the list.")
 
 
+def ask_agent(hand, weakness, hp, rounds, rare_budget, balance):
+    text = (f"Round {rounds} of 12. Enemy HP {hp:.0f}, weak to {weakness}. Rare letters left: {rare_budget} "
+            f"(rare letters are {''.join(sorted(RARE))}; a word needing more than you have fizzles for 1 damage).")
+    actions = [{"id": str(i), "label": f"{word} ({category}, {len(word)} letters)"} for i, (word, category) in enumerate(hand, 1)]
+    state = {"round": rounds, "enemy_hp": round(hp, 2), "weakness": weakness, "rare_letters_left": rare_budget,
+             "hand": [{"word": w, "category": c, "length": len(w), "rare_letters": sum(1 for ch in w if ch in RARE)} for w, c in hand]}
+    print(json.dumps({"type": "agent.observation", "turn": rounds, "text": text, "state": state, "actions": actions}), flush=True)
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    try:
+        picked = str(json.loads(line).get("action", ""))
+    except ValueError:
+        picked = ""
+    for a, w in zip(actions, hand):
+        if a["id"] == picked:
+            return w
+    return hand[0]
+
+
 def choose(profile, hand, weakness, balance, rng):
     if profile == "greedy":
         return max(hand, key=lambda w: (len(w[0]), w[0]))
@@ -91,8 +114,9 @@ def run(profile, seed, balance, emit):
         hand = rng.sample(WORDS, 5)
         emit(run_id, "round.started", {"round": rounds, "weakness": weakness, "hp": hp})
         emit(run_id, "choice.presented", {"options": [w for w, _ in hand], "weakness": weakness})
-        if profile == "human":
-            picked = ask_human(hand, weakness, hp, rounds, rare_budget, balance)
+        if profile in ("human", "agent"):
+            ask = ask_human if profile == "human" else ask_agent
+            picked = ask(hand, weakness, hp, rounds, rare_budget, balance)
             if picked is None:
                 emit(run_id, "run.failed", {"rounds": rounds, "score": round(score, 2), "reason": "quit"})
                 return

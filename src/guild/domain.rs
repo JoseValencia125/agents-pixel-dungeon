@@ -59,6 +59,10 @@ pub struct Project {
     /// `GUILD_TELEMETRY` names the file the game appends its events to.
     #[serde(default)]
     pub play: Option<PlaytestRunner>,
+    /// How an AI player plays it: the game speaks the agent protocol on
+    /// its stdio (see `aiplay`); `{seed}` is filled in.
+    #[serde(default)]
+    pub ai_play: Option<PlaytestRunner>,
     pub created_at: String,
 }
 
@@ -524,6 +528,8 @@ pub struct Snapshot {
     pub playtests: Vec<crate::experiment::Playtest>,
     #[serde(default)]
     pub observations: Vec<crate::experiment::Observation>,
+    #[serde(default)]
+    pub findings: Vec<crate::aiplay::Finding>,
     #[serde(default)]
     pub designs: Vec<crate::design::GameDesign>,
     #[serde(default)]

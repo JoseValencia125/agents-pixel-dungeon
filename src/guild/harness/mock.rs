@@ -33,12 +33,16 @@ struct MockState {
     resumed: Vec<String>,
 }
 
+pub type PlayerFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
 pub struct MockHarness {
     behaviour: Mutex<MockBehaviour>,
     /// What the mock answers when the prompt is a judge's (it lists candidates).
     judge_reply: Mutex<Option<String>>,
     /// What the mock answers when the prompt is an analyst's (it lists metrics).
     analysis_reply: Mutex<Option<String>>,
+    /// How the mock answers an AI player's turn (the prompt has "## Your move").
+    player: Mutex<Option<PlayerFn>>,
     /// Milliseconds the turn takes, so rooms show working for a moment.
     pub delay_ms: u64,
     state: Arc<Mutex<MockState>>,
@@ -46,11 +50,13 @@ pub struct MockHarness {
 
 impl MockHarness {
     pub fn new(behaviour: MockBehaviour) -> MockHarness {
-        MockHarness { behaviour: Mutex::new(behaviour), judge_reply: Mutex::new(None), analysis_reply: Mutex::new(None), delay_ms: 50, state: Arc::default() }
+        MockHarness { behaviour: Mutex::new(behaviour), judge_reply: Mutex::new(None), analysis_reply: Mutex::new(None), player: Mutex::new(None), delay_ms: 50, state: Arc::default() }
     }
     pub fn set_behaviour(&self, b: MockBehaviour) { *self.behaviour.lock().unwrap() = b; }
     /// Answer judge prompts with this text (a JSON block naming a winner).
     pub fn set_judge_reply(&self, text: impl Into<String>) { *self.judge_reply.lock().unwrap() = Some(text.into()); }
+    /// Play AI-player turns with this: it gets the prompt, returns the answer.
+    pub fn set_player(&self, f: impl Fn(&str) -> String + Send + Sync + 'static) { *self.player.lock().unwrap() = Some(Arc::new(f)); }
     pub fn set_analysis_reply(&self, text: impl Into<String>) { *self.analysis_reply.lock().unwrap() = Some(text.into()); }
     /// Session ids that were reopened through `resume_session`.
     pub fn resumed(&self) -> Vec<String> { self.state.lock().unwrap().resumed.clone() }
@@ -107,6 +113,9 @@ impl HarnessAdapter for MockHarness {
         }
         if text.contains("## Playtest metrics") {
             if let Some(reply) = self.analysis_reply.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(reply); }
+        }
+        if text.contains("## Your move") || text.contains("The game is over") || text.contains("could not be read") {
+            if let Some(player) = self.player.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(player(text)); }
         }
         if let MockBehaviour::WriteParams { file } = &behaviour {
             let params = text.lines().find_map(|l| l.trim().strip_prefix("GUILD_PARAMS:")).map(|s| s.trim().to_string()).unwrap_or_else(|| "{}".into());
