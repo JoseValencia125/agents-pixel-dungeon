@@ -408,12 +408,22 @@ mod tests {
     #[test]
     fn the_laboratory_shows_the_decision_to_take_and_play_shows_the_session() {
         let lab = texts_on(Tab::Laboratory);
-        for needle in ["decisión requerida", "Problema:", "Analista:", "★ semantic 1.6", "flat length", "▶ Jugar", "Adoptar", "Aceptar", "Iterar", "Rechazar", "2 humanos"] {
-            assert!(lab.contains(needle), "laboratory lacks {needle:?}:\n{lab}");
+        // The needles go through the same translation as the UI, so the test passes in any locale.
+        let lab_needles = [
+            tr("decisión requerida"), trf("Problema: {}", &[&""]), trf("Analista: {}{}", &[&"", &""]),
+            "★ semantic 1.6".into(), "flat length".into(), tr("▶ Jugar"), tr("Adoptar"), tr("Aceptar"), tr("Iterar"), tr("Rechazar"),
+            trf("Evidencia: {} playtests sintéticos · {} humanos · {} observaciones", &[&3, &2, &0]),
+        ];
+        for needle in &lab_needles {
+            assert!(lab.contains(needle.as_str()), "laboratory lacks {needle:?}:\n{lab}");
         }
         let play = texts_on(Tab::Play);
-        for needle in ["▶ Jugar la build actual", "En juego", "Gran momento", "Terminar sesión", "Observaciones (3)", "→ Q-001", "→ Pregunta", "Observado vs deseado"] {
-            assert!(play.contains(needle), "play lacks {needle:?}:\n{play}");
+        let play_needles = [
+            tr("▶ Jugar la build actual"), tr("En juego"), tr("Gran momento"), tr("Terminar sesión"), trf("Observaciones ({})", &[&3]),
+            "→ Q-001".into(), tr("→ Pregunta"), tr("Observado vs deseado"),
+        ];
+        for needle in &play_needles {
+            assert!(play.contains(needle.as_str()), "play lacks {needle:?}:\n{play}");
         }
     }
 
