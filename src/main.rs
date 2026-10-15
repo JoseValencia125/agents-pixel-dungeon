@@ -757,10 +757,12 @@ impl eframe::App for App {
             }
         }
         if std::env::var("HPD_TEST_DIFF").is_ok() && now > 1.0 && now < 1.2 { self.guild.diff_open = true; }
-        // HPD_TEST_SHOT=<file.png>: save what the window shows after 3 s, for
-        // captures when the screen cannot be grabbed (another space is full screen).
+        // HPD_TEST_SHOT=<file.png>: save what the window shows after 3 s (or
+        // HPD_TEST_SHOT_AT seconds), for captures when the screen cannot be
+        // grabbed (another space is full screen).
         if let Ok(path) = std::env::var("HPD_TEST_SHOT") {
-            if now > 3.0 && !self.shot_asked {
+            let at = std::env::var("HPD_TEST_SHOT_AT").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(3.0);
+            if now > at && !self.shot_asked {
                 self.shot_asked = true;
                 ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
             }

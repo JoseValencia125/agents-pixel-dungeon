@@ -4,7 +4,7 @@
 //! wanders; status changes walk the hero out through the door and into the new room.
 //! Animation is driven by elapsed time, so Reduce Motion simply stops it.
 
-use crate::assets::{Assets, Sprite};
+use crate::assets::{Assets, Sprite, GIT_TOME_FRAME, GIT_TOME_HERO};
 use crate::herdr::{harness_for, Agent};
 use crate::identity::{Identity, ProjectMeta, ProjectOverride};
 use crate::l10n::tr;
@@ -289,8 +289,8 @@ enum StepKind {
     Act { station: &'static str, face: f32, pose: Pose },
     /// Read a book or a scroll at a station.
     Read { station: &'static str, scroll: bool, seconds: f32 },
-    /// Keep the git ledger: heave a huge tome onto the table, open it,
-    /// write, then close it and carry it away.
+    /// Keep the git ledger: set a huge tome flat on the desk, open it,
+    /// write and turn its pages, then close it and carry it away.
     Git { station: &'static str },
     /// Look left and right (wandering).
     Look,
@@ -922,13 +922,12 @@ impl Room {
                 self.set_pose(Pose::Idle(0.6));
             }
             StepKind::Git { station } => {
-                // Facing the table: still as it reaches for the tome and
-                // sets it down, hands busy (Work) while it writes, still
-                // again as it closes the book and carries it off.
+                // Facing the table. The body stays calm (idle breathing) —
+                // the writing is carried by the drawn arm and quill over the
+                // ledger, not the harness's generic work frames.
                 self.station = station;
                 self.facing = 1.0;
-                let writing = e > 2.0 && e < dur - 1.8;
-                self.set_pose(if writing { Pose::Work(0.22) } else { Pose::Idle(0.5) });
+                self.set_pose(Pose::Idle(0.5));
             }
             StepKind::Look => {
                 self.facing = if e < 0.5 { -1.0 } else if e < 1.0 { 1.0 } else { -1.0 };
@@ -996,44 +995,46 @@ impl Room {
         (pos, None, book)
     }
 
-    /// The huge git ledger while the hero keeps it, as (sprite, size, offset
-    /// from the hero's centre, tilt). It rises from below the table, opens,
-    /// the hero writes a few lines, then it closes and is carried back down.
-    fn git_tome(&self) -> Option<(&'static str, Vec2, Vec2, f32)> {
+    /// The huge git ledger while the hero keeps it, as (frame of the
+    /// ledger strip, how far it is raised off the desk in points). It lies
+    /// flat on the desktop in front of the hero: set down shut, opened, then
+    /// written in stroke by stroke, a page turned whenever two lines are
+    /// done, and at last shut and lifted away. The strip's arm frames carry
+    /// the quill, so the arm moves with the frame.
+    fn git_tome(&self) -> Option<(usize, f32)> {
         if self.in_transition { return None; }
         let runner = self.runner.as_ref()?;
         let (step, e) = runner.current()?;
         let StepKind::Git { .. } = step.kind else { return None };
         let dur = step.dur.max(0.001);
-        let big = vec2(44.0, 34.0); // the open spread, really large
-        let thick = vec2(34.0, 26.0); // the closed tome
-        let rest = pos2(16.0, 2.0); // where it sits on the table, before the hero
-        let down = pos2(8.0, 24.0); // held low, just clearing the table edge
+        let lift = 10.0; // how far it is raised while carried on or off
         // Timeline over `dur` (default 7.2 s).
         let open_at = 1.2; // tome placed and swung open
         let close_at = dur - 1.8; // writing done, book shut
         let away_at = dur - 1.0; // lifted off the table again
         if e < open_at {
-            // Heave the closed tome up from below, straightening as it rises.
+            // Lower the shut tome onto the desk from a little above it.
             let q = (e / open_at).clamp(0.0, 1.0);
-            let pos = pos2(lerp(down.x, rest.x, q), lerp(down.y, rest.y, q));
-            Some(("tome_closed", thick, pos.to_vec2(), lerp(0.18, 0.0, q)))
+            Some((0, -lift * (1.0 - q)))
         } else if e < close_at {
-            // Open on the table; the hero writes, a fresh line of ink coming
-            // and going, with a faint bob of the quill.
-            let w = e - open_at;
-            let writing = (w / 0.5) as i32 % 2 == 1;
-            let bob = -0.6 * (std::f32::consts::TAU * w / 0.9).sin().abs();
-            let name = if writing { "tome_open_write" } else { "tome_open" };
-            Some((name, big, vec2(rest.x, rest.y + bob), 0.0))
+            // Open: a breath over the fresh spread, six strokes of the quill
+            // (two lines on the right-hand page), then the written leaf is
+            // lifted, stood up over the spine and laid down on the left.
+            const BEATS: [(usize, f32); 11] = [(1, 0.3), (2, 0.22), (3, 0.2), (4, 0.26), (5, 0.22), (6, 0.2), (7, 0.3), (8, 0.11), (9, 0.11), (10, 0.11), (11, 0.14)];
+            let cycle: f32 = BEATS.iter().map(|b| b.1).sum();
+            let mut p = (e - open_at) % cycle;
+            for (frame, beat) in BEATS {
+                if p < beat { return Some((frame, 0.0)); }
+                p -= beat;
+            }
+            Some((1, 0.0))
         } else if e < away_at {
-            // Shut it, resting a moment on the table.
-            Some(("tome_closed", thick, rest.to_vec2(), 0.0))
+            // Shut it, resting a moment on the desk.
+            Some((0, 0.0))
         } else {
-            // Carry it back down below the table edge.
+            // Lift it back up off the desk.
             let q = ((e - away_at) / (dur - away_at)).clamp(0.0, 1.0);
-            let pos = pos2(lerp(rest.x, down.x, q), lerp(rest.y, down.y, q));
-            Some(("tome_closed", thick, pos.to_vec2(), lerp(0.0, 0.18, q)))
+            Some((0, -lift * q))
         }
     }
 
@@ -1266,12 +1267,6 @@ impl Room {
                 let prop = assets.prop(name);
                 draw_sprite(&clipped, prop, pos2(hero_at.x + offset.x, hero_at.y + offset.y), size, false, 0.0, Color32::WHITE);
             }
-            // The git ledger: a huge tome the hero heaves onto the table in
-            // front of it, opens, writes in, then closes and carries off.
-            if let Some((name, size, offset, angle)) = self.git_tome() {
-                let prop = assets.prop(name);
-                draw_sprite(&clipped, prop, pos2(hero_at.x + offset.x, hero_at.y + offset.y), size, false, angle, Color32::WHITE);
-            }
             if !self.in_transition {
                 match style.status {
                     "blocked" => {
@@ -1311,6 +1306,15 @@ impl Room {
         // The room's front layer (the desk), over the hero.
         if let Some(front) = assets.room(&format!("{background}_front")) {
             clipped.image(front.tex, f, front.uv, tint);
+        }
+        // The git ledger, on the desktop (so over the desk's front layer),
+        // drawn at the hero's scale and laid out around where it stands; the
+        // hero's arm and quill over it, frame for frame.
+        if let Some((frame, raised)) = self.git_tome() {
+            let corner = pos2(hero_at.x - GIT_TOME_HERO.x * 2.0, hero_at.y - GIT_TOME_HERO.y * 2.0 + raised);
+            let size = GIT_TOME_FRAME * 2.0;
+            draw_anchored(&clipped, assets.git_tome(frame), corner, size, Vec2::ZERO, false, 0.0, Color32::WHITE);
+            draw_anchored(&clipped, assets.git_tome_arm(self.harness, frame), corner, size, Vec2::ZERO, false, 0.0, Color32::WHITE);
         }
         if self.party_visible {
             for mini in self.party.iter().filter(|m| m.front) { self.draw_mini(&clipped, mini, origin, assets, mini_tint); }

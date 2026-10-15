@@ -20,6 +20,8 @@ pub struct Assets {
     heroes: TextureHandle,
     sleepers: HashMap<&'static str, TextureHandle>,
     arms: HashMap<&'static str, TextureHandle>,
+    git_tome: TextureHandle,
+    git_tome_arms: HashMap<&'static str, TextureHandle>,
     props: HashMap<&'static str, TextureHandle>,
 }
 
@@ -50,6 +52,20 @@ pub const ROOM_FILES: [(&str, &[u8]); 21] = [
 ];
 
 pub const HEROES_PNG: &[u8] = include_bytes!("../Resources/Sprites/heroes/heroes.png");
+
+/// The git ledger (art/git_tome.aseprite): a strip of 36x26 frames laid out
+/// around the hero standing behind the desk, its centre at (18, 8). The
+/// tome lies flat on the desktop; the arm sheet holds the hero's writing arm
+/// and quill, frame for frame, in a placeholder sleeve and hand recoloured
+/// per hero. Frames: closed, open, six strokes of writing, four of a page
+/// being turned.
+pub const GIT_TOME_PNG: &[u8] = include_bytes!("../Resources/Sprites/props/git_tome.png");
+pub const GIT_TOME_ARM_PNG: &[u8] = include_bytes!("../Resources/Sprites/props/git_tome_arm.png");
+pub const GIT_TOME_FRAME: Vec2 = Vec2::new(36.0, 26.0);
+pub const GIT_TOME_HERO: Vec2 = Vec2::new(18.0, 8.0);
+pub const GIT_TOME_FRAMES: usize = 12;
+const GIT_TOME_SLEEVE: Color32 = Color32::from_rgb(215, 118, 67);
+const GIT_TOME_HAND: Color32 = Color32::from_rgb(232, 183, 150);
 
 pub fn decode_png(bytes: &[u8]) -> Option<ColorImage> {
     let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png).ok()?.to_rgba8();
@@ -118,9 +134,14 @@ impl Assets {
         let heroes_image = &heroes_image;
         let mut sleepers = HashMap::new();
         let mut arms = HashMap::new();
+        let strip = |bytes| decode_png(bytes).unwrap_or_else(|| ColorImage::new([GIT_TOME_FRAME.x as usize * GIT_TOME_FRAMES, GIT_TOME_FRAME.y as usize], Color32::TRANSPARENT));
+        let git_tome = ctx.load_texture("git_tome", strip(GIT_TOME_PNG), nearest);
+        let tome_arm = strip(GIT_TOME_ARM_PNG);
+        let mut git_tome_arms = HashMap::new();
         for (index, harness) in HERO_ORDER.iter().enumerate() {
             sleepers.insert(*harness, ctx.load_texture(format!("sleeper/{harness}"), sleeper_image(heroes_image, index), nearest));
             arms.insert(*harness, ctx.load_texture(format!("arm/{harness}"), arm_image(harness), nearest));
+            git_tome_arms.insert(*harness, ctx.load_texture(format!("git_tome_arm/{harness}"), tome_arm_image(&tome_arm, harness), nearest));
         }
         let mut props = HashMap::new();
         let mut prop = |name: &'static str, image: ColorImage, options: TextureOptions| {
@@ -130,63 +151,6 @@ impl Assets {
         prop("book_closed", pixel_image(&["kkkkk", "kRRRk", "kRYRk", "kRRRk", "kkkkk"], &book_colors), nearest);
         prop("book_open", pixel_image(&["kkkk.kkkk", "kWWWkWWWk", "kWlWkWWWk", "kWWWkWlWk", "kRRRkRRRk", ".kkkkkkk."], &book_colors), nearest);
         prop("book_open_flipped", pixel_image(&["kkkk.kkkk", "kWWWkWWWk", "kWWWkWlWk", "kWlWkWWWk", "kRRRkRRRk", ".kkkkkkk."], &book_colors), nearest);
-        // The git ledger: a huge tome the hero heaves onto the table, opens,
-        // writes in, then closes and carries away. Thick leather cover with
-        // a clasp and gilded corners; a broad two-page spread with ruled
-        // lines, the last of which the hero fills in as it writes.
-        let tome_colors = [
-            ('k', INK),
-            ('R', rgb(0.447, 0.102, 0.133)),      // deep leather cover
-            ('r', rgb(0.635, 0.149, 0.2)),        // cover highlight
-            ('Y', rgb(0.996, 0.906, 0.38)),       // gold clasp / corners
-            ('y', rgb(0.792, 0.651, 0.247)),      // gold shadow
-            ('W', rgb(0.953, 0.898, 0.776)),      // bright page
-            ('P', rgb(0.886, 0.816, 0.651)),      // page shadow near the spine
-            ('l', rgb(0.353, 0.412, 0.533)),      // written line
-            ('i', rgb(0.2, 0.235, 0.325)),        // fresh ink, darker
-        ];
-        prop("tome_closed", pixel_image(&[
-            "kkkkkkkkkkkkk",
-            "kYyrrrrrrrryk",
-            "krRRRRRRRRRrk",
-            "krRRRRRRRRRrk",
-            "krRRRRRRRRRYk",
-            "krRRRRRRRRRYk",
-            "krRRRRRRRRRrk",
-            "krRRRRRRRRRrk",
-            "kYyrrrrrrrryk",
-            "kkkkkkkkkkkkk",
-        ], &tome_colors), nearest);
-        // Open on the table: covers splayed, a thick block of pages each
-        // side, a central spine, ruled lines across both leaves.
-        prop("tome_open", pixel_image(&[
-            "kkkkkkkkkkkkkkkkk",
-            "kRRRRRRkkRRRRRRRk",
-            "kRWWWWWPkPWWWWWRk",
-            "kRWlllWPkPWlllWRk",
-            "kRWWWWWPkPWlllWRk",
-            "kRWlllWPkPWWWWWRk",
-            "kRWWWWWPkPWlllWRk",
-            "kRWlllWPkPWWWWWRk",
-            "kRWWWWWPkPWWWWWRk",
-            "kRRRRRRkkRRRRRRRk",
-            ".kkkkkkkkkkkkkk.",
-        ], &tome_colors), nearest);
-        // The same spread a beat later: a fresh line of ink appearing on the
-        // right-hand page as the hero writes.
-        prop("tome_open_write", pixel_image(&[
-            "kkkkkkkkkkkkkkkkk",
-            "kRRRRRRkkRRRRRRRk",
-            "kRWWWWWPkPWlllWRk",
-            "kRWlllWPkPWWWWWRk",
-            "kRWWWWWPkPWlllWRk",
-            "kRWlllWPkPWWWWWRk",
-            "kRWWWWWPkPWlllWRk",
-            "kRWlllWPkPWiiWWRk",
-            "kRWWWWWPkPWWWWWRk",
-            "kRRRRRRkkRRRRRRRk",
-            ".kkkkkkkkkkkkkk.",
-        ], &tome_colors), nearest);
         let scroll_colors = [('k', INK), ('D', rgb(0.722, 0.435, 0.314)), ('W', rgb(0.918, 0.831, 0.667)), ('l', rgb(0.635, 0.149, 0.2))];
         prop("scroll_closed", pixel_image(&["kkkkk", "kDWDk", "kkkkk"], &scroll_colors), nearest);
         prop("scroll_open", pixel_image(&["kkkkkkkkk", "kDWWWWWDk", "kDWlWlWDk", "kDWWWlWDk", "kkkkkkkkk"], &scroll_colors), nearest);
@@ -211,7 +175,7 @@ impl Assets {
             &[('k', INK), ('G', rgb(0.55, 0.92, 0.36)), ('g', rgb(0.3, 0.7, 0.25)), ('I', rgb(0.33, 0.33, 0.4)), ('i', rgb(0.55, 0.56, 0.64)), ('d', rgb(0.2, 0.2, 0.26))]), nearest);
         prop("glow", radial(64, Color32::WHITE, &[(0.0, 1.0), (0.45, 0.35), (1.0, 0.0)], 0.0), TextureOptions::LINEAR);
         prop("darkness", radial(128, rgb(0.02, 0.01, 0.04), &[(0.0, 0.0), (0.1, 0.12), (0.28, 0.6), (0.5, 0.82), (1.0, 0.86)], 0.86), TextureOptions::LINEAR);
-        Assets { rooms, heroes, sleepers, arms, props }
+        Assets { rooms, heroes, sleepers, arms, git_tome, git_tome_arms, props }
     }
 
     fn whole(handle: &TextureHandle) -> Sprite {
@@ -256,6 +220,22 @@ impl Assets {
         self.arms.get(harness).or_else(|| self.arms.get("hero")).map(Assets::whole).unwrap()
     }
 
+    /// One frame of the git ledger strip (see GIT_TOME_PNG).
+    pub fn git_tome(&self, index: usize) -> Sprite {
+        Assets::strip_frame(&self.git_tome, index)
+    }
+
+    /// The hero's writing arm over the ledger, the same frame.
+    pub fn git_tome_arm(&self, harness: &str, index: usize) -> Sprite {
+        Assets::strip_frame(self.git_tome_arms.get(harness).or_else(|| self.git_tome_arms.get("hero")).unwrap(), index)
+    }
+
+    fn strip_frame(handle: &TextureHandle, index: usize) -> Sprite {
+        let n = GIT_TOME_FRAMES as f32;
+        let i = (index % GIT_TOME_FRAMES) as f32;
+        Sprite { tex: handle.id(), uv: Rect::from_min_max(egui::pos2(i / n, 0.0), egui::pos2((i + 1.0) / n, 1.0)), px: GIT_TOME_FRAME }
+    }
+
     pub fn prop(&self, name: &str) -> Sprite {
         Assets::whole(&self.props[name])
     }
@@ -296,8 +276,8 @@ fn sleeper_image(sheet: &ColorImage, harness_index: usize) -> ColorImage {
     image
 }
 
-/// A 3x7 raised arm in the hero's sleeve colour, hand at the top.
-fn arm_image(harness: &str) -> ColorImage {
+/// A hero's sleeve and hand colours.
+fn arm_colors(harness: &str) -> (Color32, Color32) {
     let sleeve = match harness {
         "claude" => rgb(0.843, 0.463, 0.263),
         "codex" => rgb(0.227, 0.267, 0.4),
@@ -307,5 +287,21 @@ fn arm_image(harness: &str) -> ColorImage {
         _ => rgb(0.243, 0.537, 0.282),
     };
     let hand = if harness == "codex" { rgb(0.753, 0.796, 0.863) } else { rgb(0.91, 0.718, 0.588) };
+    (sleeve, hand)
+}
+
+/// The ledger's writing arm in this hero's sleeve and hand.
+fn tome_arm_image(sheet: &ColorImage, harness: &str) -> ColorImage {
+    let (sleeve, hand) = arm_colors(harness);
+    let mut image = sheet.clone();
+    for p in image.pixels.iter_mut() {
+        if *p == GIT_TOME_SLEEVE { *p = sleeve } else if *p == GIT_TOME_HAND { *p = hand }
+    }
+    image
+}
+
+/// A 3x7 raised arm in the hero's sleeve colour, hand at the top.
+fn arm_image(harness: &str) -> ColorImage {
+    let (sleeve, hand) = arm_colors(harness);
     pixel_image(&["kHk", "kHk", "kSk", "kSk", "kSk", "kSk", ".k."], &[('k', INK), ('H', hand), ('S', sleeve)])
 }
