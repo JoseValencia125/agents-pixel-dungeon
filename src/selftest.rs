@@ -261,6 +261,9 @@ pub fn run() {
     assert_eq!(codex.meters.iter().map(|m| (m.window, m.hp(100))).collect::<Vec<_>>(), vec![("5h", 100.0), ("sem", 78.0)], "Codex meters (a reset window is full)");
     let kiro: serde_json::Value = serde_json::from_str(r#"{"session_state":{"conversation_metadata":{"user_turn_metadatas":[{"end_timestamp":"2026-10-08T12:00:00Z","metering_usage":[{"value":1.5},{"value":0.5}]},{"end_timestamp":"2026-09-08T12:00:00Z","metering_usage":[{"value":9.0}]}]}}}"#).unwrap();
     assert_eq!(crate::usage::kiro_month_credits(&kiro, "2026-10"), 2.0, "Kiro credits of the month");
+    let cursor = crate::usage::cursor_from_usage(&serde_json::from_str(r#"{"billingCycleEnd":"1793976731000","planUsage":{"totalSpend":933,"limit":2000}}"#).unwrap()).expect("Cursor usage not read");
+    assert_eq!((cursor.harness, cursor.meters[0].window, cursor.meters[0].resets, cursor.credits), ("cursor", "mes", Some(1793976731), Some((9.33, Some(20)))), "Cursor HP is the cycle's included spend over its limit");
+    assert!((cursor.meters[0].used - 46.65).abs() < 0.01 && crate::usage::cursor_from_usage(&serde_json::from_str(r#"{"planUsage":{"totalSpend":0,"limit":0}}"#).unwrap()).is_none(), "Cursor used percent, and no limit means no HP");
     {
         use chrono::TimeZone;
         let now = chrono::Local.with_ymd_and_hms(2026, 10, 9, 21, 0, 0).unwrap();

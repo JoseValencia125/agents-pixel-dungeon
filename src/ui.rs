@@ -1805,7 +1805,7 @@ pub fn usage_panel(ui: &mut Ui, assets: &crate::assets::Assets, usages: &[crate:
     let mut toggled: Option<&str> = None;
     for usage in usages {
         let expanded = open.as_deref() == Some(usage.harness);
-        let name = match usage.harness { "claude" => "Claude", "codex" => "Codex", "kiro" => "Kiro", other => other };
+        let name = match usage.harness { "claude" => "Claude", "codex" => "Codex", "kiro" => "Kiro", "cursor" => "Cursor", other => other };
         let health = usage.meters.iter().find(|m| m.window != "5h");
         let mana = usage.meters.iter().find(|m| m.window == "5h");
         let hp = health.map(|m| m.hp(unix));
