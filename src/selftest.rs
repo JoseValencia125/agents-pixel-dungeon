@@ -387,7 +387,7 @@ pub fn run() {
     let kiro_git = r#"{"kind":"AssistantMessage","data":{"content":[{"kind":"toolUse","data":{"name":"execute_bash","input":{"command":"git commit -m x"}}}]}}"#;
     assert!(kiro_action(kiro_git).as_deref() == Some("git"));
     assert!(shell_action("/usr/bin/sed -n 1,5p x") == "read" && shell_action("swift build") == "brew" && shell_action("") == "brew");
-    assert!(shell_action("git status") == "git" && shell_action("/usr/bin/git log") == "git" && codex_action(r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"git push\"}"}}"#).as_deref() == Some("git"));
+    assert!(shell_action("git status") == "git" && shell_action("/usr/bin/git log") == "git" && shell_action("gh pr create") == "git" && codex_action(r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"git push\"}"}}"#).as_deref() == Some("git"));
     assert!(last_action(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git diff"}}]}}"#).as_deref() == Some("git"));
     let mut live = vec![agent("a", "claude", "working", "p", "x", "~"), agent("b", "codex", "idle", "p", "y", "~")];
     let names: HashMap<String, String> = HashMap::new();

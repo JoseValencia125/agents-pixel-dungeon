@@ -1058,13 +1058,14 @@ pub fn recent_action(file: Option<&str>, parse: fn(&str) -> Option<String>) -> O
 }
 
 /// A shell command that only looks at files (the way Codex reads them)
-/// counts as reading; `git` sends the hero to its ledger; anything else is
-/// brewing. Only the command's first word is looked at, never its arguments.
+/// counts as reading; `git` and `gh` send the hero to its ledger; anything
+/// else is brewing. Only the command's first word is looked at, never its
+/// arguments.
 pub fn shell_action(command: &str) -> &'static str {
     const READERS: [&str; 15] = ["cat", "rg", "grep", "sed", "ls", "find", "head", "tail", "nl", "wc", "less", "tree", "fd", "bat", "awk"];
     let first = command.split(|c| " ;|&\n".contains(c)).next().unwrap_or("");
     let base = Path::new(first).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-    if base == "git" { "git" } else if READERS.contains(&base.as_str()) { "read" } else { "brew" }
+    if base == "git" || base == "gh" { "git" } else if READERS.contains(&base.as_str()) { "read" } else { "brew" }
 }
 
 /// The action of the latest Codex step in the tail of its rollout
