@@ -146,46 +146,52 @@ impl Assets {
             ('i', rgb(0.2, 0.235, 0.325)),        // fresh ink, darker
         ];
         prop("tome_closed", pixel_image(&[
-            "kkkkkkkkkkkkk",
-            "kYyrrrrrrrryk",
-            "krRRRRRRRRRrk",
-            "krRRRRRRRRRrk",
-            "krRRRRRRRRRYk",
-            "krRRRRRRRRRYk",
-            "krRRRRRRRRRrk",
-            "krRRRRRRRRRrk",
-            "kYyrrrrrrrryk",
-            "kkkkkkkkkkkkk",
+            ".kkkRRRRRRRRRRRRRRRRkkk.",
+            "kkRRRRRRRRRRRRRRRRRRRRkk",
+            "kRRRRRRRRRRRRRRRRRRRRRRk",
+            "RRRYRRRRRRRRRRRRRRRRYRRR",
+            "RRRRRRRRRRRRRRRRRRRRRRRR",
+            "RRRRRRRRRRRRRRRRRRRRRRRR",
+            "RRRRRRRRRRRRRRRRRRRRRRRR",
+            "RRRYRRRRRRRRRRRRRRRRYRRR",
+            "kWWWWWWWWWWWWWWWWWWWWWWk",
+            "kkPPPPPPPPPPPPPPPPPPPPkk",
+            ".kkkRRRRRRRRRRRRRRRRkkk.",
         ], &tome_colors), nearest);
-        // Open on the table: covers splayed, a thick block of pages each
-        // side, a central spine, ruled lines across both leaves.
+        // Open on the table, seen from above at the room's slight angle: a
+        // broad, flattened spread wider than it is tall, the two leaves
+        // splayed from a central spine, ruled lines running across them, and
+        // the thick block of pages showing along the near edge. The cover
+        // peeks out behind and to the sides.
         prop("tome_open", pixel_image(&[
-            "kkkkkkkkkkkkkkkkk",
-            "kRRRRRRkkRRRRRRRk",
-            "kRWWWWWPkPWWWWWRk",
-            "kRWlllWPkPWlllWRk",
-            "kRWWWWWPkPWlllWRk",
-            "kRWlllWPkPWWWWWRk",
-            "kRWWWWWPkPWlllWRk",
-            "kRWlllWPkPWWWWWRk",
-            "kRWWWWWPkPWWWWWRk",
-            "kRRRRRRkkRRRRRRRk",
-            ".kkkkkkkkkkkkkk.",
+            ".kkkRRRRRRRRRRRRRRRRkkk.",
+            "kkRRRRRRRRRRRRRRRRRRRRkk",
+            "kRWWWWWWWWWkkWWWWWWWWWRk",
+            "RRWlllllllWkkWlllllllWRR",
+            "RRWWWWWWWWWkkWWWWWWWWWRR",
+            "RRWlllllllWkkWlllllllWRR",
+            "RRWWWWWWWWWkkWWWWWWWWWRR",
+            "RRWlllllllWkkWlllllllWRR",
+            "RRPPPPPPPPPkkPPPPPPPPPRR",
+            "kRPPPPPPPPPkkPPPPPPPPPRk",
+            "kkRRRRRRRRRRRRRRRRRRRRkk",
+            ".kkkRRRRRRRRRRRRRRRRkkk.",
         ], &tome_colors), nearest);
-        // The same spread a beat later: a fresh line of ink appearing on the
-        // right-hand page as the hero writes.
+        // The same spread a beat later: a fresh darker line of ink appearing
+        // on the right-hand page as the hero writes.
         prop("tome_open_write", pixel_image(&[
-            "kkkkkkkkkkkkkkkkk",
-            "kRRRRRRkkRRRRRRRk",
-            "kRWWWWWPkPWlllWRk",
-            "kRWlllWPkPWWWWWRk",
-            "kRWWWWWPkPWlllWRk",
-            "kRWlllWPkPWWWWWRk",
-            "kRWWWWWPkPWlllWRk",
-            "kRWlllWPkPWiiWWRk",
-            "kRWWWWWPkPWWWWWRk",
-            "kRRRRRRkkRRRRRRRk",
-            ".kkkkkkkkkkkkkk.",
+            ".kkkRRRRRRRRRRRRRRRRkkk.",
+            "kkRRRRRRRRRRRRRRRRRRRRkk",
+            "kRWWWWWWWWWkkWWWWWWWWWRk",
+            "RRWlllllllWkkWlllllllWRR",
+            "RRWWWWWWWWWkkWWWWWWWWWRR",
+            "RRWlllllllWkkWWWWWWWWWRR",
+            "RRWWWWWWWWWkkWlllllllWRR",
+            "RRWWWWWWWWWkkWiiiiiiiWRR",
+            "RRPPPPPPPPPkkPPPPPPPPPRR",
+            "kRPPPPPPPPPkkPPPPPPPPPRk",
+            "kkRRRRRRRRRRRRRRRRRRRRkk",
+            ".kkkRRRRRRRRRRRRRRRRkkk.",
         ], &tome_colors), nearest);
         let scroll_colors = [('k', INK), ('D', rgb(0.722, 0.435, 0.314)), ('W', rgb(0.918, 0.831, 0.667)), ('l', rgb(0.635, 0.149, 0.2))];
         prop("scroll_closed", pixel_image(&["kkkkk", "kDWDk", "kkkkk"], &scroll_colors), nearest);

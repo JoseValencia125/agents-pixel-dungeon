@@ -997,43 +997,45 @@ impl Room {
     }
 
     /// The huge git ledger while the hero keeps it, as (sprite, size, offset
-    /// from the hero's centre, tilt). It rises from below the table, opens,
-    /// the hero writes a few lines, then it closes and is carried back down.
+    /// from the hero's centre, tilt). It is laid flat on the desk, seen from
+    /// above at the room's angle: the hero sets it down in front, opens it,
+    /// writes a few lines, then shuts it and lifts it away. No frontal tilt
+    /// while it rests — a book flat on the table is seen from above.
     fn git_tome(&self) -> Option<(&'static str, Vec2, Vec2, f32)> {
         if self.in_transition { return None; }
         let runner = self.runner.as_ref()?;
         let (step, e) = runner.current()?;
         let StepKind::Git { .. } = step.kind else { return None };
         let dur = step.dur.max(0.001);
-        let big = vec2(44.0, 34.0); // the open spread, really large
-        let thick = vec2(34.0, 26.0); // the closed tome
-        let rest = pos2(16.0, 2.0); // where it sits on the table, before the hero
-        let down = pos2(8.0, 24.0); // held low, just clearing the table edge
+        let big = vec2(54.0, 27.0); // the open spread, broad and flattened
+        let thick = vec2(50.0, 23.0); // the closed tome, laid flat
+        // On the desktop, in front of the hero: centred, a touch toward the
+        // near (front) edge of the table so it reads as resting on it.
+        let rest = pos2(1.0, 7.0);
+        let lift = 10.0; // how far it is raised while carried on or off
         // Timeline over `dur` (default 7.2 s).
         let open_at = 1.2; // tome placed and swung open
         let close_at = dur - 1.8; // writing done, book shut
         let away_at = dur - 1.0; // lifted off the table again
         if e < open_at {
-            // Heave the closed tome up from below, straightening as it rises.
+            // Lower the closed tome onto the desk from a little above it.
             let q = (e / open_at).clamp(0.0, 1.0);
-            let pos = pos2(lerp(down.x, rest.x, q), lerp(down.y, rest.y, q));
-            Some(("tome_closed", thick, pos.to_vec2(), lerp(0.18, 0.0, q)))
+            Some(("tome_closed", thick, vec2(rest.x, rest.y - lift * (1.0 - q)), 0.0))
         } else if e < close_at {
-            // Open on the table; the hero writes, a fresh line of ink coming
-            // and going, with a faint bob of the quill.
+            // Open and flat on the desk; the hero writes, a fresh line of
+            // ink coming and going, with a faint bob of the page.
             let w = e - open_at;
             let writing = (w / 0.5) as i32 % 2 == 1;
-            let bob = -0.6 * (std::f32::consts::TAU * w / 0.9).sin().abs();
+            let bob = -0.5 * (std::f32::consts::TAU * w / 0.9).sin().abs();
             let name = if writing { "tome_open_write" } else { "tome_open" };
             Some((name, big, vec2(rest.x, rest.y + bob), 0.0))
         } else if e < away_at {
-            // Shut it, resting a moment on the table.
+            // Shut it, resting a moment on the desk.
             Some(("tome_closed", thick, rest.to_vec2(), 0.0))
         } else {
-            // Carry it back down below the table edge.
+            // Lift it back up off the desk.
             let q = ((e - away_at) / (dur - away_at)).clamp(0.0, 1.0);
-            let pos = pos2(lerp(rest.x, down.x, q), lerp(rest.y, down.y, q));
-            Some(("tome_closed", thick, pos.to_vec2(), lerp(0.0, 0.18, q)))
+            Some(("tome_closed", thick, vec2(rest.x, rest.y - lift * q), 0.0))
         }
     }
 
