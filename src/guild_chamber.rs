@@ -152,6 +152,9 @@ pub struct ChamberState {
     /// Per experiment: the variant chosen to accept, and the note.
     pub decide_variant: std::collections::HashMap<String, String>,
     pub decide_note: String,
+    /// Who plays as an AI player, and as which persona.
+    pub ai_member: String,
+    pub ai_persona: String,
 }
 
 pub fn maturity_label(m: Maturity) -> String {
@@ -516,6 +519,8 @@ pub fn play_tab(ui: &mut Ui, state: &mut ChamberState, snap: &Snapshot, project_
             if small(ui, &tr("Terminar sesión")) { commands.push(("play.finish", json!({"playtestId": pt.id}))); }
         });
     }
+    ai_players(ui, state, snap, project_id, commands);
+    findings_list(ui, snap, project_id, commands);
     // What players noticed.
     let notes: Vec<&guild::experiment::Observation> = snap.observations.iter().filter(|o| o.project_id == project_id).collect();
     ui.label(mono(&trf("Observaciones ({})", &[&notes.len()]), 10.5).strong());
@@ -570,6 +575,119 @@ pub fn play_tab(ui: &mut Ui, state: &mut ChamberState, snap: &Snapshot, project_
                     }
                 }
             });
+        });
+    }
+}
+
+// ---- AI players and what the exploit hunter broke
+
+pub fn persona_label(persona: &str) -> String {
+    match persona {
+        "player" => tr("jugador"),
+        "novice" => tr("novato"),
+        "optimizer" => tr("optimizador"),
+        "explorer" => tr("explorador"),
+        "exploit_hunter" => tr("cazador de exploits"),
+        other => other.to_string(),
+    }
+}
+
+fn severity_color(severity: &str) -> Color32 {
+    match severity {
+        "critical" => Color32::from_rgb(150, 20, 20),
+        "high" => Color32::from_rgb(190, 40, 30),
+        "medium" => Color32::from_rgb(190, 120, 30),
+        _ => FAINT,
+    }
+}
+
+pub fn finding_status_label(status: &str) -> String {
+    tr(match status { "reproduced" => "reproducido", "not_reproduced" => "no se reproduce", "fixed" => "arreglado", "wont_fix" => "no se arreglará", _ => "sin verificar" })
+}
+
+/// A member plays the build as a persona, one move per turn; what it did
+/// and what it said afterwards stay with the playtest.
+fn ai_players(ui: &mut Ui, state: &mut ChamberState, snap: &Snapshot, project_id: &str, commands: &mut Vec<(&'static str, Value)>) {
+    use guild::experiment::PlaytestKind;
+    ui.add_space(4.0);
+    ui.label(mono(&tr("Jugadores IA"), 10.5).strong());
+    let project = snap.projects.iter().find(|p| p.id == project_id);
+    if project.and_then(|p| p.ai_play.as_ref()).is_none() {
+        ui.label(mono(&tr("Para que un miembro juegue, el juego debe hablar el protocolo de agentes. Añade a .guild/guild.toml:"), 10.0).color(FAINT));
+        ui.label(mono("[ai_play]\nargv = [\"python3\", \"game.py\", \"profile=agent\", \"seed={seed}\"]", 9.5).color(INK));
+    } else {
+        let members: Vec<&guild::Member> = snap.members.iter().filter(|m| m.enabled).collect();
+        if state.ai_member.is_empty() || !members.iter().any(|m| m.id == state.ai_member) {
+            // Whoever has a playing role, else the first member.
+            state.ai_member = members.iter().find(|m| m.roles.iter().any(|r| r == "ai-player" || r == "exploit-hunter")).or(members.first()).map(|m| m.id.clone()).unwrap_or_default();
+        }
+        if state.ai_persona.is_empty() { state.ai_persona = "player".into(); }
+        ui.horizontal_wrapped(|ui| {
+            let shown = members.iter().find(|m| m.id == state.ai_member).map(|m| format!("{} · {}", m.name, m.harness)).unwrap_or_else(|| "—".into());
+            egui::ComboBox::from_id_salt("ai-member").selected_text(mono(&shown, 10.0)).width(150.0).show_ui(ui, |ui| {
+                for m in &members { ui.selectable_value(&mut state.ai_member, m.id.clone(), mono(&format!("{} · {}", m.name, m.harness), 10.0)); }
+            });
+            egui::ComboBox::from_id_salt("ai-persona").selected_text(mono(&persona_label(&state.ai_persona), 10.0)).width(130.0).show_ui(ui, |ui| {
+                for p in guild::aiplay::PERSONAS { ui.selectable_value(&mut state.ai_persona, p.to_string(), mono(&persona_label(p), 10.0)); }
+            });
+            if primary(ui, &tr("▶ Que juegue")) && !state.ai_member.is_empty() {
+                commands.push(("ai.play", json!({"projectId": project_id, "memberId": state.ai_member, "persona": state.ai_persona})));
+            }
+        });
+    }
+    let mut sessions: Vec<&guild::experiment::Playtest> = snap.playtests.iter().filter(|p| p.project_id == project_id && p.kind == PlaytestKind::AiPlayer).collect();
+    sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    for pt in sessions.into_iter().take(6) {
+        let persona = pt.profile.rsplit(':').next().unwrap_or("");
+        let running = pt.status == "running";
+        Frame::new().fill(PAPER_DARK).stroke(Stroke::new(if running { 1.5_f32 } else { 0.0 }, Color32::from_rgb(40, 110, 170))).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(mono(pt.player.as_deref().unwrap_or("?"), 10.5).strong());
+                ui.label(mono(&persona_label(persona), 10.0).color(Color32::from_rgb(40, 110, 170)));
+                if running {
+                    ui.label(mono(&tr("jugando…"), 10.0).color(Color32::from_rgb(30, 140, 60)));
+                    if small(ui, &tr("Detener")) { commands.push(("ai.stop", json!({"playtestId": pt.id}))); }
+                } else {
+                    let turns = pt.metrics["ai"]["turns"].as_u64().unwrap_or(0);
+                    ui.label(mono(&trf("{} jugadas", &[&turns]), 10.0).color(FAINT));
+                    let won = pt.metrics["runs"]["completed"].as_u64().unwrap_or(0) > 0;
+                    if pt.status == "finished" { ui.label(mono(&tr(if won { "ganó" } else { "perdió" }), 10.0).strong().color(if won { Color32::from_rgb(30, 140, 60) } else { RUST })); } else { ui.label(mono(&pt.status, 10.0).color(RUST)); }
+                }
+                if let Some(sha) = &pt.build_sha { ui.label(mono(&trf("build {}", &[&short(sha)]), 9.5).color(FAINT)); }
+                if let Some(v) = &pt.variant_id { ui.label(mono(&trf("variante {}", &[v]), 9.5).color(FAINT)); }
+            });
+            if !pt.observations.trim().is_empty() { ui.label(mono(&format!("“{}”", pt.observations.trim()), 10.0).italics().color(INK)); }
+            if let Some(f) = &pt.failure { ui.label(mono(f, 9.5).color(RUST)); }
+        });
+    }
+}
+
+/// What the exploit hunter broke: each with its replay (build, seed,
+/// moves), whether the replay still breaks it, and the question it raised.
+fn findings_list(ui: &mut Ui, snap: &Snapshot, project_id: &str, commands: &mut Vec<(&'static str, Value)>) {
+    let findings: Vec<&guild::aiplay::Finding> = snap.findings.iter().filter(|f| f.project_id == project_id).collect();
+    if findings.is_empty() { return; }
+    ui.add_space(4.0);
+    ui.label(mono(&trf("Hallazgos ({})", &[&findings.len()]), 10.5).strong());
+    for f in findings.iter().rev().take(20) {
+        Frame::new().fill(PAPER_DARK).corner_radius(CornerRadius::same(3)).inner_margin(Margin::same(6)).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(mono(&f.id, 10.0).color(FAINT));
+                ui.label(mono(&f.severity, 9.5).strong().color(severity_color(&f.severity)));
+                ui.label(mono(&f.title, 10.5));
+            });
+            if !f.impact.is_empty() { ui.label(mono(&f.impact, 10.0).color(FAINT)); }
+            ui.horizontal_wrapped(|ui| {
+                ui.label(mono(&finding_status_label(&f.status), 10.0).strong().color(if f.status == "reproduced" { RUST } else { FAINT }));
+                ui.label(mono(&trf("semilla {} · {} jugadas", &[&f.seed.unwrap_or(0), &f.actions.len()]), 9.5).color(FAINT));
+                if let Some(r) = f.round { ui.label(mono(&trf("ronda {}", &[&r]), 9.5).color(FAINT)); }
+                if small(ui, &tr("↻ Reproducir")) { commands.push(("finding.verify", json!({"projectId": project_id, "findingId": f.id}))); }
+                match &f.question_id {
+                    Some(q) => { ui.label(mono(&format!("→ {q}"), 9.5).color(RUST)); }
+                    None => { if small(ui, &tr("→ Pregunta")) { commands.push(("finding.promote", json!({"projectId": project_id, "findingId": f.id}))); } }
+                }
+            });
+            if let Some(v) = &f.verification { ui.label(mono(v, 9.5).color(FAINT)); }
         });
     }
 }

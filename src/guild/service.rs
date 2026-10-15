@@ -54,6 +54,8 @@ pub struct Service {
     running: Mutex<HashMap<String, Running>>,
     /// Experiments whose playtests a thread is running.
     playtesting: Mutex<Vec<String>>,
+    /// AI playtests asked to stop.
+    ai_stops: Mutex<Vec<String>>,
     pub settings: Settings,
     pub stop: Arc<AtomicBool>,
     log_file: Mutex<Option<std::fs::File>>,
@@ -94,6 +96,7 @@ impl Service {
             subscribers: Mutex::new(vec![]),
             held: Mutex::new(vec![]),
             playtesting: Mutex::new(vec![]),
+            ai_stops: Mutex::new(vec![]),
             running: Mutex::new(HashMap::new()),
             settings,
             stop: Arc::new(AtomicBool::new(false)),
@@ -733,6 +736,19 @@ impl Service {
             for profile in &e.plan.profiles {
                 for seed in &seeds {
                     if done.iter().any(|p| p.variant_id.as_deref() == Some(v.id.as_str()) && &p.profile == profile && p.seed == Some(*seed) && p.status == "finished") { continue; }
+                    // `ai:<member>[:<persona>]`: a guild member plays this build through the agent protocol.
+                    if let Some(rest) = profile.strip_prefix("ai:") {
+                        let (who, persona) = rest.split_once(':').unwrap_or((rest, "player"));
+                        let member = self.store.lock().unwrap().members()?.into_iter().find(|m| m.id == who || m.name.eq_ignore_ascii_case(who));
+                        let Some(member) = member else { self.log(&format!("experiment {}: no member {who} for profile {profile}", e.id)); continue };
+                        let pt = Playtest { id: new_id(), project_id: e.project_id.clone(), experiment_id: Some(e.id.clone()), variant_id: Some(v.id.clone()), attempt_id: Some(attempt_id.clone()), kind: PlaytestKind::AiPlayer, profile: profile.clone(), seed: Some(*seed), status: "running".into(), player: Some(member.name.clone()), build_sha: workspaces::rev_parse(Path::new(&workspace.path), "HEAD").ok(), created_at: now(), ..Default::default() };
+                        {
+                            let store = self.store.lock().unwrap();
+                            self.atomic(&store, || { store.put_playtest(&pt)?; self.emit_locked(&store, Event::new("playtest.started", "guild").with(json!({"playtestId": pt.id, "experimentId": e.id, "variant": v.id, "profile": profile, "seed": seed, "kind": "ai_player"}))); Ok(()) })?;
+                        }
+                        if let Err(err) = self.run_ai_playtest(pt, &member, persona, PathBuf::from(&workspace.path), 60) { self.log(&format!("experiment {}: AI playtest failed: {}", e.id, err.message)); }
+                        continue;
+                    }
                     let mut pt = Playtest { id: new_id(), project_id: e.project_id.clone(), experiment_id: Some(e.id.clone()), variant_id: Some(v.id.clone()), attempt_id: Some(attempt_id.clone()), kind: PlaytestKind::Simulation, profile: profile.clone(), seed: Some(*seed), status: "running".into(), created_at: now(), ..Default::default() };
                     {
                         let store = self.store.lock().unwrap();
@@ -996,26 +1012,7 @@ impl Service {
         let id = new_id();
         let experiment_id = p_opt(params, "experimentId");
         let variant_id = p_opt(params, "variantId");
-        let (cwd, sha, attempt_id, play_dir) = match (&experiment_id, &variant_id) {
-            (Some(eid), Some(vid)) => {
-                let store = self.store.lock().unwrap();
-                let e = store.experiment(eid)?.ok_or_else(|| ApiError::not_found(format!("experiment {eid}")))?;
-                let v = e.variants.iter().find(|v| &v.id == vid).ok_or_else(|| ApiError::not_found(format!("variant {vid}")))?;
-                let aid = v.attempt_id.clone().ok_or_else(|| ApiError::conflict(format!("variant {vid} is not built yet")))?;
-                let a = store.attempt(&aid)?.ok_or_else(|| ApiError::not_found("attempt"))?;
-                let w = a.workspace_id.as_ref().and_then(|w| store.workspace(w).ok().flatten()).ok_or_else(|| ApiError::not_found("the variant's worktree"))?;
-                if !Path::new(&w.path).exists() { return Err(ApiError::conflict("the variant's worktree is gone")); }
-                let sha = a.candidate.as_ref().map(|c| c.head_sha.clone()).or_else(|| workspaces::rev_parse(Path::new(&w.path), "HEAD").ok());
-                (w.path.clone(), sha, Some(aid), None)
-            }
-            _ => {
-                let rev = p_opt(params, "ref").unwrap_or_else(|| project.target_ref.clone());
-                let sha = workspaces::rev_parse(Path::new(&project.repo_path), &rev).map_err(ApiError::invalid)?;
-                let dir = crate::paths::worktrees_dir().join(&project.id).join(format!("play-{}", &id[id.len() - 8..]));
-                workspaces::checkout_detached(&project, &sha, &dir).map_err(ApiError::internal)?;
-                (dir.display().to_string(), Some(sha), None, Some(dir.display().to_string()))
-            }
-        };
+        let (cwd, sha, attempt_id, play_dir) = self.build_to_play(&project, &id, params)?;
         let telemetry = crate::paths::artifacts_dir().join("play").join(format!("{id}.jsonl"));
         std::fs::create_dir_all(telemetry.parent().unwrap()).map_err(|e| ApiError::internal(e.to_string()))?;
         std::fs::write(&telemetry, b"").map_err(|e| ApiError::internal(e.to_string()))?;
@@ -1032,6 +1029,35 @@ impl Service {
             Ok(())
         })?;
         Ok(json!({"playtest": pt, "cwd": cwd, "argv": argv, "env": {"GUILD_TELEMETRY": telemetry.display().to_string(), "GUILD_PLAYTEST": id}}))
+    }
+
+    /// The build a session plays: an experiment variant's worktree, or a
+    /// detached checkout (made for the session `id`) of a ref, by default
+    /// the project's target. Returns the directory, its commit, the
+    /// variant's attempt and the checkout to remove afterwards.
+    fn build_to_play(&self, project: &Project, id: &str, params: &Value) -> Res<(String, Option<String>, Option<String>, Option<String>)> {
+        let experiment_id = p_opt(params, "experimentId");
+        let variant_id = p_opt(params, "variantId");
+        Ok(match (&experiment_id, &variant_id) {
+            (Some(eid), Some(vid)) => {
+                let store = self.store.lock().unwrap();
+                let e = store.experiment(eid)?.ok_or_else(|| ApiError::not_found(format!("experiment {eid}")))?;
+                let v = e.variants.iter().find(|v| &v.id == vid).ok_or_else(|| ApiError::not_found(format!("variant {vid}")))?;
+                let aid = v.attempt_id.clone().ok_or_else(|| ApiError::conflict(format!("variant {vid} is not built yet")))?;
+                let a = store.attempt(&aid)?.ok_or_else(|| ApiError::not_found("attempt"))?;
+                let w = a.workspace_id.as_ref().and_then(|w| store.workspace(w).ok().flatten()).ok_or_else(|| ApiError::not_found("the variant's worktree"))?;
+                if !Path::new(&w.path).exists() { return Err(ApiError::conflict("the variant's worktree is gone")); }
+                let sha = a.candidate.as_ref().map(|c| c.head_sha.clone()).or_else(|| workspaces::rev_parse(Path::new(&w.path), "HEAD").ok());
+                (w.path.clone(), sha, Some(aid), None)
+            }
+            _ => {
+                let rev = p_opt(params, "ref").unwrap_or_else(|| project.target_ref.clone());
+                let sha = workspaces::rev_parse(Path::new(&project.repo_path), &rev).map_err(ApiError::invalid)?;
+                let dir = crate::paths::worktrees_dir().join(&project.id).join(format!("play-{}", &id[id.len() - 8..]));
+                workspaces::checkout_detached(project, &sha, &dir).map_err(ApiError::internal)?;
+                (dir.display().to_string(), Some(sha), None, Some(dir.display().to_string()))
+            }
+        })
     }
 
     /// Close a human session: keep its raw events, derive its metrics,
@@ -1063,6 +1089,311 @@ impl Service {
             Ok(())
         })?;
         Ok(serde_json::to_value(pt).unwrap())
+    }
+
+    // ----- AI players and the exploit hunter -----
+
+    /// Start an AI player on the build: a member, on its own harness,
+    /// plays the game through its agent protocol, one move per turn of
+    /// one session. Returns the running playtest at once; the play goes
+    /// on in a thread and ends with `playtest.finished`.
+    fn ai_play_start(self: &Arc<Service>, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let member_ref = p_str(params, "memberId")?;
+        let persona = p_opt(params, "persona").unwrap_or_else(|| "player".into());
+        let (project, member, design_version) = {
+            let store = self.store.lock().unwrap();
+            let p = store.project(project_id)?.ok_or_else(|| ApiError::not_found(format!("project {project_id}")))?;
+            let m = store.members()?.into_iter().find(|m| m.id == member_ref || m.name.eq_ignore_ascii_case(member_ref)).ok_or_else(|| ApiError::not_found(format!("member {member_ref}")))?;
+            (p, m, store.design(project_id)?.map(|d| d.version))
+        };
+        if project.ai_play.is_none() { return Err(ApiError::invalid("the project has no [ai_play] command in .guild/guild.toml")); }
+        self.adapter(member.harness.clone())?;
+        let id = new_id();
+        let (cwd, sha, attempt_id, play_dir) = self.build_to_play(&project, &id, params)?;
+        let seed = params.get("seed").and_then(Value::as_u64).unwrap_or_else(|| (chrono::Utc::now().timestamp_millis() % 10_000) as u64);
+        let pt = Playtest {
+            id: id.clone(), project_id: project_id.into(), experiment_id: p_opt(params, "experimentId"), variant_id: p_opt(params, "variantId"), attempt_id,
+            kind: PlaytestKind::AiPlayer, profile: format!("ai:{persona}"), seed: Some(seed), status: "running".into(), player: Some(member.name.clone()),
+            build_sha: sha, design_version, play_dir, created_at: now(), ..Default::default()
+        };
+        {
+            let store = self.store.lock().unwrap();
+            self.atomic(&store, || {
+                store.put_playtest(&pt)?;
+                self.emit_locked(&store, Event::new("playtest.started", "user").with(json!({"playtestId": pt.id, "projectId": project_id, "kind": "ai_player", "memberId": member.id, "persona": persona, "seed": seed, "experimentId": pt.experiment_id, "variant": pt.variant_id})));
+                Ok(())
+            })?;
+        }
+        let max_turns = params.get("maxTurns").and_then(Value::as_u64).unwrap_or(60) as u32;
+        let service = self.clone();
+        let started = pt.clone();
+        std::thread::Builder::new().name("ai-player".into()).spawn(move || {
+            if let Err(e) = service.run_ai_playtest(started, &member, &persona, PathBuf::from(cwd), max_turns) { service.log(&format!("ai playtest failed: {}", e.message)); }
+        }).ok();
+        Ok(serde_json::to_value(pt).unwrap())
+    }
+
+    fn ai_play_stop(&self, id: &str) -> ApiResult {
+        let pt = self.store.lock().unwrap().playtest(id)?.ok_or_else(|| ApiError::not_found(format!("playtest {id}")))?;
+        if pt.kind != PlaytestKind::AiPlayer { return Err(ApiError::invalid("not an AI playtest")); }
+        if pt.status == "running" { self.ai_stops.lock().unwrap().push(id.to_string()); }
+        Ok(json!({"stopping": pt.status == "running"}))
+    }
+
+    /// Play one AI playtest to its end and record it: the raw events, the
+    /// player's decisions, what it said afterwards, and every finding it
+    /// reported. Blocks; used by `ai.play` (on a thread) and by
+    /// experiments whose plan names an `ai:` profile.
+    fn run_ai_playtest(self: &Arc<Service>, mut pt: Playtest, member: &Member, persona: &str, cwd: PathBuf, max_turns: u32) -> Res<Playtest> {
+        let (project, design) = {
+            let store = self.store.lock().unwrap();
+            (store.project(&pt.project_id)?.ok_or_else(|| ApiError::not_found("project"))?, store.design(&pt.project_id)?)
+        };
+        let runner = project.ai_play.clone().ok_or_else(|| ApiError::invalid("no [ai_play] command"))?;
+        let seed = pt.seed.unwrap_or(1);
+        let telemetry = crate::paths::artifacts_dir().join("play").join(format!("{}.jsonl", pt.id));
+        std::fs::create_dir_all(telemetry.parent().unwrap()).map_err(|e| ApiError::internal(e.to_string()))?;
+        std::fs::write(&telemetry, b"").map_err(|e| ApiError::internal(e.to_string()))?;
+        pt.telemetry_path = Some(telemetry.display().to_string());
+        let argv: Vec<String> = runner.argv.iter().map(|a| a.replace("{seed}", &seed.to_string()).replace("{profile}", "agent").replace("{runs}", "1")).collect();
+        let env = vec![("GUILD_TELEMETRY".to_string(), telemetry.display().to_string()), ("GUILD_PLAYTEST".to_string(), pt.id.clone())];
+        let started = Instant::now();
+        let adapter = self.adapter(member.harness.clone())?;
+        let options = SessionOptions { cwd: cwd.clone(), model_id: member.model_id.clone(), mode: member.mode.clone(), role_prompt: config::default_role_prompt(if persona == "exploit_hunter" { "exploit-hunter" } else { "ai-player" }) };
+        let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()));
+        let session = match session {
+            Ok(s) => s,
+            Err(e) => return self.close_ai_playtest(pt, &project, vec![], Some(e.message), String::new(), started),
+        };
+        let briefing = format!("{}\n\n{}", options.role_prompt, crate::aiplay::briefing(persona, design.as_ref()));
+        let mut first = true;
+        let mut seen = 0usize;
+        let id = pt.id.clone();
+        let stop = || self.ai_stops.lock().unwrap().contains(&id) || self.stop.load(Ordering::Relaxed);
+        let outcome = crate::aiplay::play_game(&cwd, &argv, &env, &telemetry, max_turns, Duration::from_secs(runner.timeout_seconds), |observation, index| {
+            let actions = crate::aiplay::actions_of(observation);
+            let events = crate::experiment::parse_telemetry(&std::fs::read_to_string(&telemetry).unwrap_or_default());
+            let since: Vec<Value> = events.get(seen.min(events.len())..).unwrap_or(&[]).to_vec();
+            seen = events.len();
+            let mut prompt = crate::aiplay::turn_prompt(observation, &since);
+            if first { prompt = format!("{briefing}\n{prompt}"); first = false; }
+            let turn = observation["turn"].as_u64().unwrap_or(0);
+            self.emit(Event::new("ai.turn", "guild").with(json!({"playtestId": pt.id, "memberId": member.id, "turn": turn, "events": index})));
+            let reply = self.ask_harness(&adapter, &session, &format!("{}-{turn}", pt.id), &prompt, &stop)?;
+            match crate::aiplay::parse_move(&reply, &actions) {
+                Ok(m) => Ok(m),
+                // One more chance, with the reason.
+                Err(e) => {
+                    let again = self.ask_harness(&adapter, &session, &format!("{}-{turn}b", pt.id), &format!("Your answer could not be read ({e}). Answer again with only the ```json block, choosing one of: {}.", actions.iter().map(|a| a.0.as_str()).collect::<Vec<_>>().join(", ")), &stop)?;
+                    crate::aiplay::parse_move(&again, &actions)
+                }
+            }
+        }, stop);
+        // What it lived, in its own words, while the session is still open.
+        let mut reflection = String::new();
+        // Findings the hunter only saw once the game had ended: they replay with every move.
+        let mut late_findings: Vec<Value> = vec![];
+        if !outcome.turns.is_empty() && !stop() {
+            let events = crate::experiment::parse_telemetry(&std::fs::read_to_string(&telemetry).unwrap_or_default());
+            let last = crate::aiplay::happened(events.get(seen.min(events.len())..).unwrap_or(&[]));
+            let mut ask = format!("## What happened\n\n{last}\nThe game is over. In two or three sentences: what did you feel, what tempted you, what felt pointless or too strong?");
+            if persona == "exploit_hunter" {
+                ask.push_str(" Then, if you found something you have not reported yet, end with one ```json block: {\"findings\": [{\"title\": \"…\", \"impact\": \"…\", \"severity\": \"low|medium|high|critical\", \"steps\": \"…\"}]}");
+            } else {
+                ask.push_str(" No JSON this time.");
+            }
+            let reply = self.ask_harness(&adapter, &session, &format!("{}-end", pt.id), &ask, &stop).unwrap_or_default();
+            let (prose, found) = crate::aiplay::split_reflection(&reply);
+            reflection = prose.chars().take(1200).collect();
+            if persona == "exploit_hunter" { late_findings = found; }
+        }
+        let _ = adapter.stop(&session);
+        self.ai_stops.lock().unwrap().retain(|s| s != &pt.id);
+        let failure = outcome.failure.clone().filter(|_| !outcome.ended || outcome.exit_code.map(|c| c != 0).unwrap_or(false));
+        let decisions: String = outcome.turns.iter().map(|t| serde_json::to_string(t).unwrap() + "\n").collect();
+        if !decisions.is_empty() {
+            let artifact = self.write_artifact(pt.attempt_id.as_deref(), "playtest.decisions", decisions.as_bytes())?;
+            self.emit(Event::new("artifact.written", "guild").with(json!({"playtestId": pt.id, "kind": "playtest.decisions", "artifactId": artifact.id})));
+        }
+        // The findings, numbered, with the moves that led to each.
+        let events = crate::experiment::parse_telemetry(&std::fs::read_to_string(&telemetry).unwrap_or_default());
+        let last_turn = outcome.turns.len().saturating_sub(1);
+        let reported: Vec<(usize, &Value)> = outcome.turns.iter().enumerate().filter_map(|(i, t)| t.finding.as_ref().map(|f| (i, f))).chain(late_findings.iter().map(|f| (last_turn, f))).collect();
+        for (i, raw) in reported {
+            let turn = &outcome.turns[i];
+            let store = self.store.lock().unwrap();
+            let mut f = crate::aiplay::finding_from(raw);
+            f.id = crate::design::next_id("F", store.findings_of(&pt.project_id)?.into_iter().map(|f| f.id));
+            f.project_id = pt.project_id.clone();
+            f.playtest_id = Some(pt.id.clone());
+            f.member_id = Some(member.id.clone());
+            f.build_sha = pt.build_sha.clone();
+            f.design_version = pt.design_version;
+            f.experiment_id = pt.experiment_id.clone();
+            f.variant_id = pt.variant_id.clone();
+            f.seed = Some(seed);
+            f.actions = outcome.turns[..=i].iter().map(|t| t.action.clone()).collect();
+            // The events up to the move after the one it reported on: what the move did.
+            f.event_index = outcome.turns.get(i + 1).map(|t| t.event_index).unwrap_or(events.len() as u32);
+            // The run and round it was reported in: where the game was when the move was asked for.
+            let upto = &events[..(turn.event_index as usize).min(events.len())];
+            f.run_id = upto.iter().rev().find_map(|e| e.get("runId").and_then(Value::as_str)).map(str::to_string);
+            f.round = upto.iter().rev().find(|e| e["event"] == "round.started").and_then(|e| e["data"]["round"].as_u64());
+            f.created_at = now();
+            self.atomic(&store, || {
+                store.put_finding(&f)?;
+                self.emit_locked(&store, Event::new("finding.created", "guild").with(json!({"projectId": f.project_id, "findingId": f.id, "title": f.title, "severity": f.severity, "playtestId": pt.id})));
+                Ok(())
+            })?;
+        }
+        self.close_ai_playtest(pt, &project, outcome.turns, failure, reflection, started)
+    }
+
+    fn close_ai_playtest(&self, mut pt: Playtest, project: &Project, turns: Vec<crate::aiplay::TurnRecord>, failure: Option<String>, reflection: String, started: Instant) -> Res<Playtest> {
+        let text = pt.telemetry_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+        let events = crate::experiment::parse_telemetry(&text);
+        if !text.is_empty() { pt.events_artifact_id = Some(self.write_artifact(pt.attempt_id.as_deref(), "playtest.events", text.as_bytes())?.id); }
+        pt.event_count = events.len() as u32;
+        pt.metrics = crate::experiment::derive_metrics(&events);
+        if let Some(m) = pt.metrics.as_object_mut() {
+            m.insert("ai".into(), json!({"turns": turns.len(), "fallbacks": turns.iter().filter(|t| t.fallback).count(), "findings": turns.iter().filter(|t| t.finding.is_some()).count()}));
+        }
+        pt.observations = reflection;
+        // A game cut short keeps its events but is no complete playtest.
+        pt.status = if events.is_empty() { "failed".into() } else if failure.is_some() { "stopped".into() } else { "finished".into() };
+        pt.failure = failure.or_else(|| events.is_empty().then(|| "the game wrote no game.event lines".to_string()));
+        pt.duration_ms = Some(started.elapsed().as_millis() as i64);
+        pt.finished_at = Some(now());
+        if let Some(dir) = &pt.play_dir { workspaces::remove_checkout(project, Path::new(dir)); }
+        let store = self.store.lock().unwrap();
+        self.atomic(&store, || {
+            store.put_playtest(&pt)?;
+            self.emit_locked(&store, Event::new("playtest.finished", "guild").with(json!({"playtestId": pt.id, "projectId": pt.project_id, "kind": "ai_player", "status": pt.status, "events": pt.event_count, "turns": turns.len(), "failure": pt.failure, "experimentId": pt.experiment_id, "variant": pt.variant_id})));
+            Ok(())
+        })?;
+        Ok(pt)
+    }
+
+    /// One prompt on a live session, answered: the reply's text. Tools the
+    /// player tries are declined (it only chooses moves).
+    fn ask_harness(&self, adapter: &Arc<dyn HarnessAdapter>, session: &SessionRef, request_id: &str, prompt: &str, stop: &dyn Fn() -> bool) -> Result<String, String> {
+        let handle = adapter.prompt(session, request_id, prompt).map_err(|e| e.to_string())?;
+        let mut text = String::new();
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            while let Ok(ev) = handle.events.try_recv() {
+                match ev {
+                    HarnessEvent::Text(t) => text.push_str(&t),
+                    HarnessEvent::PermissionRequested { request_id, .. } => { let _ = adapter.respond_permission(session, &request_id, None); }
+                    _ => {}
+                }
+            }
+            match handle.result.recv_timeout(Duration::from_millis(100)) {
+                Ok(TurnOutcome::Completed { .. }) => {
+                    while let Ok(ev) = handle.events.try_recv() { if let HarnessEvent::Text(t) = ev { text.push_str(&t); } }
+                    return Ok(text);
+                }
+                Ok(TurnOutcome::Failed { reason }) => return Err(reason),
+                Ok(TurnOutcome::Cancelled) => return Err("stopped".into()),
+                Err(RecvTimeoutError::Disconnected) => return Err("the harness ended without a result".into()),
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            if stop() || Instant::now() > deadline {
+                let _ = adapter.interrupt(session);
+                return Err(if stop() { "stopped".into() } else { "the player took more than 5 minutes".into() });
+            }
+        }
+    }
+
+    /// Replay a finding on the build it was found on: same seed, the same
+    /// moves, no agent. Reproduced when the game's first events are the
+    /// ones the hunter saw.
+    fn finding_verify(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let fid = p_str(params, "findingId")?;
+        let (mut f, project, original) = {
+            let store = self.store.lock().unwrap();
+            let f = store.finding(project_id, fid)?.ok_or_else(|| ApiError::not_found(format!("finding {fid}")))?;
+            let p = store.project(project_id)?.ok_or_else(|| ApiError::not_found("project"))?;
+            let pt = f.playtest_id.as_ref().and_then(|id| store.playtest(id).ok().flatten());
+            let text = pt.and_then(|pt| pt.events_artifact_id).and_then(|a| store.artifact(&a).ok().flatten()).and_then(|a| std::fs::read_to_string(a.path).ok()).unwrap_or_default();
+            (f, p, crate::experiment::parse_telemetry(&text))
+        };
+        let runner = project.ai_play.clone().ok_or_else(|| ApiError::invalid("the project has no [ai_play] command"))?;
+        // The build: the one it was found on, or another ref to see whether it still holds.
+        let id = new_id();
+        let rev = p_opt(params, "ref").or(f.build_sha.clone()).unwrap_or_else(|| project.target_ref.clone());
+        let sha = workspaces::rev_parse(Path::new(&project.repo_path), &rev).map_err(ApiError::invalid)?;
+        let dir = crate::paths::worktrees_dir().join(&project.id).join(format!("replay-{}", &id[id.len() - 8..]));
+        workspaces::checkout_detached(&project, &sha, &dir).map_err(ApiError::internal)?;
+        let telemetry = crate::paths::artifacts_dir().join("play").join(format!("replay-{id}.jsonl"));
+        let _ = std::fs::create_dir_all(telemetry.parent().unwrap());
+        let _ = std::fs::write(&telemetry, b"");
+        let argv: Vec<String> = runner.argv.iter().map(|a| a.replace("{seed}", &f.seed.unwrap_or(1).to_string()).replace("{profile}", "agent").replace("{runs}", "1")).collect();
+        let env = vec![("GUILD_TELEMETRY".to_string(), telemetry.display().to_string())];
+        let mut moves = f.actions.clone().into_iter();
+        let outcome = crate::aiplay::play_game(&dir, &argv, &env, &telemetry, f.actions.len() as u32, Duration::from_secs(runner.timeout_seconds), |obs, _| {
+            let action = moves.next().ok_or("no more moves")?;
+            if !crate::aiplay::actions_of(obs).iter().any(|a| a.0 == action) { return Err(format!("move {action} is not offered any more")); }
+            Ok(crate::aiplay::Move { action, ..Default::default() })
+        }, || false);
+        let replay = crate::experiment::parse_telemetry(&std::fs::read_to_string(&telemetry).unwrap_or_default());
+        workspaces::remove_checkout(&project, &dir);
+        let _ = std::fs::remove_file(&telemetry);
+        let upto = (f.event_index as usize).min(original.len());
+        let same = crate::aiplay::same_prefix(&original, &replay, upto) && !outcome.turns.iter().any(|t| t.fallback);
+        let on_other_build = Some(&sha) != f.build_sha.as_ref();
+        f.status = match (same, on_other_build) { (true, _) => "reproduced", (false, true) => "fixed", (false, false) => "not_reproduced" }.into();
+        f.verification = Some(if same {
+            format!("Replayed {} moves with seed {} on {}: the first {upto} events match.", f.actions.len(), f.seed.unwrap_or(1), &sha[..8])
+        } else {
+            let at = original.iter().zip(&replay).position(|(a, b)| a != b).unwrap_or(original.len().min(replay.len()));
+            format!("Replayed {} moves with seed {} on {}: the game went another way at event {at}{}.", f.actions.len(), f.seed.unwrap_or(1), &sha[..8], outcome.turns.iter().find(|t| t.fallback).map(|t| format!(" ({})", t.why)).unwrap_or_default())
+        });
+        f.verified_at = Some(now());
+        let store = self.store.lock().unwrap();
+        self.atomic(&store, || {
+            store.put_finding(&f)?;
+            self.emit_locked(&store, Event::new("finding.verified", "guild").with(json!({"projectId": f.project_id, "findingId": f.id, "status": f.status, "buildSha": sha})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(f).unwrap())
+    }
+
+    /// Turn a finding into a design question that points back to it.
+    fn finding_promote(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let fid = p_str(params, "findingId")?;
+        let f = self.store.lock().unwrap().finding(project_id, fid)?.ok_or_else(|| ApiError::not_found(format!("finding {fid}")))?;
+        if let Some(q) = &f.question_id { return Err(ApiError::conflict(format!("{fid} already raised {q}"))); }
+        let mut context = format!("{} [{} · {}]: {}", f.id, f.severity, f.status, f.title);
+        if !f.impact.is_empty() { context.push_str(&format!(" · impact: {}", f.impact)); }
+        if let Some(sha) = &f.build_sha { context.push_str(&format!(" · build {}", &sha[..sha.len().min(8)])); }
+        context.push_str(&format!(" · replay: seed {} with moves {}", f.seed.unwrap_or(1), f.actions.join(",")));
+        let question = p_opt(params, "question").unwrap_or_else(|| format!("How do we stop \"{}\"?", f.title));
+        let q = self.question_create(&json!({"projectId": project_id, "question": question, "context": context, "systemId": p_opt(params, "systemId"), "raisedBy": "exploit-hunter", "source": f.id}))?;
+        let store = self.store.lock().unwrap();
+        let mut f = f;
+        f.question_id = q["id"].as_str().map(str::to_string);
+        self.atomic(&store, || { store.put_finding(&f)?; Ok(()) })?;
+        Ok(json!({"finding": f, "question": q}))
+    }
+
+    fn finding_set(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let fid = p_str(params, "findingId")?;
+        let status = p_str(params, "status")?;
+        if !crate::aiplay::FINDING_STATUSES.contains(&status) { return Err(ApiError::invalid(format!("status must be one of {}", crate::aiplay::FINDING_STATUSES.join(", ")))); }
+        let store = self.store.lock().unwrap();
+        let mut f = store.finding(project_id, fid)?.ok_or_else(|| ApiError::not_found(format!("finding {fid}")))?;
+        f.status = status.into();
+        self.atomic(&store, || {
+            store.put_finding(&f)?;
+            self.emit_locked(&store, Event::new("finding.updated", "user").with(json!({"projectId": f.project_id, "findingId": f.id, "status": f.status})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(f).unwrap())
     }
 
     /// Note what a human noticed. Inside a session it is tied to the
@@ -1859,6 +2190,14 @@ impl Service {
     /// After a restart: attempts the store thinks are active have no
     /// driver. Adopt a candidate their worktree holds, or mark them lost.
     pub fn reconcile(self: &Arc<Service>) {
+        // An AI player's game dies with the service; its playtest ends there.
+        let orphans: Vec<Playtest> = self.store.lock().unwrap().playtests().unwrap_or_default().into_iter().filter(|p| p.kind == PlaytestKind::AiPlayer && p.status == "running").collect();
+        for pt in orphans {
+            let project = self.store.lock().unwrap().project(&pt.project_id).ok().flatten();
+            if let Some(project) = project {
+                let _ = self.close_ai_playtest(pt, &project, vec![], Some("the guild restarted while it played".into()), String::new(), Instant::now());
+            }
+        }
         // An integration the service died in the middle of: do it again; the
         // squash finds nothing new when it had already landed.
         let integrating: Vec<Task> = self.store.lock().unwrap().tasks().unwrap_or_default().into_iter().filter(|t| t.state == TaskState::Integrating).collect();
@@ -1995,6 +2334,11 @@ impl Service {
             "observation.create" => self.observation_create(params),
             "observation.promote" => self.observation_promote(params),
             "signals" => self.signals_of(params),
+            "ai.play" => self.ai_play_start(params),
+            "ai.stop" => self.ai_play_stop(p_str(params, "playtestId")?),
+            "finding.verify" => self.finding_verify(params),
+            "finding.promote" => self.finding_promote(params),
+            "finding.set" => self.finding_set(params),
             "question.create" => self.question_create(params),
             "question.resolve" => self.question_resolve(params),
             "decision.create" => self.decision_create(params),
@@ -2092,6 +2436,7 @@ impl Service {
             verifiers: file.as_ref().map(|f| f.verifiers.iter().map(|v| v.to_verifier()).collect()).unwrap_or_default(),
             playtest: file.as_ref().and_then(|f| f.playtest.as_ref()).map(|p| p.to_runner()),
             play: file.as_ref().and_then(|f| f.play.as_ref()).map(|p| p.to_runner()),
+            ai_play: file.as_ref().and_then(|f| f.ai_play.as_ref()).map(|p| p.to_runner()),
             created_at: existing.map(|p| p.created_at).unwrap_or_else(now),
         };
         store.put_project(&project)?;
@@ -3472,6 +3817,59 @@ mod tests {
         assert_eq!(snap.designs[0].systems.len(), 3);
         let kinds: Vec<String> = again.store.lock().unwrap().events_after(0, 10_000).unwrap().into_iter().map(|e| e.kind).collect();
         for k in ["question.created", "question.resolved", "decision.created", "design.updated", "design.exported"] { assert!(kinds.contains(&k.to_string()), "missing {k}"); }
+    }
+
+    #[test]
+    fn an_ai_player_plays_the_build_and_the_exploit_hunters_finding_replays() {
+        let home = TempHome::new();
+        let repo = wordfight_repo(&home);
+        let service = Service::new(Store::open_in_memory().unwrap(), Settings::default());
+        let mock = Arc::new(MockHarness::new(MockBehaviour::Reply("ok".into())));
+        // The hunter takes the longest word and, on its second move, reports that it always wins.
+        mock.set_player(|prompt| {
+            if prompt.contains("The game is over") { return "Long words won every time; nothing else was worth it.".into(); }
+            let moves: Vec<(String, usize)> = prompt.lines().filter_map(|l| l.strip_prefix("- ")).filter_map(|l| {
+                let (id, label) = l.split_once(": ")?;
+                Some((id.to_string(), label.split_whitespace().next()?.len()))
+            }).collect();
+            let best = moves.iter().max_by_key(|m| m.1).map(|m| m.0.clone()).unwrap_or_default();
+            let finding = if prompt.contains("## Your move 2") { r#", "finding": {"title": "The longest word always wins", "impact": "word choice stops mattering", "severity": "high", "steps": "pick the longest word every round"}"# } else { "" };
+            format!("```json\n{{\"action\": \"{best}\", \"why\": \"longest hits hardest\"{finding}}}\n```")
+        });
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string()})).unwrap();
+        service.handle("design.template", &json!({"projectId": "wordfight", "template": "videogame"})).unwrap();
+        service.handle("member.add", &json!({"id": "vex", "harness": "mock", "roles": ["exploit-hunter"], "model": "mock-fast"})).unwrap();
+        assert!(service.handle("ai.play", &json!({"projectId": "wordfight", "memberId": "nobody"})).is_err());
+        let started = service.handle("ai.play", &json!({"projectId": "wordfight", "memberId": "vex", "persona": "exploit_hunter", "seed": 5})).unwrap();
+        let pid = started["id"].as_str().unwrap().to_string();
+        assert_eq!((started["kind"].as_str(), started["profile"].as_str(), started["status"].as_str()), (Some("ai_player"), Some("ai:exploit_hunter"), Some("running")));
+        let play_dir = started["play_dir"].as_str().unwrap().to_string();
+        let snap = wait_for(&service, "the AI playtest ends", |s| s.playtests.iter().any(|p| p.id == pid && p.status != "running"));
+        let pt = snap.playtests.iter().find(|p| p.id == pid).unwrap();
+        assert_eq!(pt.status, "finished", "{:?}", pt.failure);
+        assert!(pt.event_count > 10 && pt.metrics["ai"]["turns"].as_u64().unwrap() >= 2 && pt.metrics["ai"]["fallbacks"] == 0, "{}", pt.metrics);
+        assert!(pt.observations.contains("Long words won"), "its reflection is kept");
+        assert!(!Path::new(&play_dir).exists(), "the checkout is removed");
+        // The finding carries the replay: build, seed and the moves up to it.
+        let f = snap.findings.iter().find(|f| f.id == "F-001").expect("the finding is filed");
+        assert_eq!((f.title.as_str(), f.severity.as_str(), f.status.as_str(), f.seed, f.actions.len()), ("The longest word always wins", "high", "unverified", Some(5), 2));
+        assert_eq!((f.round, f.member_id.as_deref(), f.playtest_id.as_deref()), (Some(2), Some("vex"), Some(pid.as_str())));
+        // Replayed on its build without the agent, it holds.
+        let v = service.handle("finding.verify", &json!({"projectId": "wordfight", "findingId": "F-001"})).unwrap();
+        assert_eq!(v["status"], "reproduced", "{}", v["verification"]);
+        // On a build whose balance changed, the same moves no longer make the same game.
+        std::fs::write(repo.join("balance.json"), "{\"length_multiplier\": 1.0, \"semantic_multiplier\": 2.0}\n").unwrap();
+        workspaces::git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "flatter length"]).unwrap();
+        let v = service.handle("finding.verify", &json!({"projectId": "wordfight", "findingId": "F-001", "ref": "main"})).unwrap();
+        assert_eq!(v["status"], "fixed", "{}", v["verification"]);
+        // It becomes a design question that points back to it.
+        let p = service.handle("finding.promote", &json!({"projectId": "wordfight", "findingId": "F-001"})).unwrap();
+        assert_eq!((p["question"]["id"].as_str(), p["question"]["raised_by"].as_str(), p["question"]["source"].as_str()), (Some("Q-001"), Some("exploit-hunter"), Some("F-001")));
+        assert!(p["question"]["context"].as_str().unwrap().contains("seed 5"));
+        assert!(service.handle("finding.set", &json!({"projectId": "wordfight", "findingId": "F-001", "status": "maybe"})).is_err());
+        assert_eq!(service.handle("finding.set", &json!({"projectId": "wordfight", "findingId": "F-001", "status": "wont_fix"})).unwrap()["status"], "wont_fix");
     }
 
     #[test]

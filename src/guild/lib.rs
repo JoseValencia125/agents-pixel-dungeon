@@ -5,6 +5,7 @@
 //! state transition; harnesses only propose. The widget and the CLI are
 //! clients of its Unix socket.
 
+pub mod aiplay;
 pub mod api;
 pub mod config;
 pub mod design;
