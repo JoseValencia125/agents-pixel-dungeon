@@ -193,6 +193,47 @@ impl Assets {
             "kkRRRRRRRRRRRRRRRRRRRRkk",
             ".kkkRRRRRRRRRRRRRRRRkkk.",
         ], &tome_colors), nearest);
+        // Two beats of a page being turned: a leaf rising by the spine, then
+        // arced over the middle on its way to the other side.
+        prop("tome_turn_a", pixel_image(&[
+            ".kkkRRRRRRRRRRRRRRRRkkk.",
+            "kkRRRRRRRRRRRRRRRRRRRRkk",
+            "kRWWWWWWWWWWPWWWWWWWWWRk",
+            "RRWlllllllWWPWWWWWWWWWRR",
+            "RRWWWWWWWWWWPWWWWWWWWWRR",
+            "RRWlllllllWWPWWWWWWWWWRR",
+            "RRWWWWWWWWWWPWWWWWWWWWRR",
+            "RRWWWWWWWWWWPWlllllllWRR",
+            "RRPPPPPPPPWWPPPPPPPPPPRR",
+            "kRPPPPPPPPWWPPPPPPPPPPRk",
+            "kkRRRRRRRRRRRRRRRRRRRRkk",
+            ".kkkRRRRRRRRRRRRRRRRkkk.",
+        ], &tome_colors), nearest);
+        prop("tome_turn_b", pixel_image(&[
+            ".kkkRRRRRRRRRRRRRRRRkkk.",
+            "kkRRRRRRRRRWWWPRRRRRRRkk",
+            "kRWWWWWWWWWWWWPWWWWWWWRk",
+            "RRWlllllllWWWWPWWWWWWWRR",
+            "RRWWWWWWWWWWWWPWWWWWWWRR",
+            "RRWlllllllWWWWPWWWWWWWRR",
+            "RRWWWWWWWWWWWWPWWWWWWWRR",
+            "RRWWWWWWWWWWWWPllllllWRR",
+            "RRPPPPPPPPPWWWPPPPPPPPRR",
+            "kRPPPPPPPPPWWWPPPPPPPPRk",
+            "kkRRRRRRRRRRRRRRRRRRRRkk",
+            ".kkkRRRRRRRRRRRRRRRRkkk.",
+        ], &tome_colors), nearest);
+        // A quill the hero writes with: a pale feather tapering to a dark
+        // nib. Drawn in the hand, pointing down-left onto the page.
+        prop("quill", pixel_image(&[
+            "....W",
+            "...WW",
+            "..WWy",
+            "..Wy.",
+            ".Wy..",
+            "ky...",
+            "k....",
+        ], &tome_colors), nearest);
         let scroll_colors = [('k', INK), ('D', rgb(0.722, 0.435, 0.314)), ('W', rgb(0.918, 0.831, 0.667)), ('l', rgb(0.635, 0.149, 0.2))];
         prop("scroll_closed", pixel_image(&["kkkkk", "kDWDk", "kkkkk"], &scroll_colors), nearest);
         prop("scroll_open", pixel_image(&["kkkkkkkkk", "kDWWWWWDk", "kDWlWlWDk", "kDWWWlWDk", "kkkkkkkkk"], &scroll_colors), nearest);

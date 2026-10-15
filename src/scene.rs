@@ -922,13 +922,12 @@ impl Room {
                 self.set_pose(Pose::Idle(0.6));
             }
             StepKind::Git { station } => {
-                // Facing the table: still as it reaches for the tome and
-                // sets it down, hands busy (Work) while it writes, still
-                // again as it closes the book and carries it off.
+                // Facing the table. The body stays calm (idle breathing) —
+                // the writing is carried by the drawn arm and quill over the
+                // ledger, not the harness's generic work frames.
                 self.station = station;
                 self.facing = 1.0;
-                let writing = e > 2.0 && e < dur - 1.8;
-                self.set_pose(if writing { Pose::Work(0.22) } else { Pose::Idle(0.5) });
+                self.set_pose(Pose::Idle(0.5));
             }
             StepKind::Look => {
                 self.facing = if e < 0.5 { -1.0 } else if e < 1.0 { 1.0 } else { -1.0 };
@@ -997,11 +996,12 @@ impl Room {
     }
 
     /// The huge git ledger while the hero keeps it, as (sprite, size, offset
-    /// from the hero's centre, tilt). It is laid flat on the desk, seen from
-    /// above at the room's angle: the hero sets it down in front, opens it,
-    /// writes a few lines, then shuts it and lifts it away. No frontal tilt
-    /// while it rests — a book flat on the table is seen from above.
-    fn git_tome(&self) -> Option<(&'static str, Vec2, Vec2, f32)> {
+    /// from the hero's centre, tilt, writing phase). It is laid flat on the
+    /// desk, seen from above: the hero sets it down, opens it, writes line
+    /// after line turning a page now and then, then shuts it and lifts it
+    /// away. The writing phase (0–1) is Some only while the quill is on the
+    /// page, so the arm rests between strokes and lifts off to turn a page.
+    fn git_tome(&self) -> Option<(&'static str, Vec2, Vec2, f32, Option<f32>)> {
         if self.in_transition { return None; }
         let runner = self.runner.as_ref()?;
         let (step, e) = runner.current()?;
@@ -1020,22 +1020,32 @@ impl Room {
         if e < open_at {
             // Lower the closed tome onto the desk from a little above it.
             let q = (e / open_at).clamp(0.0, 1.0);
-            Some(("tome_closed", thick, vec2(rest.x, rest.y - lift * (1.0 - q)), 0.0))
+            Some(("tome_closed", thick, vec2(rest.x, rest.y - lift * (1.0 - q)), 0.0, None))
         } else if e < close_at {
-            // Open and flat on the desk; the hero writes, a fresh line of
-            // ink coming and going, with a faint bob of the page.
+            // Open and flat on the desk. One cycle: write a couple of lines
+            // (the quill on the page), then turn a page (hand lifted away),
+            // and repeat. 2.2 s per cycle: 1.6 s writing, 0.6 s turning.
             let w = e - open_at;
-            let writing = (w / 0.5) as i32 % 2 == 1;
+            let cycle = 2.2;
+            let p = w % cycle;
             let bob = -0.5 * (std::f32::consts::TAU * w / 0.9).sin().abs();
-            let name = if writing { "tome_open_write" } else { "tome_open" };
-            Some((name, big, vec2(rest.x, rest.y + bob), 0.0))
+            if p < 1.6 {
+                // Writing: the ink line comes and goes on the page.
+                let inking = (p / 0.4) as i32 % 2 == 1;
+                let name = if inking { "tome_open_write" } else { "tome_open" };
+                Some((name, big, vec2(rest.x, rest.y + bob), 0.0, Some((p / 1.6).clamp(0.0, 1.0))))
+            } else {
+                // Turning the page: two beats, the hand off the page.
+                let name = if p < 1.9 { "tome_turn_a" } else { "tome_turn_b" };
+                Some((name, big, vec2(rest.x, rest.y), 0.0, None))
+            }
         } else if e < away_at {
             // Shut it, resting a moment on the desk.
-            Some(("tome_closed", thick, rest.to_vec2(), 0.0))
+            Some(("tome_closed", thick, rest.to_vec2(), 0.0, None))
         } else {
             // Lift it back up off the desk.
             let q = ((e - away_at) / (dur - away_at)).clamp(0.0, 1.0);
-            Some(("tome_closed", thick, vec2(rest.x, rest.y - lift * q), 0.0))
+            Some(("tome_closed", thick, vec2(rest.x, rest.y - lift * q), 0.0, None))
         }
     }
 
@@ -1269,10 +1279,29 @@ impl Room {
                 draw_sprite(&clipped, prop, pos2(hero_at.x + offset.x, hero_at.y + offset.y), size, false, 0.0, Color32::WHITE);
             }
             // The git ledger: a huge tome the hero heaves onto the table in
-            // front of it, opens, writes in, then closes and carries off.
-            if let Some((name, size, offset, angle)) = self.git_tome() {
+            // front of it, opens, turns its pages and writes in, then closes
+            // and carries off.
+            if let Some((name, size, offset, angle, writing)) = self.git_tome() {
                 let prop = assets.prop(name);
-                draw_sprite(&clipped, prop, pos2(hero_at.x + offset.x, hero_at.y + offset.y), size, false, angle, Color32::WHITE);
+                let bc = pos2(hero_at.x + offset.x, hero_at.y + offset.y);
+                draw_sprite(&clipped, prop, bc, size, false, angle, Color32::WHITE);
+                // While the quill is on the page, an arm reaches onto the
+                // right-hand leaf and the hand sweeps as it writes, dropping
+                // a line at a time; between strokes and page turns it rests.
+                if let Some(w) = writing {
+                    let line = (w * 3.0) as i32; // three lines down the page
+                    let sweep = (std::f32::consts::TAU * w * 7.0).sin();
+                    // The writing spot on the right page.
+                    let tip = pos2(bc.x + 9.0 + sweep * 4.0, bc.y - 4.0 + line as f32 * 3.0);
+                    let shoulder = pos2(hero_at.x + 3.0, hero_at.y - 3.0);
+                    let arm = assets.arm(self.harness);
+                    let reach = (tip - shoulder).length().max(1.0);
+                    let arm_angle = (tip.y - shoulder.y).atan2(tip.x - shoulder.x) - std::f32::consts::FRAC_PI_2;
+                    // The arm from the shoulder down to the hand on the page.
+                    draw_anchored(&clipped, arm, shoulder, vec2(6.0, reach + 2.0), vec2(0.5, 0.0), false, arm_angle, Color32::WHITE);
+                    // The quill in the hand, nib on the page.
+                    draw_anchored(&clipped, assets.prop("quill"), tip, vec2(7.0, 9.8), vec2(0.1, 0.95), false, 0.1 * sweep, Color32::WHITE);
+                }
             }
             if !self.in_transition {
                 match style.status {
