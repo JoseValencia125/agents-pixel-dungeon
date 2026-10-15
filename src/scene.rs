@@ -289,6 +289,9 @@ enum StepKind {
     Act { station: &'static str, face: f32, pose: Pose },
     /// Read a book or a scroll at a station.
     Read { station: &'static str, scroll: bool, seconds: f32 },
+    /// Keep the git ledger: heave a huge tome onto the table, open it,
+    /// write, then close it and carry it away.
+    Git { station: &'static str },
     /// Look left and right (wandering).
     Look,
     /// Show "?" in the bubble.
@@ -683,6 +686,7 @@ impl Room {
         match name {
             "read" => Step { kind: StepKind::Read { station: "read", scroll: false, seconds: 3.6 }, dur: 4.6 },
             "plan" => Step { kind: StepKind::Read { station: "plan", scroll: true, seconds: 3.6 }, dur: 4.6 },
+            "git" => Step { kind: StepKind::Git { station: "git" }, dur: 7.2 },
             "forge" => Step { kind: StepKind::Act { station: "forge", face: -1.0, pose: Pose::Work(0.16) }, dur: 3.0 },
             "brew" => Step { kind: StepKind::Act { station: "brew", face: 1.0, pose: Pose::Work(0.2) }, dur: 3.4 },
             "gems" => Step { kind: StepKind::Act { station: "gems", face: 1.0, pose: Pose::Work(0.22) }, dur: 2.0 },
@@ -699,7 +703,7 @@ impl Room {
     fn start_working(&mut self, from: Pos2) {
         let spot = self.style.spot;
         let station_of = |name: &str| -> Pos2 {
-            match name { "type" | "plan" => spot, other => station(other).map(|s| s.0).unwrap_or(spot) }
+            match name { "type" | "plan" | "git" => spot, other => station(other).map(|s| s.0).unwrap_or(spot) }
         };
         let mut walker = from;
         let mut steps = vec![];
@@ -917,6 +921,15 @@ impl Room {
                 self.facing = 1.0;
                 self.set_pose(Pose::Idle(0.6));
             }
+            StepKind::Git { station } => {
+                // Facing the table: still as it reaches for the tome and
+                // sets it down, hands busy (Work) while it writes, still
+                // again as it closes the book and carries it off.
+                self.station = station;
+                self.facing = 1.0;
+                let writing = e > 2.0 && e < dur - 1.8;
+                self.set_pose(if writing { Pose::Work(0.22) } else { Pose::Idle(0.5) });
+            }
             StepKind::Look => {
                 self.facing = if e < 0.5 { -1.0 } else if e < 1.0 { 1.0 } else { -1.0 };
                 self.set_pose(Pose::Idle(0.5));
@@ -981,6 +994,47 @@ impl Room {
             }
         }
         (pos, None, book)
+    }
+
+    /// The huge git ledger while the hero keeps it, as (sprite, size, offset
+    /// from the hero's centre, tilt). It rises from below the table, opens,
+    /// the hero writes a few lines, then it closes and is carried back down.
+    fn git_tome(&self) -> Option<(&'static str, Vec2, Vec2, f32)> {
+        if self.in_transition { return None; }
+        let runner = self.runner.as_ref()?;
+        let (step, e) = runner.current()?;
+        let StepKind::Git { .. } = step.kind else { return None };
+        let dur = step.dur.max(0.001);
+        let big = vec2(44.0, 34.0); // the open spread, really large
+        let thick = vec2(34.0, 26.0); // the closed tome
+        let rest = pos2(16.0, 2.0); // where it sits on the table, before the hero
+        let down = pos2(8.0, 24.0); // held low, just clearing the table edge
+        // Timeline over `dur` (default 7.2 s).
+        let open_at = 1.2; // tome placed and swung open
+        let close_at = dur - 1.8; // writing done, book shut
+        let away_at = dur - 1.0; // lifted off the table again
+        if e < open_at {
+            // Heave the closed tome up from below, straightening as it rises.
+            let q = (e / open_at).clamp(0.0, 1.0);
+            let pos = pos2(lerp(down.x, rest.x, q), lerp(down.y, rest.y, q));
+            Some(("tome_closed", thick, pos.to_vec2(), lerp(0.18, 0.0, q)))
+        } else if e < close_at {
+            // Open on the table; the hero writes, a fresh line of ink coming
+            // and going, with a faint bob of the quill.
+            let w = e - open_at;
+            let writing = (w / 0.5) as i32 % 2 == 1;
+            let bob = -0.6 * (std::f32::consts::TAU * w / 0.9).sin().abs();
+            let name = if writing { "tome_open_write" } else { "tome_open" };
+            Some((name, big, vec2(rest.x, rest.y + bob), 0.0))
+        } else if e < away_at {
+            // Shut it, resting a moment on the table.
+            Some(("tome_closed", thick, rest.to_vec2(), 0.0))
+        } else {
+            // Carry it back down below the table edge.
+            let q = ((e - away_at) / (dur - away_at)).clamp(0.0, 1.0);
+            let pos = pos2(lerp(rest.x, down.x, q), lerp(rest.y, down.y, q));
+            Some(("tome_closed", thick, pos.to_vec2(), lerp(0.0, 0.18, q)))
+        }
     }
 
     fn update_fx(&mut self, dt: f32) {
@@ -1211,6 +1265,12 @@ impl Room {
             if let Some((name, size, offset)) = book {
                 let prop = assets.prop(name);
                 draw_sprite(&clipped, prop, pos2(hero_at.x + offset.x, hero_at.y + offset.y), size, false, 0.0, Color32::WHITE);
+            }
+            // The git ledger: a huge tome the hero heaves onto the table in
+            // front of it, opens, writes in, then closes and carries off.
+            if let Some((name, size, offset, angle)) = self.git_tome() {
+                let prop = assets.prop(name);
+                draw_sprite(&clipped, prop, pos2(hero_at.x + offset.x, hero_at.y + offset.y), size, false, angle, Color32::WHITE);
             }
             if !self.in_transition {
                 match style.status {
