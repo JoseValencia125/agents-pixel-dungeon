@@ -1031,6 +1031,18 @@ impl Service {
         Ok(json!({"playtest": pt, "cwd": cwd, "argv": argv, "env": {"GUILD_TELEMETRY": telemetry.display().to_string(), "GUILD_PLAYTEST": id}}))
     }
 
+    /// Run the project's setup in a checkout made to play or replay (what
+    /// an attempt's worktree gets too: dependencies, generated data); a
+    /// checkout whose setup fails is removed.
+    fn prepare_checkout(&self, project: &Project, dir: &Path) -> Res<()> {
+        if project.setup.is_empty() { return Ok(()); }
+        match workspaces::run_with_timeout(dir, &project.setup, self.settings.setup_timeout_seconds) {
+            Ok((0, _)) => Ok(()),
+            Ok((code, out)) => { workspaces::remove_checkout(project, dir); Err(ApiError::internal(format!("setup exited with {code}: {}", out.chars().rev().take(600).collect::<String>().chars().rev().collect::<String>()))) }
+            Err(e) => { workspaces::remove_checkout(project, dir); Err(ApiError::internal(format!("setup failed: {e}"))) }
+        }
+    }
+
     /// The build a session plays: an experiment variant's worktree, or a
     /// detached checkout (made for the session `id`) of a ref, by default
     /// the project's target. Returns the directory, its commit, the
@@ -1055,6 +1067,7 @@ impl Service {
                 let sha = workspaces::rev_parse(Path::new(&project.repo_path), &rev).map_err(ApiError::invalid)?;
                 let dir = crate::paths::worktrees_dir().join(&project.id).join(format!("play-{}", &id[id.len() - 8..]));
                 workspaces::checkout_detached(project, &sha, &dir).map_err(ApiError::internal)?;
+                self.prepare_checkout(project, &dir)?;
                 (dir.display().to_string(), Some(sha), None, Some(dir.display().to_string()))
             }
         })
@@ -1327,6 +1340,7 @@ impl Service {
         let sha = workspaces::rev_parse(Path::new(&project.repo_path), &rev).map_err(ApiError::invalid)?;
         let dir = crate::paths::worktrees_dir().join(&project.id).join(format!("replay-{}", &id[id.len() - 8..]));
         workspaces::checkout_detached(&project, &sha, &dir).map_err(ApiError::internal)?;
+        self.prepare_checkout(&project, &dir)?;
         let telemetry = crate::paths::artifacts_dir().join("play").join(format!("replay-{id}.jsonl"));
         let _ = std::fs::create_dir_all(telemetry.parent().unwrap());
         let _ = std::fs::write(&telemetry, b"");
@@ -3823,6 +3837,11 @@ mod tests {
     fn an_ai_player_plays_the_build_and_the_exploit_hunters_finding_replays() {
         let home = TempHome::new();
         let repo = wordfight_repo(&home);
+        // A setup that leaves a mark: every checkout made to play or replay must run it.
+        let marks = home.repo_path().with_file_name("setup-marks.txt");
+        let toml = std::fs::read_to_string(repo.join(".guild/guild.toml")).unwrap().replace("name = \"Wordfight\"", &format!("name = \"Wordfight\"\nsetup = [\"sh\", \"-c\", \"pwd >> {}\"]", marks.display()));
+        std::fs::write(repo.join(".guild/guild.toml"), toml).unwrap();
+        workspaces::git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "setup"]).unwrap();
         let service = Service::new(Store::open_in_memory().unwrap(), Settings::default());
         let mock = Arc::new(MockHarness::new(MockBehaviour::Reply("ok".into())));
         // The hunter takes the longest word and, on its second move, reports that it always wins.
@@ -3870,6 +3889,8 @@ mod tests {
         assert!(p["question"]["context"].as_str().unwrap().contains("seed 5"));
         assert!(service.handle("finding.set", &json!({"projectId": "wordfight", "findingId": "F-001", "status": "maybe"})).is_err());
         assert_eq!(service.handle("finding.set", &json!({"projectId": "wordfight", "findingId": "F-001", "status": "wont_fix"})).unwrap()["status"], "wont_fix");
+        let prepared = std::fs::read_to_string(&marks).unwrap();
+        assert_eq!(prepared.lines().count(), 3, "the play checkout and both replays ran the setup: {prepared}");
     }
 
     #[test]

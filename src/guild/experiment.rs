@@ -418,23 +418,30 @@ pub fn derive_metrics(events: &[Value]) -> Value {
 }
 
 /// Fold the metrics of several playtests of one build and profile into
-/// one summary: means of means, sums of counts.
+/// one summary: means of means, sums of counts. A field's mean is over
+/// the playtests that have it (an event that never happened in a playtest
+/// is no zero), and `playtests` says how many those were.
 pub fn aggregate(metrics: &[Value]) -> Value {
     if metrics.is_empty() { return Value::Null; }
-    let n = metrics.len() as f64;
     let mut runs = serde_json::json!({"started": 0, "completed": 0, "failed": 0});
-    let mut fields: BTreeMap<String, (f64, f64, f64)> = BTreeMap::new();
+    let mut fields: BTreeMap<String, (f64, f64, f64, u64, u64)> = BTreeMap::new();
     let mut choices: BTreeMap<String, u64> = BTreeMap::new();
+    let mut events: BTreeMap<String, u64> = BTreeMap::new();
     for m in metrics {
+        if let Some(c) = m["events"].as_object() {
+            for (k, v) in c { *events.entry(k.clone()).or_default() += v.as_u64().unwrap_or(0); }
+        }
         for k in ["started", "completed", "failed"] {
             runs[k] = Value::from(runs[k].as_u64().unwrap_or(0) + m["runs"][k].as_u64().unwrap_or(0));
         }
         if let Some(f) = m["fields"].as_object() {
             for (k, v) in f {
-                let e = fields.entry(k.clone()).or_insert((0.0, f64::MAX, f64::MIN));
+                let e = fields.entry(k.clone()).or_insert((0.0, f64::MAX, f64::MIN, 0, 0));
                 e.0 += v["mean"].as_f64().unwrap_or(0.0);
                 e.1 = e.1.min(v["min"].as_f64().unwrap_or(0.0));
                 e.2 = e.2.max(v["max"].as_f64().unwrap_or(0.0));
+                e.3 += 1;
+                e.4 += v["n"].as_u64().unwrap_or(0);
             }
         }
         if let Some(c) = m["choices"]["counts"].as_object() {
@@ -444,10 +451,10 @@ pub fn aggregate(metrics: &[Value]) -> Value {
     let started = runs["started"].as_u64().unwrap_or(0);
     let completed = runs["completed"].as_u64().unwrap_or(0);
     runs["completion_rate"] = Value::from(if started > 0 { completed as f64 / started as f64 } else { 0.0 });
-    let fields: serde_json::Map<String, Value> = fields.into_iter().map(|(k, (sum, min, max))| (k, serde_json::json!({"mean": sum / n, "min": min, "max": max}))).collect();
+    let fields: serde_json::Map<String, Value> = fields.into_iter().map(|(k, (sum, min, max, with, n))| (k, serde_json::json!({"mean": sum / with as f64, "min": min, "max": max, "playtests": with, "n": n}))).collect();
     let total: u64 = choices.values().sum();
     let (top, top_share) = choices.iter().max_by_key(|(_, c)| **c).map(|(c, k)| (c.clone(), if total > 0 { *k as f64 / total as f64 } else { 0.0 })).unwrap_or_default();
-    serde_json::json!({"playtests": metrics.len(), "runs": runs, "fields": fields, "choices": {"distinct": choices.len(), "total": total, "top": top, "top_share": top_share}})
+    serde_json::json!({"playtests": metrics.len(), "events": events, "runs": runs, "fields": fields, "choices": {"distinct": choices.len(), "total": total, "top": top, "top_share": top_share}})
 }
 
 /// The analyst's answer: a fenced JSON block (or a bare object) with a verdict.
@@ -510,6 +517,12 @@ mod tests {
         assert!((m["choices"]["top_share"].as_f64().unwrap() - 2.0 / 3.0).abs() < 1e-9);
         let agg = aggregate(&[m.clone(), m.clone()]);
         assert_eq!(agg["runs"]["started"], 2);
+        // A field one playtest never recorded does not drag the mean towards zero.
+        let won = derive_metrics(&parse_telemetry(r#"{"type":"game.event","runId":"a","event":"run.completed","data":{"edition":4}}"#));
+        let lost = derive_metrics(&parse_telemetry(r#"{"type":"game.event","runId":"b","event":"run.failed","data":{"edition":2}}"#));
+        let both = aggregate(&[won, lost]);
+        assert_eq!((both["fields"]["run.completed.edition"]["mean"].as_f64(), both["fields"]["run.completed.edition"]["playtests"].as_u64()), (Some(4.0), Some(1)));
+        assert_eq!((both["events"]["run.completed"].as_u64(), both["events"]["run.failed"].as_u64()), (Some(1), Some(1)), "event counts add up");
         assert_eq!(agg["choices"]["distinct"], 2);
         assert_eq!(agg["playtests"], 2);
     }

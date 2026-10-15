@@ -42,6 +42,13 @@ One entry per milestone: what changed, what was decided, and how it was checked.
 - **The repository copy is linked Markdown** (`overview.md` as the tip of the iceberg, then one page per section, loop, system, object, question, decision, hypothesis, experiment) plus `design.json`, the structured state the guild reads back; still published to the managed design branch, never the checkout.
 - Design chamber in the dungeon: eight tabs (guild, concept, experience, loops, systems, parts, questions, decisions), a maturity bar and counters. Test: `a_question_is_resolved_by_a_decision_the_design_points_at_and_both_survive_a_restart` covers the first milestone's eight points.
 
+## M12 — The first real experiment: Verbrawl (2026-10-15)
+
+- Verbrawl speaks the guild's contract (its PR #4): `game/scripts/playtest.ts` plays whole runs with the simulator's personas (casual, bueno, experto) and emits `game.event` lines (`choice.presented` carries every word the persona spotted with length, score, rarity and power, and `longest_is_best`); `.guild/guild.toml` has the checkout setup (`npm ci` + `npm run data`, ~4 s), the `tsc` + `vitest` verifier and the runner.
+- Checkouts made to play or replay now run the project's setup too (`prepare_checkout`), as attempt worktrees always did; a failing setup removes the checkout.
+- The experiment ("¿Cuánto debe pesar el largo?", Q-001): control, mult medio (+0.5 per letter), mult plano and rareza fuerte, built by a Codex member (exact diffs, tests updated, verifier passed), 120 playtests (3 personas × 10 seeds × 4 builds), analysed by a Codex design analyst in 8 minutes end to end. Verdict: rejects (0.86). Flattening the mult cuts how often the longest word is the best one (experto 82 → 59 %) but every variant takes "bueno" from 4/10 to 8–10/10 runs won, outside the design's 35–55 %, because the rival scores with the same formula; rounds also double in length.
+- The analyst caught a guild bug: `aggregate` averaged a field over every playtest even when the event never happened in some (a mean below its minimum). Field means are now over the playtests that have the field (with `playtests` and `n`), and per-event counts are summed, so round wins and losses come with their denominators.
+
 ## M11 — AI players and the exploit hunter (2026-10-15)
 
 - **Agent protocol**: `[ai_play] argv` in `.guild/guild.toml`. The game prints `{"type":"agent.observation","turn","text","state","actions":[{"id","label"}]}` and reads `{"action":"<id>"}`; telemetry goes to `GUILD_TELEMETRY` (or `game.event` lines on stdout). Same seed and moves must give the same game. `aiplay::play_game` drives it with any decider and bounds it by turns, a silence timeout and a stop flag.
