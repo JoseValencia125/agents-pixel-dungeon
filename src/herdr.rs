@@ -967,7 +967,11 @@ pub fn demo_agents(tick: usize) -> Vec<Agent> {
             let cwd = format!("~/demo/{}", s.1.to_lowercase().replace(' ', "-"));
             let mut agent = Agent::new(&format!("demo:{i}"), s.0, s.2, s.1, &tr(s.3), &cwd);
             agent.branch = branches[i].map(str::to_string);
-            if i == 0 { agent.action = Some(["read", "forge", "brew", "git", "summon", "plan", "type"][(tick / 8) % 7].to_string()); }
+            if i == 0 {
+                // HPD_TEST_ACTION pins the lead hero's action (for captures).
+                let cycle = ["read", "forge", "brew", "git", "summon", "plan", "type"][(tick / 8) % 7].to_string();
+                agent.action = Some(std::env::var("HPD_TEST_ACTION").unwrap_or(cycle));
+            }
             if agent.status == "limited" {
                 // Fixed for the whole run, so the countdown ticks down.
                 static DEMO_RESET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();

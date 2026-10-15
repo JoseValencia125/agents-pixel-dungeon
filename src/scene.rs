@@ -4,7 +4,7 @@
 //! wanders; status changes walk the hero out through the door and into the new room.
 //! Animation is driven by elapsed time, so Reduce Motion simply stops it.
 
-use crate::assets::{Assets, Sprite};
+use crate::assets::{Assets, Sprite, GIT_TOME_FRAME, GIT_TOME_HERO};
 use crate::herdr::{harness_for, Agent};
 use crate::identity::{Identity, ProjectMeta, ProjectOverride};
 use crate::l10n::tr;
@@ -289,8 +289,8 @@ enum StepKind {
     Act { station: &'static str, face: f32, pose: Pose },
     /// Read a book or a scroll at a station.
     Read { station: &'static str, scroll: bool, seconds: f32 },
-    /// Keep the git ledger: heave a huge tome onto the table, open it,
-    /// write, then close it and carry it away.
+    /// Keep the git ledger: set a huge tome flat on the desk, open it,
+    /// write and turn its pages, then close it and carry it away.
     Git { station: &'static str },
     /// Look left and right (wandering).
     Look,
@@ -995,57 +995,46 @@ impl Room {
         (pos, None, book)
     }
 
-    /// The huge git ledger while the hero keeps it, as (sprite, size, offset
-    /// from the hero's centre, tilt, writing phase). It is laid flat on the
-    /// desk, seen from above: the hero sets it down, opens it, writes line
-    /// after line turning a page now and then, then shuts it and lifts it
-    /// away. The writing phase (0–1) is Some only while the quill is on the
-    /// page, so the arm rests between strokes and lifts off to turn a page.
-    fn git_tome(&self) -> Option<(&'static str, Vec2, Vec2, f32, Option<f32>)> {
+    /// The huge git ledger while the hero keeps it, as (frame of the
+    /// ledger strip, how far it is raised off the desk in points). It lies
+    /// flat on the desktop in front of the hero: set down shut, opened, then
+    /// written in stroke by stroke, a page turned whenever two lines are
+    /// done, and at last shut and lifted away. The strip's arm frames carry
+    /// the quill, so the arm moves with the frame.
+    fn git_tome(&self) -> Option<(usize, f32)> {
         if self.in_transition { return None; }
         let runner = self.runner.as_ref()?;
         let (step, e) = runner.current()?;
         let StepKind::Git { .. } = step.kind else { return None };
         let dur = step.dur.max(0.001);
-        let big = vec2(54.0, 27.0); // the open spread, broad and flattened
-        let thick = vec2(50.0, 23.0); // the closed tome, laid flat
-        // On the desktop, in front of the hero: centred, a touch toward the
-        // near (front) edge of the table so it reads as resting on it.
-        let rest = pos2(1.0, 7.0);
         let lift = 10.0; // how far it is raised while carried on or off
         // Timeline over `dur` (default 7.2 s).
         let open_at = 1.2; // tome placed and swung open
         let close_at = dur - 1.8; // writing done, book shut
         let away_at = dur - 1.0; // lifted off the table again
         if e < open_at {
-            // Lower the closed tome onto the desk from a little above it.
+            // Lower the shut tome onto the desk from a little above it.
             let q = (e / open_at).clamp(0.0, 1.0);
-            Some(("tome_closed", thick, vec2(rest.x, rest.y - lift * (1.0 - q)), 0.0, None))
+            Some((0, -lift * (1.0 - q)))
         } else if e < close_at {
-            // Open and flat on the desk. One cycle: write a couple of lines
-            // (the quill on the page), then turn a page (hand lifted away),
-            // and repeat. 2.2 s per cycle: 1.6 s writing, 0.6 s turning.
-            let w = e - open_at;
-            let cycle = 2.2;
-            let p = w % cycle;
-            let bob = -0.5 * (std::f32::consts::TAU * w / 0.9).sin().abs();
-            if p < 1.6 {
-                // Writing: the ink line comes and goes on the page.
-                let inking = (p / 0.4) as i32 % 2 == 1;
-                let name = if inking { "tome_open_write" } else { "tome_open" };
-                Some((name, big, vec2(rest.x, rest.y + bob), 0.0, Some((p / 1.6).clamp(0.0, 1.0))))
-            } else {
-                // Turning the page: two beats, the hand off the page.
-                let name = if p < 1.9 { "tome_turn_a" } else { "tome_turn_b" };
-                Some((name, big, vec2(rest.x, rest.y), 0.0, None))
+            // Open: a breath over the fresh spread, six strokes of the quill
+            // (two lines on the right-hand page), then the written leaf is
+            // lifted, stood up over the spine and laid down on the left.
+            const BEATS: [(usize, f32); 11] = [(1, 0.3), (2, 0.22), (3, 0.2), (4, 0.26), (5, 0.22), (6, 0.2), (7, 0.3), (8, 0.11), (9, 0.11), (10, 0.11), (11, 0.14)];
+            let cycle: f32 = BEATS.iter().map(|b| b.1).sum();
+            let mut p = (e - open_at) % cycle;
+            for (frame, beat) in BEATS {
+                if p < beat { return Some((frame, 0.0)); }
+                p -= beat;
             }
+            Some((1, 0.0))
         } else if e < away_at {
             // Shut it, resting a moment on the desk.
-            Some(("tome_closed", thick, rest.to_vec2(), 0.0, None))
+            Some((0, 0.0))
         } else {
             // Lift it back up off the desk.
             let q = ((e - away_at) / (dur - away_at)).clamp(0.0, 1.0);
-            Some(("tome_closed", thick, vec2(rest.x, rest.y - lift * q), 0.0, None))
+            Some((0, -lift * q))
         }
     }
 
@@ -1278,31 +1267,6 @@ impl Room {
                 let prop = assets.prop(name);
                 draw_sprite(&clipped, prop, pos2(hero_at.x + offset.x, hero_at.y + offset.y), size, false, 0.0, Color32::WHITE);
             }
-            // The git ledger: a huge tome the hero heaves onto the table in
-            // front of it, opens, turns its pages and writes in, then closes
-            // and carries off.
-            if let Some((name, size, offset, angle, writing)) = self.git_tome() {
-                let prop = assets.prop(name);
-                let bc = pos2(hero_at.x + offset.x, hero_at.y + offset.y);
-                draw_sprite(&clipped, prop, bc, size, false, angle, Color32::WHITE);
-                // While the quill is on the page, an arm reaches onto the
-                // right-hand leaf and the hand sweeps as it writes, dropping
-                // a line at a time; between strokes and page turns it rests.
-                if let Some(w) = writing {
-                    let line = (w * 3.0) as i32; // three lines down the page
-                    let sweep = (std::f32::consts::TAU * w * 7.0).sin();
-                    // The writing spot on the right page.
-                    let tip = pos2(bc.x + 9.0 + sweep * 4.0, bc.y - 4.0 + line as f32 * 3.0);
-                    let shoulder = pos2(hero_at.x + 3.0, hero_at.y - 3.0);
-                    let arm = assets.arm(self.harness);
-                    let reach = (tip - shoulder).length().max(1.0);
-                    let arm_angle = (tip.y - shoulder.y).atan2(tip.x - shoulder.x) - std::f32::consts::FRAC_PI_2;
-                    // The arm from the shoulder down to the hand on the page.
-                    draw_anchored(&clipped, arm, shoulder, vec2(6.0, reach + 2.0), vec2(0.5, 0.0), false, arm_angle, Color32::WHITE);
-                    // The quill in the hand, nib on the page.
-                    draw_anchored(&clipped, assets.prop("quill"), tip, vec2(7.0, 9.8), vec2(0.1, 0.95), false, 0.1 * sweep, Color32::WHITE);
-                }
-            }
             if !self.in_transition {
                 match style.status {
                     "blocked" => {
@@ -1342,6 +1306,15 @@ impl Room {
         // The room's front layer (the desk), over the hero.
         if let Some(front) = assets.room(&format!("{background}_front")) {
             clipped.image(front.tex, f, front.uv, tint);
+        }
+        // The git ledger, on the desktop (so over the desk's front layer),
+        // drawn at the hero's scale and laid out around where it stands; the
+        // hero's arm and quill over it, frame for frame.
+        if let Some((frame, raised)) = self.git_tome() {
+            let corner = pos2(hero_at.x - GIT_TOME_HERO.x * 2.0, hero_at.y - GIT_TOME_HERO.y * 2.0 + raised);
+            let size = GIT_TOME_FRAME * 2.0;
+            draw_anchored(&clipped, assets.git_tome(frame), corner, size, Vec2::ZERO, false, 0.0, Color32::WHITE);
+            draw_anchored(&clipped, assets.git_tome_arm(self.harness, frame), corner, size, Vec2::ZERO, false, 0.0, Color32::WHITE);
         }
         if self.party_visible {
             for mini in self.party.iter().filter(|m| m.front) { self.draw_mini(&clipped, mini, origin, assets, mini_tint); }
