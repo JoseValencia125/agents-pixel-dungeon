@@ -1566,6 +1566,10 @@ pub struct SceneResponse {
     pub edit_emblem: Option<String>,
     /// A room was dragged to a new place: every room's id, in the new order.
     pub reorder: Option<Vec<String>>,
+    /// Files from outside are being dragged over this room: open its chat.
+    pub file_hover: Option<String>,
+    /// Files from outside were dropped on this room: into its chat's message.
+    pub file_drop: Option<String>,
 }
 
 /// How long a room's band is held before it comes loose to be dragged.
@@ -1777,7 +1781,11 @@ impl Scene {
         let dt = match self.last_time { Some(last) if !self.reduced_motion => ((now - last) as f32).clamp(0.0, 0.1), _ => 0.0 };
         self.last_time = Some(now);
         self.clock += dt;
-        let mut response = SceneResponse { clicked: None, finish: None, terminal: None, summon: false, summon_rect: None, edit_emblem: None, reorder: None };
+        let mut response = SceneResponse { clicked: None, finish: None, terminal: None, summon: false, summon_rect: None, edit_emblem: None, reorder: None, file_hover: None, file_drop: None };
+        // Files dragged from outside: where they are over the dungeon, read
+        // from the system, since the pointer stands still for egui meanwhile.
+        let (files_hovered, files_dropped) = ui.ctx().input(|i| (!i.raw.hovered_files.is_empty(), !i.raw.dropped_files.is_empty()));
+        let drag_at = if files_hovered || files_dropped { crate::ui::drag_pointer(ui.ctx()) } else { None };
         let width = ui.available_width();
         let (slots, height) = self.layout(width);
         let scroll_request = self.scroll_request.take();
@@ -1837,6 +1845,15 @@ impl Scene {
                         room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
                     }
                     if hit.clicked() && !dragged { response.clicked = Some(id.clone()); }
+                    if drag_at.is_some_and(|p| rect.contains(p)) {
+                        if files_dropped { response.file_drop = Some(id.clone()); }
+                        else {
+                            response.file_hover = Some(id.clone());
+                            let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("room-drop")));
+                            painter.rect_stroke(rect.shrink(1.0), CornerRadius::same(6), Stroke::new(3.0_f32, Color32::from_rgb(140, 217, 115)), egui::StrokeKind::Inside);
+                            painter.text(rect.center_bottom() - vec2(0.0, 10.0), Align2::CENTER_BOTTOM, tr("Suelta para dejar la ruta en su chat"), FontId::monospace(crate::ui::fs(11.0)), Color32::WHITE);
+                        }
+                    }
                     if let Some((area, rows)) = hit.hover_pos().and_then(|p| room.shells_tip(rect.min, p)) { crate::ui::shells_note(ui.ctx(), area, &rows); }
                     let hit = match hit.hover_pos().and_then(|p| room.header_tip(rect.min, p)) { Some(tip) => hit.on_hover_text(tip), None => hit };
                     // A right click on the emblem edits it; elsewhere it opens the room's menu.

@@ -51,15 +51,58 @@ fn mono(text: &str, size: f32) -> RichText {
     RichText::new(text).font(FontId::monospace(fs(size)))
 }
 
+/// Where files dragged from outside are over the window, in points. The
+/// pointer egui knows stands still during a native drag on macOS (the
+/// system runs the drag), so it is read from the system and placed
+/// against the window's inner rect; elsewhere the last pointer position.
+#[cfg(target_os = "macos")]
+pub(crate) fn drag_pointer(ctx: &egui::Context) -> Option<egui::Pos2> {
+    #[repr(C)]
+    struct CGPoint { x: f64, y: f64 }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
+    let global = unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() { return None; }
+        let at = CGEventGetLocation(event);
+        CFRelease(event);
+        at
+    };
+    let inner = ctx.input(|i| i.viewport().inner_rect)?;
+    Some(egui::pos2(global.x as f32 - inner.min.x, global.y as f32 - inner.min.y))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn drag_pointer(ctx: &egui::Context) -> Option<egui::Pos2> {
+    ctx.input(|i| i.pointer.latest_pos())
+}
+
+/// Set for the frame in which a drop landed on a room, so the chat panel
+/// does not add the same files a second time.
+pub(crate) fn mark_drop_taken(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("drop-taken"), true));
+}
+
 /// Files dropped on the window this frame, as paths ready for a message:
 /// quoted when they hold a space, as the terminal would paste them.
 fn dropped_paths(ui: &Ui) -> Vec<String> {
+    let taken = ui.ctx().data_mut(|d| d.remove_temp::<bool>(egui::Id::new("drop-taken"))).unwrap_or(false);
+    if taken { return vec![]; }
     ui.ctx().input(|i| {
-        i.raw.dropped_files.iter().filter_map(|f| f.path.as_ref()).map(|p| {
-            let path = p.to_string_lossy().to_string();
-            if path.contains(' ') { format!("'{}'", path.replace('\'', "'\\''")) } else { path }
-        }).collect()
+        i.raw.dropped_files.iter().filter_map(|f| f.path.as_ref()).map(|p| quoted_path(&p.to_string_lossy())).collect()
     })
+}
+
+/// A path as the terminal would paste it: quoted when it holds a space.
+fn quoted_path(path: &str) -> String {
+    if path.contains(' ') { format!("'{}'", path.replace('\'', "'\\''")) } else { path.to_string() }
 }
 
 /// Add dropped files' paths to a draft, space-separated.
@@ -372,6 +415,14 @@ impl ChatState {
     pub fn with_draft(mut self, draft: String) -> ChatState {
         self.draft = draft;
         self
+    }
+
+    /// Files dropped on this agent's room: their paths into the message.
+    pub fn add_dropped(&mut self, ctx: &egui::Context) {
+        let paths: Vec<String> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.as_ref()).map(|p| quoted_path(&p.to_string_lossy())).collect());
+        if paths.is_empty() { return; }
+        add_paths(&mut self.draft, &paths);
+        self.focus = true;
     }
 
     fn menu(&self, agent: &Agent) -> MenuOptions {
