@@ -25,6 +25,7 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("Observaciones ({})", ["Observations ({})", "Observations ({})", "Osservazioni ({})", "Observações ({})"]),
         ("ronda {}", ["round {}", "tour {}", "turno {}", "rodada {}"]),
         ("→ Pregunta", ["→ Question", "→ Question", "→ Domanda", "→ Pergunta"]),
+        ("Modelo que está usando", ["Model in use", "Modèle utilisé", "Modello in uso", "Modelo em uso"]),
         ("Observado vs deseado", ["Observed vs desired", "Observé vs souhaité", "Osservato vs desiderato", "Observado vs desejado"]),
         ("Analizar playtests", ["Analyse playtests", "Analyser les playtests", "Analizza i playtest", "Analisar playtests"]),
         ("Calcula, sin IA, lo que muestran los eventos de las partidas jugadas: opciones dominantes, atributos que siempre ganan, opciones que nadie elige.", ["Computes, without AI, what the events of the games played show: dominant choices, attributes that always win, options nobody picks.", "Calcule, sans IA, ce que montrent les événements des parties : choix dominants, attributs qui gagnent toujours, options que personne ne prend.", "Calcola, senza IA, ciò che mostrano gli eventi delle partite: scelte dominanti, attributi che vincono sempre, opzioni che nessuno sceglie.", "Calcula, sem IA, o que os eventos das partidas mostram: escolhas dominantes, atributos que sempre vencem, opções que ninguém escolhe."]),
