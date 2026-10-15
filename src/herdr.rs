@@ -704,10 +704,12 @@ pub const CREATABLE_KINDS: [&str; 8] = ["claude", "codex", "gemini", "kiro", "op
 /// `supports_trust_all` and the summon form know not to offer it.
 ///
 /// kiro: `kiro-cli chat --trust-all-tools` ("Allows the model to use any
-/// tool to run commands without asking for confirmation").
+/// tool to run commands without asking for confirmation"). Herdr types
+/// the bare `kiro-cli` and appends these, so the `chat` subcommand goes
+/// here too: `kiro-cli --trust-all-tools` is "unexpected argument".
 pub fn trust_all_args(kind: &str) -> &'static [&'static str] {
     match kind {
-        "kiro" => &["--trust-all-tools"],
+        "kiro" => &["chat", "--trust-all-tools"],
         _ => &[],
     }
 }

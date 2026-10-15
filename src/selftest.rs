@@ -45,7 +45,7 @@ pub fn run() {
     // Full-permission launch: only kiro has the flag, and it is the one
     // kiro-cli chat takes (`-a, --trust-all-tools`); every other harness
     // offers nothing, so the summon form hides the toggle for them.
-    assert_eq!(crate::herdr::trust_all_args("kiro"), &["--trust-all-tools"], "Kiro's full-permission flag");
+    assert_eq!(crate::herdr::trust_all_args("kiro"), &["chat", "--trust-all-tools"], "Kiro's full-permission flag must follow its chat subcommand: Herdr types the bare kiro-cli");
     assert!(crate::herdr::supports_trust_all("kiro"), "Kiro supports full permission");
     assert!(["claude", "codex", "gemini", "cursor", "opencode", ""].iter().all(|k| crate::herdr::trust_all_args(k).is_empty() && !crate::herdr::supports_trust_all(k)), "Only Kiro offers full permission for now");
     let with_session = decode_snapshot(br#"{"result":{"snapshot":{"agents":[{"pane_id":"a","agent":"claude","agent_session":{"kind":"id","value":"s-1"}}]}}}"#).unwrap();
