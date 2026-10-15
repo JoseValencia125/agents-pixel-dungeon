@@ -189,6 +189,9 @@ struct App {
     start_fullscreen: bool,
     /// The size we asked for; anything else is the user resizing.
     expected: Option<Vec2>,
+    /// The place we asked for, until the window reports it: its rect lags a
+    /// frame or more behind.
+    commanded_origin: Option<egui::Pos2>,
     commanded_at: Option<Instant>,
     last_size: Option<Vec2>,
     size_changed_at: Option<f64>,
@@ -299,6 +302,7 @@ impl App {
             first_frame: true,
             start_fullscreen: fullscreen,
             expected: None,
+            commanded_origin: None,
             commanded_at: None,
             last_size: None,
             size_changed_at: None,
@@ -397,8 +401,18 @@ impl App {
     }
 
     fn command_size(&mut self, ctx: &egui::Context, (outer, placed): (Rect, bool), size: Vec2, anchor_left: bool) {
+        // A place just asked for counts before the window reports it, or the
+        // stale rect would move the window back.
+        let outer = match (self.commanded_origin, self.expected) {
+            (Some(origin), Some(expected)) => Rect::from_min_size(origin, expected),
+            _ => outer,
+        };
         let x = if anchor_left { outer.min.x } else { outer.max.x - size.x };
-        if placed { ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x, outer.min.y))); }
+        if placed {
+            let origin = egui::pos2(x, outer.min.y);
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(origin));
+            self.commanded_origin = Some(origin);
+        }
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
         self.expected = Some(size);
         self.commanded_at = Some(Instant::now());
@@ -427,13 +441,14 @@ impl App {
     fn restore_position(&mut self, ctx: &egui::Context) {
         let screen = ctx.input(|i| i.viewport().monitor_size).unwrap_or(vec2(1440.0, 900.0));
         let size = vec2(self.target_width(), self.target_height(screen));
-        let saved = self.prefs.top_right.filter(|(x, y)| *x - 20.0 >= 0.0 && *x - 20.0 <= screen.x && *y >= 0.0 && *y + 20.0 <= screen.y);
-        let (x, y) = match saved {
-            Some((right, top)) => ((right - size.x).clamp(0.0, (screen.x - size.x).max(0.0)), top),
-            None => (screen.x - size.x - MARGIN, SCREEN_TOP + MARGIN),
-        };
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        // Where the screens are is only known on macOS; elsewhere the window's
+        // monitor is taken to start at the origin.
+        let mut screens = screen_areas();
+        if screens.is_empty() { screens.push(Rect::from_min_max(egui::pos2(0.0, SCREEN_TOP), screen.to_pos2())); }
+        let origin = widget_origin(self.prefs.top_right, size, &screens);
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(origin));
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+        self.commanded_origin = Some(origin);
         self.expected = Some(size);
         self.commanded_at = Some(Instant::now());
     }
@@ -453,6 +468,7 @@ impl App {
         let (outer, placed) = Self::window_rect(ctx);
         let size = outer.size();
         let settled = self.commanded_at.map(|t| t.elapsed() > Duration::from_millis(600)).unwrap_or(true);
+        if self.commanded_origin.is_some_and(|origin| settled || (outer.min - origin).length() < 1.0) { self.commanded_origin = None; }
         if let (Some(expected), Some(last)) = (self.expected, self.last_size) {
             let differs = (size.x - expected.x).abs() > 1.0 || (size.y - expected.y).abs() > 1.0;
             let moved = (size.x - last.x).abs() > 0.5 || (size.y - last.y).abs() > 0.5;
@@ -564,6 +580,7 @@ impl App {
     fn place(&mut self, ctx: &egui::Context, rect: Rect) {
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(rect.min));
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(rect.size()));
+        self.commanded_origin = Some(rect.min);
         self.expected = Some(rect.size());
         self.commanded_at = Some(Instant::now());
     }
@@ -1234,6 +1251,38 @@ fn layout_height(needed_rows: usize, pref_rows: usize, chrome: f32, user_height:
     let wanted = chrome + shown * ROW_H + (shown - 1.0) * GAP;
     if limit > 100.0 { wanted.min(limit) } else { wanted }
 }
+
+/// Where the widget's top-left corner goes: back where it was (its top-right
+/// corner, `saved`) when that spot is on one of the `screens`, kept inside
+/// that screen; otherwise the first screen's top-right corner. `screens` are
+/// the usable areas in the window's coordinates, the menu-bar screen first.
+fn widget_origin(saved: Option<(f32, f32)>, size: Vec2, screens: &[Rect]) -> egui::Pos2 {
+    let Some(&first) = screens.first() else { return egui::pos2(MARGIN, SCREEN_TOP + MARGIN) };
+    let spot = saved.and_then(|(right, top)| screens.iter().find(|s| s.contains(egui::pos2(right - 20.0, top + 20.0))).map(|s| (*s, right, top)));
+    let (screen, right, top) = spot.unwrap_or((first, first.max.x - MARGIN, first.min.y + MARGIN));
+    let x = (right - size.x).clamp(screen.min.x, (screen.max.x - size.x).max(screen.min.x));
+    egui::pos2(x, top.max(screen.min.y))
+}
+
+/// The screens' usable areas (past the menu bar and the Dock) in the
+/// window's coordinates: from the menu-bar screen's top-left corner, y down.
+/// AppKit counts from its bottom-left corner, y up.
+#[cfg(target_os = "macos")]
+fn screen_areas() -> Vec<Rect> {
+    use objc2_app_kit::NSScreen;
+    use objc2_foundation::MainThreadMarker;
+    let Some(mtm) = MainThreadMarker::new() else { return Vec::new() };
+    let screens = NSScreen::screens(mtm);
+    let Some(main_height) = screens.iter().next().map(|s| s.frame().size.height) else { return Vec::new() };
+    screens.iter().map(|s| {
+        let f = s.visibleFrame();
+        let top = main_height - f.origin.y - f.size.height;
+        Rect::from_min_size(egui::pos2(f.origin.x as f32, top as f32), vec2(f.size.width as f32, f.size.height as f32))
+    }).collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn screen_areas() -> Vec<Rect> { Vec::new() }
 
 /// The chat panel's height: the one wanted, but leaving a row of rooms
 /// above it in a widget `height` tall (`others`: its insets and the HUD),
