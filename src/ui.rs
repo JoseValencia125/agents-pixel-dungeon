@@ -376,6 +376,10 @@ pub struct ChatState {
     next_tail: f64,
     focus: bool,
     status_seen: String,
+    /// The model the agent is using (re-read every 5 s while open), for the header.
+    model: Option<String>,
+    model_rx: Option<Receiver<Option<String>>>,
+    next_model: f64,
     /// The terminal with its colours (full screen only), and its refresh.
     screen: Vec<Vec<Span>>,
     screen_rx: Option<Receiver<String>>,
@@ -409,7 +413,7 @@ pub struct ChatState {
 
 impl ChatState {
     pub fn new(agent_id: &str) -> ChatState {
-        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false, shell_open: None, shell_stop: None, changes: None, changes_rx: None, next_changes: 0.0, diff_path: None, diff: vec![], diff_rx: None, pull: None, pull_rx: None, next_pull: 0.0 }
+        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false, shell_open: None, shell_stop: None, changes: None, changes_rx: None, next_changes: 0.0, diff_path: None, diff: vec![], diff_rx: None, pull: None, pull_rx: None, next_pull: 0.0, model: None, model_rx: None, next_model: 0.0 }
     }
 
     pub fn with_draft(mut self, draft: String) -> ChatState {
@@ -654,6 +658,24 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         }
     }
+    if now >= state.next_model && state.model_rx.is_none() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (agent, demo) = (agent.clone(), monitor.demo);
+        let screen: String = state.screen.iter().map(|l| l.iter().map(|s| s.text.as_str()).collect::<String>() + "\n").collect();
+        std::thread::spawn(move || {
+            let model = if demo { demo_model(&agent) } else { crate::herdr::agent_model(&agent, &screen) };
+            let _ = tx.send(model);
+        });
+        state.model_rx = Some(rx);
+        state.next_model = now + 5.0;
+    }
+    if let Some(rx) = &state.model_rx {
+        if let Ok(model) = rx.try_recv() {
+            // A screen without its status line (a dialog over it) keeps the last one seen.
+            if model.is_some() { state.model = model; }
+            state.model_rx = None;
+        }
+    }
     if let Some(rx) = &state.tail_rx {
         if let Ok(lines) = rx.try_recv() {
             state.lines = lines;
@@ -718,14 +740,24 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 7.0);
         ui.horizontal(|ui| {
-            let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
+            // The dot's colour is the status; its name shows on hover.
+            let (dot, hover) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
             ui.painter().circle_filled(dot.center(), 4.0, color);
+            hover.on_hover_text(agent.label());
             ui.label(mono(&agent.name, 12.0).strong().color(Color32::WHITE));
-            let mut status = agent.label();
+            if let Some(model) = &state.model { model_chip(ui, model); }
+            // Only a reached limit says more than the dot: when it resets.
+            let mut header = agent.project.clone();
             if let Some(left) = agent.limit_left(crate::herdr::unix_now()).filter(|_| agent.status == "limited") {
-                status += &format!(" · {}", trf("se reinicia en {}", &[&crate::scene::countdown(left)]));
+                header += &format!(" · {}", trf("se reinicia en {}", &[&crate::scene::countdown(left)]));
             }
-            ui.label(mono(&format!("{} · {}", agent.project, status), 11.0).color(DIM));
+            // The buttons on the right keep their room; the header ends in "…".
+            let reserve = if wide { 250.0 } else { 120.0 } + if state.pull.is_some() { 60.0 } else { 0.0 };
+            let room = (ui.available_width() - reserve).max(0.0);
+            ui.scope(|ui| {
+                ui.set_max_width(room);
+                ui.add(egui::Label::new(mono(&header, 11.0).color(DIM)).truncate());
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if wide {
                     // Full screen has room for words: each button says what it does.
@@ -1047,6 +1079,21 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
             }
         }
     });
+}
+
+/// The model the agent is using, in the chat's header.
+fn model_chip(ui: &mut Ui, model: &str) {
+    let violet = Color32::from_rgb(190, 160, 255);
+    Frame::new().fill(alpha(violet, 0.12)).stroke(Stroke::new(1.0_f32, alpha(violet, 0.45))).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(5, 1))
+        .show(ui, |ui| ui.label(mono(&format!("◆ {model}"), 10.5).color(violet)))
+        .response.on_hover_text(tr("Modelo que está usando"));
+}
+
+/// What the demo's agents run.
+fn demo_model(agent: &Agent) -> Option<String> {
+    Some(match crate::herdr::harness_for(&agent.name) {
+        "claude" => "Opus 5.5", "codex" => "GPT-6-Astra medium", "kiro" => "auto", "cursor" => "Auto", "gemini" => "Gemini 3 Pro", _ => return None,
+    }.to_string())
 }
 
 /// The branch's pull request, in the chat's header: its number in its

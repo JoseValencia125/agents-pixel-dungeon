@@ -222,6 +222,11 @@ pub fn run() {
     assert_eq!((crate::ui::prompt_line(&cursor_models), crate::ui::picker_open(&cursor_models)), (None, true), "Cursor's /model picker not seen as a picker");
     let cursor_slash = crate::commands::slash_commands("cursor", "/nonexistent", std::path::Path::new("/nonexistent"));
     assert!(cursor_slash.iter().any(|c| c.name == "model") && cursor_slash.iter().any(|c| c.name == "resume"), "Cursor's slash commands missing");
+    // The chat's header names the model: Codex and Kiro from their status lines, Claude from its transcript ids, Cursor from its config.
+    let kiro_idle = " Trust All Tools active, confirmations are off · /quit to exit\n────────\nkiro_default · auto · ◔ 15%                       ~/agents-pixel-dungeon · (main)\n›  ask a question or describe a task ↵";
+    assert_eq!((crate::herdr::model_on_screen("codex", idle), crate::herdr::model_on_screen("kiro", kiro_idle)), (Some("GPT-6-Astra medium".to_string()), Some("auto".to_string())), "Model not read from Codex's or Kiro's status line");
+    assert_eq!((crate::herdr::claude_model_name("claude-opus-5-5"), crate::herdr::claude_model_name("claude-sonnet-4-5-20250929"), crate::herdr::claude_model_name("claude-fable-5-1")), ("Opus 5.5".to_string(), "Sonnet 4.5".to_string(), "Fable 5.1".to_string()), "Claude model ids badly named");
+    assert_eq!(crate::herdr::cursor_model(r#"{"model":{"modelId":"default","displayModelId":"auto","displayName":"Auto"}}"#), Some("Auto".to_string()), "Cursor's model not read from its config");
     // Folder trust starts on "No, exit": accepting picks the yes.
     let trust: Vec<String> = [" Claude Code'll be able to read, edit, and execute files here.", " ❯ No, exit", "   Yes, I trust this folder", " Enter to confirm · Esc to cancel"].map(String::from).to_vec();
     assert_eq!(MenuOptions::new(&trust).affirmative(), Some(1), "Accepting Claude's folder trust would exit it");

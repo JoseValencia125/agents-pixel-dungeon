@@ -595,6 +595,71 @@ pub fn claude_transcript(session: &str) -> Option<String> {
     dirs.flatten().map(|d| d.path().join(format!("{session}.jsonl"))).find(|f| f.exists()).map(|f| f.to_string_lossy().to_string())
 }
 
+/// The model an agent is using, as its own terminal or files say: Codex and
+/// Kiro print it on their status line, Claude Code writes it on each reply
+/// of its transcript, Cursor keeps the chosen one in its CLI config.
+pub fn agent_model(agent: &Agent, screen: &str) -> Option<String> {
+    match harness_for(&agent.name) {
+        "claude" => agent.session.as_deref().and_then(claude_transcript).and_then(|path| claude_model(&path)),
+        "cursor" => cursor_model(&std::fs::read_to_string(home_dir().join(".cursor/cli-config.json")).ok()?),
+        harness => model_on_screen(harness, screen),
+    }
+}
+
+/// The model on a terminal's status line. Codex: the first non-empty line
+/// under its prompt, "GPT-6-Astra medium · ~/proj". Kiro: "agent · model ·
+/// ◔ 15%" above its prompt.
+pub fn model_on_screen(harness: &str, screen: &str) -> Option<String> {
+    let rows: Vec<&str> = screen.lines().map(str::trim).collect();
+    match harness {
+        "codex" => {
+            let prompt = rows.iter().rposition(|l| l.starts_with('›') && option_prefix(l).is_none())?;
+            let status = rows[prompt + 1..].iter().find(|l| !l.is_empty())?;
+            let (model, _) = status.split_once(" · ")?;
+            Some(model.trim().to_string()).filter(|m| !m.is_empty())
+        }
+        "kiro" => rows.iter().rev().find_map(|l| {
+            let parts: Vec<&str> = l.split(" · ").collect();
+            (parts.len() >= 3 && parts[2].starts_with(['○', '◔', '◑', '◕', '●'])).then(|| parts[1].trim().to_string())
+        }),
+        _ => None,
+    }
+}
+
+/// The model of a Claude Code transcript's latest reply, named as Claude
+/// Code names it: "claude-opus-5-5" is "Opus 5.5".
+pub fn claude_model(path: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(512 * 1024))).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    let id = text.lines().rev().find_map(|line| {
+        let at = line.find("\"model\":\"")? + 9;
+        let id = &line[at..at + line[at..].find('"')?];
+        id.starts_with("claude-").then(|| id.to_string())
+    })?;
+    Some(claude_model_name(&id))
+}
+
+/// "claude-sonnet-4-5-20250929" is "Sonnet 4.5" (the date is dropped).
+pub fn claude_model_name(id: &str) -> String {
+    let parts: Vec<&str> = id.trim_start_matches("claude-").split('-').filter(|p| p.len() < 8).collect();
+    let Some((family, version)) = parts.split_first() else { return id.to_string() };
+    let mut name: String = family.chars().take(1).flat_map(char::to_uppercase).chain(family.chars().skip(1)).collect();
+    if !version.is_empty() { name += &format!(" {}", version.join(".")); }
+    name
+}
+
+/// Cursor's chosen model, from ~/.cursor/cli-config.json.
+pub fn cursor_model(config: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(config).ok()?;
+    let model = &value["model"];
+    model["displayName"].as_str().or(model["displayModelId"].as_str()).map(str::to_string)
+}
+
 fn parse_iso8601(text: &str) -> Option<SystemTime> {
     let when = chrono::DateTime::parse_from_rfc3339(text).ok()?;
     Some(SystemTime::from(when))
