@@ -975,6 +975,18 @@ impl eframe::App for App {
                 let next = if self.monitor.selected.as_deref() == Some(&id) { None } else { Some(id) };
                 self.monitor.select(next);
             }
+            // Files dragged over a room open its chat; dropped there, they go
+            // into its message, ready to send.
+            if let Some(id) = response.file_hover {
+                if self.monitor.selected.as_deref() != Some(&id) { self.monitor.select(Some(id)); ctx.request_repaint(); }
+            }
+            if let Some(id) = response.file_drop {
+                if self.monitor.selected.as_deref() != Some(&id) { self.monitor.select(Some(id.clone())); }
+                if self.chat.as_ref().map(|c| c.agent_id != id).unwrap_or(true) { self.chat = Some(ChatState::new(&id)); }
+                if let Some(chat) = &mut self.chat { chat.add_dropped(ctx); }
+                ui::mark_drop_taken(ctx);
+                needs_fit = true;
+            }
             if let Some(id) = response.finish { self.confirm_finish(&id); }
             if let Some(id) = response.terminal { self.open_terminal_for(ctx, Some(&id)); }
             if let Some((emblem, repo_name, demo)) = response.edit_emblem.and_then(|id| self.scene.emblem_of(&id)) {

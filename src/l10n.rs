@@ -12,6 +12,7 @@ pub const LANGUAGES: [&str; 5] = ["es", "en", "fr", "it", "pt"];
 pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock::new(|| {
     let rows: &[(&str, [&str; 4])] = &[
         // The guild: quests, tasks and attempts
+        ("Suelta para dejar la ruta en su chat", ["Drop to put the path in its chat", "Lâche pour mettre le chemin dans son chat", "Rilascia per mettere il percorso nella sua chat", "Solte para deixar o caminho no chat dele"]),
         ("Concepto", ["Concept", "Concept", "Concetto", "Conceito"]),
         ("Sistemas", ["Systems", "Systèmes", "Sistemi", "Sistemas"]),
         ("Preguntas", ["Questions", "Questions", "Domande", "Perguntas"]),
