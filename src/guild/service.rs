@@ -7,7 +7,7 @@ use crate::api::{ApiError, ApiResult, Handler};
 use crate::domain::*;
 use crate::harness::{HarnessAdapter, HarnessEvent, SessionOptions, SessionRef, Support, TurnOutcome};
 use crate::store::Store;
-use crate::experiment::{Experiment, ExperimentDecision, ExperimentResult, ExperimentStatus, Hypothesis, HypothesisStatus, Playtest, PlaytestKind, Variant};
+use crate::experiment::{Experiment, ExperimentDecision, ExperimentResult, ExperimentStatus, Hypothesis, HypothesisStatus, Observation, Playtest, PlaytestKind, Variant, OBSERVATION_KINDS};
 use crate::{config, scheduler, workspaces};
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -783,6 +783,9 @@ impl Service {
                 let ms: Vec<Value> = playtests.iter().filter(|p| p.variant_id.as_deref() == Some(v.id.as_str()) && &p.profile == profile && p.status == "finished").map(|p| p.metrics.clone()).collect();
                 per_profile.insert(profile.clone(), crate::experiment::aggregate(&ms));
             }
+            // Humans who played this variant from the laboratory.
+            let humans: Vec<Value> = playtests.iter().filter(|p| p.variant_id.as_deref() == Some(v.id.as_str()) && p.kind == PlaytestKind::Human && p.status == "finished").map(|p| p.metrics.clone()).collect();
+            if !humans.is_empty() { per_profile.insert("human".into(), crate::experiment::aggregate(&humans)); }
             out.insert(v.id.clone(), json!({"name": v.name, "params": v.params, "profiles": per_profile}));
         }
         Ok(Value::Object(out))
@@ -928,7 +931,11 @@ impl Service {
                     (store.hypothesis(&e.hypothesis_id)?, store.playtests_of_experiment(&e.id)?)
                 };
                 let finished = playtests.iter().filter(|p| p.status == "finished").count();
-                let mut evidence = vec![format!("{finished} synthetic playtests over {} variants", e.variants.len())];
+                let human = playtests.iter().filter(|p| p.status == "finished" && p.kind == PlaytestKind::Human).count();
+                let mut evidence = vec![format!("{} synthetic playtests over {} variants", finished - human, e.variants.len())];
+                if human > 0 { evidence.push(format!("{human} human playtests")); }
+                let notes: Vec<String> = self.store.lock().unwrap().observations_of(&e.project_id)?.into_iter().filter(|o| o.experiment_id.as_deref() == Some(e.id.as_str())).map(|o| format!("{} [{}] {}", o.id, o.kind, o.text)).collect();
+                evidence.extend(notes);
                 if let Some(r) = &e.result { evidence.extend(r.evidence.iter().cloned()); }
                 let rejected: Vec<String> = e.variants.iter().filter(|x| x.id != vid).map(|x| format!("{} ({})", x.name, serde_json::to_string(&x.params).unwrap_or_default())).collect();
                 let decision_text = match hypothesis.as_ref() { Some(h) => format!("Adopt variant \"{}\" ({}): {}", v.name, serde_json::to_string(&v.params).unwrap_or_default(), h.proposed_change), None => format!("Adopt variant \"{}\"", v.name) };
@@ -969,6 +976,179 @@ impl Service {
             Ok(())
         })?;
         Ok(json!({"experiment": e, "integrated": integrated}))
+    }
+
+    // ----- playing the game -----
+
+    /// Open a human play session: a detached checkout of the build (the
+    /// project's target, a ref, or an experiment variant's candidate), a
+    /// telemetry file, and the command for a terminal to run. The client
+    /// runs it; `play.finish` reads what the game wrote.
+    fn play_start(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let (project, design_version) = {
+            let store = self.store.lock().unwrap();
+            let p = store.project(project_id)?.ok_or_else(|| ApiError::not_found(format!("project {project_id}")))?;
+            let v = store.design(project_id)?.map(|d| d.version);
+            (p, v)
+        };
+        let runner = project.play.clone().ok_or_else(|| ApiError::invalid("the project has no [play] command in .guild/guild.toml"))?;
+        let id = new_id();
+        let experiment_id = p_opt(params, "experimentId");
+        let variant_id = p_opt(params, "variantId");
+        let (cwd, sha, attempt_id, play_dir) = match (&experiment_id, &variant_id) {
+            (Some(eid), Some(vid)) => {
+                let store = self.store.lock().unwrap();
+                let e = store.experiment(eid)?.ok_or_else(|| ApiError::not_found(format!("experiment {eid}")))?;
+                let v = e.variants.iter().find(|v| &v.id == vid).ok_or_else(|| ApiError::not_found(format!("variant {vid}")))?;
+                let aid = v.attempt_id.clone().ok_or_else(|| ApiError::conflict(format!("variant {vid} is not built yet")))?;
+                let a = store.attempt(&aid)?.ok_or_else(|| ApiError::not_found("attempt"))?;
+                let w = a.workspace_id.as_ref().and_then(|w| store.workspace(w).ok().flatten()).ok_or_else(|| ApiError::not_found("the variant's worktree"))?;
+                if !Path::new(&w.path).exists() { return Err(ApiError::conflict("the variant's worktree is gone")); }
+                let sha = a.candidate.as_ref().map(|c| c.head_sha.clone()).or_else(|| workspaces::rev_parse(Path::new(&w.path), "HEAD").ok());
+                (w.path.clone(), sha, Some(aid), None)
+            }
+            _ => {
+                let rev = p_opt(params, "ref").unwrap_or_else(|| project.target_ref.clone());
+                let sha = workspaces::rev_parse(Path::new(&project.repo_path), &rev).map_err(ApiError::invalid)?;
+                let dir = crate::paths::worktrees_dir().join(&project.id).join(format!("play-{}", &id[id.len() - 8..]));
+                workspaces::checkout_detached(&project, &sha, &dir).map_err(ApiError::internal)?;
+                (dir.display().to_string(), Some(sha), None, Some(dir.display().to_string()))
+            }
+        };
+        let telemetry = crate::paths::artifacts_dir().join("play").join(format!("{id}.jsonl"));
+        std::fs::create_dir_all(telemetry.parent().unwrap()).map_err(|e| ApiError::internal(e.to_string()))?;
+        std::fs::write(&telemetry, b"").map_err(|e| ApiError::internal(e.to_string()))?;
+        let seed = params.get("seed").and_then(Value::as_u64).unwrap_or_else(|| (chrono::Utc::now().timestamp_millis() % 10_000) as u64);
+        let argv: Vec<String> = runner.argv.iter().map(|a| a.replace("{profile}", "human").replace("{seed}", &seed.to_string()).replace("{runs}", "1")).collect();
+        let pt = Playtest {
+            id: id.clone(), project_id: project_id.into(), experiment_id, variant_id, attempt_id, kind: PlaytestKind::Human, profile: "human".into(), seed: Some(seed),
+            status: "running".into(), player: p_opt(params, "player"), build_sha: sha, design_version, telemetry_path: Some(telemetry.display().to_string()), play_dir, created_at: now(), ..Default::default()
+        };
+        let store = self.store.lock().unwrap();
+        self.atomic(&store, || {
+            store.put_playtest(&pt)?;
+            self.emit_locked(&store, Event::new("playtest.started", "user").with(json!({"playtestId": pt.id, "projectId": project_id, "kind": "human", "experimentId": pt.experiment_id, "variant": pt.variant_id, "buildSha": pt.build_sha})));
+            Ok(())
+        })?;
+        Ok(json!({"playtest": pt, "cwd": cwd, "argv": argv, "env": {"GUILD_TELEMETRY": telemetry.display().to_string(), "GUILD_PLAYTEST": id}}))
+    }
+
+    /// Close a human session: keep its raw events, derive its metrics,
+    /// remove the checkout the guild made for it. Idempotent.
+    fn play_finish(&self, id: &str) -> ApiResult {
+        let (mut pt, project) = {
+            let store = self.store.lock().unwrap();
+            let pt = store.playtest(id)?.ok_or_else(|| ApiError::not_found(format!("playtest {id}")))?;
+            let p = store.project(&pt.project_id)?;
+            (pt, p)
+        };
+        if pt.status != "running" { return Ok(serde_json::to_value(pt).unwrap()); }
+        let text = pt.telemetry_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+        let events = crate::experiment::parse_telemetry(&text);
+        if !text.is_empty() {
+            let artifact = self.write_artifact(None, "playtest.events", text.as_bytes())?;
+            pt.events_artifact_id = Some(artifact.id);
+        }
+        pt.event_count = events.len() as u32;
+        pt.metrics = crate::experiment::derive_metrics(&events);
+        pt.status = if events.is_empty() { "abandoned".into() } else { "finished".into() };
+        pt.finished_at = Some(now());
+        pt.duration_ms = chrono::DateTime::parse_from_rfc3339(&pt.created_at).ok().map(|s| (chrono::Utc::now() - s.with_timezone(&chrono::Utc)).num_milliseconds());
+        if let (Some(dir), Some(p)) = (&pt.play_dir, &project) { workspaces::remove_checkout(p, Path::new(dir)); }
+        let store = self.store.lock().unwrap();
+        self.atomic(&store, || {
+            store.put_playtest(&pt)?;
+            self.emit_locked(&store, Event::new("playtest.finished", "user").with(json!({"playtestId": pt.id, "projectId": pt.project_id, "kind": "human", "status": pt.status, "events": pt.event_count, "experimentId": pt.experiment_id, "variant": pt.variant_id})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(pt).unwrap())
+    }
+
+    /// Note what a human noticed. Inside a session it is tied to the
+    /// build, the design version, the experiment's variant, and the run,
+    /// round and moment the game's telemetry was at.
+    fn observation_create(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let kind = p_opt(params, "kind").unwrap_or_else(|| "comment".into());
+        if !OBSERVATION_KINDS.contains(&kind.as_str()) { return Err(ApiError::invalid(format!("kind must be one of {}", OBSERVATION_KINDS.join(", ")))); }
+        let text = p_opt(params, "text").unwrap_or_default();
+        let store = self.store.lock().unwrap();
+        store.project(project_id)?.ok_or_else(|| ApiError::not_found(format!("project {project_id}")))?;
+        // The session: the one named, or the human session running now.
+        let session = match p_opt(params, "playtestId") {
+            Some(pid) => Some(store.playtest(&pid)?.ok_or_else(|| ApiError::not_found(format!("playtest {pid}")))?),
+            None => store.playtests()?.into_iter().filter(|p| p.project_id == project_id && p.kind == PlaytestKind::Human && p.status == "running").max_by(|a, b| a.created_at.cmp(&b.created_at)),
+        };
+        let mut o = Observation { id: crate::design::next_id("OBS", store.observations_of(project_id)?.into_iter().map(|o| o.id)), project_id: project_id.into(), kind, text, created_at: now(), ..Default::default() };
+        if let Some(pt) = &session {
+            o.playtest_id = Some(pt.id.clone());
+            o.build_sha = pt.build_sha.clone();
+            o.design_version = pt.design_version;
+            o.experiment_id = pt.experiment_id.clone();
+            o.variant_id = pt.variant_id.clone();
+            let events = pt.telemetry_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| crate::experiment::parse_telemetry(&t)).unwrap_or_default();
+            o.run_id = events.iter().rev().find_map(|e| e.get("runId").and_then(Value::as_str)).map(str::to_string);
+            o.round = events.iter().rev().find(|e| e["event"] == "round.started").and_then(|e| e["data"]["round"].as_u64());
+            o.event_index = Some(events.len() as u32);
+        }
+        self.atomic(&store, || {
+            store.put_observation(&o)?;
+            self.emit_locked(&store, Event::new("observation.created", "user").with(json!({"projectId": project_id, "observationId": o.id, "kind": o.kind, "playtestId": o.playtest_id, "round": o.round})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(o).unwrap())
+    }
+
+    /// Turn an observation into a design question that points back to it.
+    fn observation_promote(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let oid = p_str(params, "observationId")?;
+        let o = self.store.lock().unwrap().observation(project_id, oid)?.ok_or_else(|| ApiError::not_found(format!("observation {oid}")))?;
+        if let Some(q) = &o.question_id { return Err(ApiError::conflict(format!("{oid} already raised {q}"))); }
+        let mut context = format!("{} [{}]: {}", o.id, o.kind, o.text);
+        if let Some(sha) = &o.build_sha { context.push_str(&format!(" · build {}", &sha[..sha.len().min(8)])); }
+        if let Some(v) = o.design_version { context.push_str(&format!(" · design v{v}")); }
+        if let (Some(e), Some(v)) = (&o.experiment_id, &o.variant_id) { context.push_str(&format!(" · experiment {} variant {v}", &e[e.len().saturating_sub(8)..])); }
+        if let Some(r) = &o.run_id { context.push_str(&format!(" · run {r}")); }
+        if let Some(r) = o.round { context.push_str(&format!(" · round {r}")); }
+        let question = p_opt(params, "question").unwrap_or_else(|| if o.text.trim().is_empty() { format!("What made this {}?", o.kind.replace('_', " ")) } else { o.text.trim().to_string() });
+        let q = self.question_create(&json!({"projectId": project_id, "question": question, "context": context, "systemId": p_opt(params, "systemId"), "raisedBy": "playtest", "source": o.id}))?;
+        let store = self.store.lock().unwrap();
+        let mut o = o;
+        o.question_id = q["id"].as_str().map(str::to_string);
+        self.atomic(&store, || { store.put_observation(&o)?; Ok(()) })?;
+        Ok(json!({"observation": o, "question": q}))
+    }
+
+    /// What the finished playtests' raw events show (see
+    /// `experiment::signals`), next to the experience the design wants:
+    /// the comparison is laid out for the human; nothing is concluded.
+    fn signals_of(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let experiment = p_opt(params, "experimentId");
+        let variant = p_opt(params, "variantId");
+        let kind = p_opt(params, "kind");
+        let store = self.store.lock().unwrap();
+        let chosen: Vec<Playtest> = store.playtests()?.into_iter().filter(|p| {
+            p.project_id == project_id && p.status == "finished"
+                && experiment.as_ref().map(|e| p.experiment_id.as_ref() == Some(e)).unwrap_or(true)
+                && variant.as_ref().map(|v| p.variant_id.as_ref() == Some(v)).unwrap_or(true)
+                && match kind.as_deref() { Some("human") => p.kind == PlaytestKind::Human, Some("synthetic") => p.kind != PlaytestKind::Human, _ => true }
+        }).collect();
+        let mut all = vec![];
+        for p in &chosen {
+            let text = p.events_artifact_id.as_ref().and_then(|a| store.artifact(a).ok().flatten()).and_then(|a| std::fs::read_to_string(&a.path).ok()).unwrap_or_default();
+            all.push(crate::experiment::parse_telemetry(&text));
+        }
+        let design = store.design(project_id)?;
+        let human = chosen.iter().filter(|p| p.kind == PlaytestKind::Human).count();
+        Ok(json!({
+            "signals": crate::experiment::signals(&all),
+            "playtests": chosen.len(), "human": human, "synthetic": chosen.len() - human,
+            "desired": design.as_ref().map(|d| d.experience.desired_behaviors.clone()).unwrap_or_default(),
+            "avoid": design.as_ref().map(|d| d.experience.avoid.clone()).unwrap_or_default(),
+        }))
     }
 
     // ----- the living design's questions and decisions -----
@@ -1810,6 +1990,11 @@ impl Service {
                 Ok(serde_json::to_value(self.store.lock().unwrap().design(id)?).unwrap())
             }
             "design.set" => self.design_set(params),
+            "play.start" => self.play_start(params),
+            "play.finish" => self.play_finish(p_str(params, "playtestId")?),
+            "observation.create" => self.observation_create(params),
+            "observation.promote" => self.observation_promote(params),
+            "signals" => self.signals_of(params),
             "question.create" => self.question_create(params),
             "question.resolve" => self.question_resolve(params),
             "decision.create" => self.decision_create(params),
@@ -1837,6 +2022,7 @@ impl Service {
                     decisions: store.design_decisions_of(id)?,
                     hypotheses: store.hypotheses()?.into_iter().filter(|h| h.project_id == id).collect(),
                     experiments: store.experiments()?.into_iter().filter(|e| e.project_id == id).collect(),
+                    observations: store.observations_of(id)?,
                 };
                 // Never the user's checkout: a managed branch the user merges when ready.
                 let ref_name = crate::design::design_ref(&project.id);
@@ -1905,6 +2091,7 @@ impl Service {
             setup: file.as_ref().map(|f| f.project.setup.clone()).unwrap_or_default(),
             verifiers: file.as_ref().map(|f| f.verifiers.iter().map(|v| v.to_verifier()).collect()).unwrap_or_default(),
             playtest: file.as_ref().and_then(|f| f.playtest.as_ref()).map(|p| p.to_runner()),
+            play: file.as_ref().and_then(|f| f.play.as_ref()).map(|p| p.to_runner()),
             created_at: existing.map(|p| p.created_at).unwrap_or_else(now),
         };
         store.put_project(&project)?;
@@ -1926,6 +2113,7 @@ impl Service {
                 for d in &b.decisions { store.put_design_decision(d)?; }
                 for h in &b.hypotheses { if store.hypothesis(&h.id)?.is_none() { store.put_hypothesis(h)?; } }
                 for e in &b.experiments { if store.experiment(&e.id)?.is_none() { store.put_experiment(e)?; } }
+                for o in &b.observations { if store.observation(&project.id, &o.id)?.is_none() { store.put_observation(o)?; } }
                 design_imported = true;
             }
         }
@@ -3284,6 +3472,65 @@ mod tests {
         assert_eq!(snap.designs[0].systems.len(), 3);
         let kinds: Vec<String> = again.store.lock().unwrap().events_after(0, 10_000).unwrap().into_iter().map(|e| e.kind).collect();
         for k in ["question.created", "question.resolved", "decision.created", "design.updated", "design.exported"] { assert!(kinds.contains(&k.to_string()), "missing {k}"); }
+    }
+
+    #[test]
+    fn playing_the_build_records_telemetry_and_observations_that_become_questions() {
+        let home = TempHome::new();
+        let repo = wordfight_repo(&home);
+        let service = Service::new(Store::open_in_memory().unwrap(), Settings::default());
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string()})).unwrap();
+        service.handle("design.template", &json!({"projectId": "wordfight", "template": "videogame"})).unwrap();
+        // A human session on the current build: a checkout apart from the user's, a telemetry file, the command.
+        let started = service.handle("play.start", &json!({"projectId": "wordfight", "player": "nacho", "seed": 4})).unwrap();
+        let cwd = started["cwd"].as_str().unwrap().to_string();
+        assert!(cwd.contains("worktrees") && Path::new(&cwd).join("wordfight.py").exists());
+        assert_eq!(started["argv"], json!(["python3", "wordfight.py", "profile=human", "seed=4"]));
+        let telemetry = started["env"]["GUILD_TELEMETRY"].as_str().unwrap().to_string();
+        let pid = started["playtest"]["id"].as_str().unwrap().to_string();
+        assert_eq!(started["playtest"]["status"], "running");
+        assert_eq!(started["playtest"]["design_version"], 1);
+        // The human plays: always the first word, until the run ends.
+        let argv: Vec<String> = serde_json::from_value(started["argv"].clone()).unwrap();
+        let mut child = std::process::Command::new(&argv[0]).args(&argv[1..]).current_dir(&cwd).env("GUILD_TELEMETRY", &telemetry)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().unwrap();
+        { use std::io::Write; child.stdin.as_mut().unwrap().write_all("1\n".repeat(12).as_bytes()).unwrap(); }
+        assert!(child.wait().unwrap().success());
+        // Mid-session note: tied to the build, design version, run and round.
+        let o = service.handle("observation.create", &json!({"projectId": "wordfight", "kind": "confusing", "text": "I don't understand why this word did so much damage"})).unwrap();
+        assert_eq!(o["id"], "OBS-001");
+        assert_eq!(o["playtest_id"], pid.as_str());
+        assert_eq!(o["run_id"], "human-4");
+        assert!(o["round"].as_u64().unwrap() >= 1);
+        assert!(o["build_sha"].as_str().unwrap().len() == 40);
+        assert!(service.handle("observation.create", &json!({"projectId": "wordfight", "kind": "boring"})).is_err());
+        // More play in the same session, as a player who always takes the longest word.
+        let out = std::process::Command::new("python3").args(["wordfight.py", "profile=greedy", "runs=4", "seed=1"]).current_dir(&cwd).env("GUILD_TELEMETRY", &telemetry).output().unwrap();
+        assert!(out.status.success());
+        let done = service.handle("play.finish", &json!({"playtestId": pid})).unwrap();
+        assert_eq!(done["status"], "finished");
+        assert!(done["event_count"].as_u64().unwrap() > 20);
+        assert!(!Path::new(&cwd).exists(), "the play checkout is removed");
+        assert_eq!(service.handle("play.finish", &json!({"playtestId": pid})).unwrap()["status"], "finished", "finishing twice is harmless");
+        // What the telemetry shows, next to what the design wants.
+        let s = service.handle("signals", &json!({"projectId": "wordfight", "kind": "human"})).unwrap();
+        assert_eq!(s["human"], 1);
+        assert!(s["avoid"].as_array().unwrap().iter().any(|a| a == "always choosing the longest word"));
+        let longest = s["signals"].as_array().unwrap().iter().find(|x| x["key"] == "max_attribute:length").expect("the longest word wins signal");
+        assert!(longest["value"].as_f64().unwrap() >= 0.7, "{longest}");
+        // The observation becomes a question that points back to it.
+        let p = service.handle("observation.promote", &json!({"projectId": "wordfight", "observationId": "OBS-001", "systemId": "combat"})).unwrap();
+        assert_eq!(p["question"]["id"], "Q-001");
+        assert_eq!(p["question"]["source"], "OBS-001");
+        assert_eq!(p["question"]["raised_by"], "playtest");
+        assert!(p["question"]["context"].as_str().unwrap().contains("round"));
+        assert_eq!(p["observation"]["question_id"], "Q-001");
+        assert!(service.handle("observation.promote", &json!({"projectId": "wordfight", "observationId": "OBS-001"})).is_err());
+        let snap = service.snapshot().unwrap();
+        assert_eq!(snap.observations.len(), 1);
+        assert!(snap.designs[0].systems.iter().find(|x| x.id == "combat").unwrap().questions.contains(&"Q-001".to_string()));
+        let kinds: Vec<String> = service.store.lock().unwrap().events_after(0, 10_000).unwrap().into_iter().map(|e| e.kind).collect();
+        for k in ["playtest.started", "observation.created", "playtest.finished", "question.created"] { assert!(kinds.contains(&k.to_string()), "missing {k}"); }
     }
 
     #[test]

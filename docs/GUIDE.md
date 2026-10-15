@@ -148,6 +148,20 @@ The other tabs are the **design chamber**: the living game design, one durable o
 
 **Save design** sends the current design to the service (it keeps a version); questions and decisions go at once. **Video game template** fills a small word-combat game to edit from. **Export to the repo** commits `game-design/` as linked Markdown, broadest first (`overview.md`, then `concept/`, `loops/`, `systems/`, `objects/`, `sections/`, and apart from the current design `questions/`, `decisions/`, `hypotheses/`, `experiments/`) plus `design.json`, the structured state, onto the managed branch `guild/design/<project>`, never into your checkout; merge it when you want it in `main`. `project add` reads it back from that branch or from a `game-design/` folder already in the repo. The CLI has the same: `found`, `roles`, `design <project> [get|template|export|system set]`, `question new|resolve`, `questions`, `decision new`, `hypothesis new`, `experiment new|start|accept|reject|iterate`, `playtests`.
 
+Two more tabs close the loop between the game and the design:
+
+- **Play**: **▶ Play the current build** opens the game in a terminal window, in a detached checkout of the project's target (never your checkout), with `GUILD_TELEMETRY` naming the file the game appends its `game.event` lines to. While it runs, the session card takes notes: type what you noticed and press **Confusing**, **Frustrating**, **Interesting**, **Great moment**, **Bug** or **Comment**; each observation (OBS-001…) is tied to the build's commit, the design version, the experiment's variant if any, and the run and round the game was in. When the game exits the session closes by itself (or press **End session**): its raw events are kept and its metrics derived. **→ Question** turns an observation into a design question that points back to it. **Observed vs desired** puts what the design wants and avoids next to what the played games' raw events show, computed without AI: a dominant choice, an option attribute that nearly always wins ("the chosen option had the highest length in 81% of 96 choices, about 24% if chosen at random"), options nobody takes, runs that almost never or always end well. **Open question** turns a signal into a question; whether it matters is yours to say.
+- **Laboratory**: hypotheses (from an open question, at the whole, loop or part level, with the problem, the expected effect, the proposed change and what to measure) and experiments (variants as `id: parameter=value, …` lines, player profiles, runs per profile). **Start** builds and plays them; when the analysis is in, the experiment asks for your decision: the problem, the evidence (synthetic and human playtests, observations), the analyst's verdict with its evidence and surprises, each variant's numbers per player profile with **▶ Play** to try it yourself, and **Accept**, **Iterate** or **Reject** with a note that stays in the decision.
+
+A project says how a human plays it in `.guild/guild.toml`:
+
+```toml
+[play]
+argv = ["python3", "game.py", "seed={seed}"]   # GUILD_TELEMETRY names the file for its events
+```
+
+The CLI has the same: `play <project> [--experiment E --variant V]` (plays in this terminal and closes the session when the game exits), `observe <project> --kind … --text …`, `observations`, `observation promote`, `signals [--kind human|synthetic]`.
+
 The dungeon only sees the guild's own events, never a harness's; every adapter translates to them. Lifecycle: `quest.*`, `task.*`, `attempt.*` (one per state, plus `attempt.finished` with the metrics), `workspace.ready`, `setup.*`, `session.started`, `session.resumed`, `session.closed`, `turn.started`, `turn.text`, `turn.completed`. From the agent: `agent.thinking`, `agent.working`, `agent.waiting` (once per change), `tool.started`, `tool.completed`, `file.changed`, `plan.updated`, `model.changed`, `permission.requested`, `permission.resolved`. From the guild: `candidate.committed` or `candidate.empty`, `verifier.started`, `verifier.finished`, `verification.finished`, `merge.started`, `merge.completed`, `merge.blocked`.
 
 `.guild/guild.toml`:

@@ -55,6 +55,10 @@ pub struct Project {
     /// How to play the game headless, for playtests.
     #[serde(default)]
     pub playtest: Option<PlaytestRunner>,
+    /// How a human plays it, in a terminal; `{seed}` is filled in and
+    /// `GUILD_TELEMETRY` names the file the game appends its events to.
+    #[serde(default)]
+    pub play: Option<PlaytestRunner>,
     pub created_at: String,
 }
 
@@ -518,6 +522,8 @@ pub struct Snapshot {
     pub experiments: Vec<crate::experiment::Experiment>,
     #[serde(default)]
     pub playtests: Vec<crate::experiment::Playtest>,
+    #[serde(default)]
+    pub observations: Vec<crate::experiment::Observation>,
     #[serde(default)]
     pub designs: Vec<crate::design::GameDesign>,
     #[serde(default)]

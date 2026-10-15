@@ -753,7 +753,7 @@ impl eframe::App for App {
         if let Ok(v) = std::env::var("HPD_TEST_STUDIO") {
             if now > 1.0 && now < 1.2 {
                 self.show_studio = true;
-                self.guild.studio.tab = match v.as_str() { "concept" => guild_studio::Tab::Concept, "experience" => guild_studio::Tab::Experience, "loops" => guild_studio::Tab::Loops, "systems" => guild_studio::Tab::Systems, "parts" => guild_studio::Tab::Parts, "questions" => guild_studio::Tab::Questions, "decisions" => guild_studio::Tab::Decisions, _ => guild_studio::Tab::Guild };
+                self.guild.studio.tab = match v.as_str() { "concept" => guild_studio::Tab::Concept, "experience" => guild_studio::Tab::Experience, "loops" => guild_studio::Tab::Loops, "systems" => guild_studio::Tab::Systems, "parts" => guild_studio::Tab::Parts, "play" => guild_studio::Tab::Play, "laboratory" => guild_studio::Tab::Laboratory, "questions" => guild_studio::Tab::Questions, "decisions" => guild_studio::Tab::Decisions, _ => guild_studio::Tab::Guild };
             }
         }
         if std::env::var("HPD_TEST_DIFF").is_ok() && now > 1.0 && now < 1.2 { self.guild.diff_open = true; }
@@ -1133,6 +1133,16 @@ impl eframe::App for App {
         if self.show_studio {
             let action = guild_studio::studio(ctx, &mut self.guild);
             if action.close { self.show_studio = false; }
+        }
+        // A play session the guild opened: the game runs in a terminal; when
+        // it exits, the session is closed and its telemetry read.
+        if let Some(play) = self.guild.take_result("play") {
+            let argv: Vec<String> = play["argv"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
+            let env: Vec<(String, String)> = play["env"].as_object().into_iter().flatten().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect();
+            if let (Some(cwd), Some(id)) = (play["cwd"].as_str(), play["playtest"]["id"].as_str()) { self.terminals.run(cwd, argv, env, id); }
+        }
+        for playtest in self.terminals.take_finished() {
+            self.guild.command("play.finish", serde_json::json!({"playtestId": playtest}));
         }
         if self.show_board {
             let action = guild_view::board(ctx, &mut self.guild);

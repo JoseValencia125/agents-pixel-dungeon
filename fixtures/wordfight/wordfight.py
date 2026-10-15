@@ -12,9 +12,12 @@ Profiles (how a synthetic player chooses):
   novice     a random word
   optimizer  the word with the highest immediate power
   explorer   prefers a semantic match, then the shortest word that still hits
+  human      you: the hand is printed, you type the number of a word
 
-Telemetry: one JSON object per line on stdout,
+Telemetry: one JSON object per line,
   {"type": "game.event", "runId": "...", "event": "...", "data": {...}}
+on stdout, or appended to the file $GUILD_TELEMETRY names (always for a
+human, whose screen is the game).
 """
 import json, os, random, sys
 
@@ -40,6 +43,24 @@ def power(word, category, weakness, balance):
     if category == weakness:
         p *= balance["semantic_multiplier"]
     return p
+
+
+def ask_human(hand, weakness, hp, rounds, rare_budget, balance):
+    print()
+    print(f"Round {rounds} · enemy HP {hp:.0f} · weak to {weakness.upper()} · rare letters left {rare_budget}")
+    for i, (word, category) in enumerate(hand, 1):
+        mark = "*" if category == weakness else " "
+        print(f"  {i}. {word:<10} {category:<6}{mark}")
+    while True:
+        try:
+            raw = input("Your word (1-5, q to quit): ").strip().lower()
+        except EOFError:
+            return None
+        if raw == "q":
+            return None
+        if raw.isdigit() and 1 <= int(raw) <= len(hand):
+            return hand[int(raw) - 1]
+        print("Type a number from the list.")
 
 
 def choose(profile, hand, weakness, balance, rng):
@@ -70,7 +91,14 @@ def run(profile, seed, balance, emit):
         hand = rng.sample(WORDS, 5)
         emit(run_id, "round.started", {"round": rounds, "weakness": weakness, "hp": hp})
         emit(run_id, "choice.presented", {"options": [w for w, _ in hand], "weakness": weakness})
-        word, category = choose(profile, hand, weakness, balance, rng)
+        if profile == "human":
+            picked = ask_human(hand, weakness, hp, rounds, rare_budget, balance)
+            if picked is None:
+                emit(run_id, "run.failed", {"rounds": rounds, "score": round(score, 2), "reason": "quit"})
+                return
+            word, category = picked
+        else:
+            word, category = choose(profile, hand, weakness, balance, rng)
         rare = sum(1 for c in word if c in RARE)
         if rare > rare_budget:
             # Not enough rare letters left: the word fizzles.
@@ -83,8 +111,12 @@ def run(profile, seed, balance, emit):
         score += dmg
         emit(run_id, "choice.selected", {"word": word, "length": len(word), "semantic": category == weakness, "category": category, "rare_letters": rare})
         emit(run_id, "damage.dealt", {"amount": round(dmg, 2), "hp_left": round(max(hp, 0.0), 2)})
+        if profile == "human":
+            print(f"  {word} hits for {dmg:.1f}" + (" (semantic match!)" if category == weakness else ""))
         if hp <= 0:
             emit(run_id, "enemy.defeated", {"round": rounds})
+    if profile == "human":
+        print("\nYou won!" if hp <= 0 else "\nThe enemy survived.")
     if hp <= 0:
         emit(run_id, "run.completed", {"rounds": rounds, "score": round(score, 2), "won": True})
     else:
@@ -99,8 +131,14 @@ def main(argv):
     with open(os.path.join(HERE, "balance.json")) as f:
         balance = json.load(f)
 
+    path = os.environ.get("GUILD_TELEMETRY")
+    sink = open(path, "a") if path else (None if profile == "human" else sys.stdout)
+
     def emit(run_id, event, data):
-        sys.stdout.write(json.dumps({"type": "game.event", "runId": run_id, "event": event, "data": data}) + "\n")
+        if sink is None:
+            return
+        sink.write(json.dumps({"type": "game.event", "runId": run_id, "event": event, "data": data}) + "\n")
+        sink.flush()
 
     for i in range(runs):
         run(profile, seed + i, balance, emit)
