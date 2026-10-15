@@ -42,7 +42,7 @@ pub const KIRO_PLANS: [(&str, u32); 4] = [("Free", 50), ("Pro", 1000), ("Pro+", 
 pub fn fetch(home: PathBuf, kiro_plan: u32, claude_live: bool) -> Receiver<Vec<HarnessUsage>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
-        let found = [claude(&home, claude_live), codex(&home), kiro(&home, kiro_plan, chrono::Local::now())];
+        let found = [claude(&home, claude_live), codex(&home), kiro(&home, kiro_plan, chrono::Local::now()), cursor()];
         let _ = tx.send(found.into_iter().flatten().collect());
     });
     rx
@@ -55,6 +55,7 @@ pub fn demo(now: i64) -> Vec<HarnessUsage> {
         HarnessUsage { harness: "claude", meters: vec![meter("5h", 38.0, 2), meter("sem", 61.0, 75)], credits: None },
         HarnessUsage { harness: "codex", meters: vec![meter("5h", 72.0, 1), meter("sem", 44.0, 102)], credits: None },
         HarnessUsage { harness: "kiro", meters: vec![meter("mes", 58.0, 430)], credits: Some((580.0, Some(1000))) },
+        HarnessUsage { harness: "cursor", meters: vec![meter("mes", 47.0, 530)], credits: Some((9.33, Some(20))) },
     ]
 }
 
@@ -227,6 +228,78 @@ pub fn reset_label(resets: i64, now: chrono::DateTime<chrono::Local>, hour: bool
     if when.date_naive() == now.date_naive() { return Some(time); }
     let day = crate::l10n::tr(["lun", "mar", "mié", "jue", "vie", "sáb", "dom"][when.weekday().num_days_from_monday() as usize]);
     Some(if hour { format!("{day} {} {time}", when.day()) } else { format!("{day} {}", when.day()) })
+}
+
+// ---- Cursor
+
+/// Cursor's included usage this billing cycle: spent against the plan's
+/// limit, with the cycle's end as the reset. Dollars, like Kiro's credits.
+///
+/// The Cursor CLI keeps no usage on disk, so this asks Cursor's dashboard
+/// service with the CLI's own token from the macOS keychain
+/// ("cursor-access-token"), at most every two minutes. The endpoint is the
+/// one the dashboard uses and is not a public API: if it is unreachable or
+/// the token is missing, Cursor simply shows no HP. The token goes to curl
+/// on stdin, never on its command line.
+pub fn cursor() -> Option<HarnessUsage> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, Option<HarnessUsage>)>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().ok()?;
+    if let Some((when, value)) = last.as_ref() { if when.elapsed().as_secs() < 120 { return value.clone(); } }
+    let fetch = || -> Option<HarnessUsage> {
+        let token = cursor_token()?;
+        let mut curl = Command::new("curl")
+            .args([
+                "-s", "-f", "-m", "10",
+                "-X", "POST",
+                "-H", "@-",
+                "-H", "Content-Type: application/json",
+                "-d", "{}",
+                "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+            ])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        curl.stdin.take()?.write_all(format!("Authorization: Bearer {token}\n").as_bytes()).ok()?;
+        let output = curl.wait_with_output().ok()?;
+        cursor_from_usage(&serde_json::from_slice(&output.stdout).ok()?)
+    };
+    let value = fetch();
+    *last = Some((std::time::Instant::now(), value.clone()));
+    value
+}
+
+/// The Cursor CLI's access token, from the macOS keychain. Other platforms
+/// have no store the CLI shares, so there is nothing to read.
+fn cursor_token() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+        let out = Command::new("security")
+            .args(["find-generic-password", "-s", "cursor-access-token", "-w"])
+            .stderr(Stdio::null()).output().ok()?;
+        if !out.status.success() { return None; }
+        let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!token.is_empty()).then_some(token)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// From a GetCurrentPeriodUsage answer: `planUsage.totalSpend` of `limit`
+/// (both in cents) is the month's HP, resetting at `billingCycleEnd` (ms).
+pub fn cursor_from_usage(value: &Value) -> Option<HarnessUsage> {
+    let plan = value.get("planUsage")?;
+    let spent_cents = plan.get("totalSpend").and_then(Value::as_f64)?;
+    let limit_cents = plan.get("limit").and_then(Value::as_f64).filter(|l| *l > 0.0)?;
+    let resets = value.get("billingCycleEnd").and_then(|v| v.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| v.as_i64())).map(|ms| ms / 1000);
+    let used = (spent_cents / limit_cents * 100.0) as f32;
+    Some(HarnessUsage {
+        harness: "cursor",
+        meters: vec![Meter { window: "mes", used, resets }],
+        credits: Some((spent_cents / 100.0, Some((limit_cents / 100.0).round() as u32))),
+    })
 }
 
 /// Seconds until a meter resets, if it has not yet.
