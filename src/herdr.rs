@@ -967,7 +967,7 @@ pub fn demo_agents(tick: usize) -> Vec<Agent> {
             let cwd = format!("~/demo/{}", s.1.to_lowercase().replace(' ', "-"));
             let mut agent = Agent::new(&format!("demo:{i}"), s.0, s.2, s.1, &tr(s.3), &cwd);
             agent.branch = branches[i].map(str::to_string);
-            if i == 0 { agent.action = Some(["read", "forge", "brew", "summon", "plan", "type"][(tick / 8) % 6].to_string()); }
+            if i == 0 { agent.action = Some(["read", "forge", "brew", "git", "summon", "plan", "type"][(tick / 8) % 7].to_string()); }
             if agent.status == "limited" {
                 // Fixed for the whole run, so the countdown ticks down.
                 static DEMO_RESET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
@@ -1017,12 +1017,20 @@ fn assistant_content(line: &str) -> Option<Vec<Value>> {
 
 /// The action of the latest assistant message in the tail of a Claude Code
 /// transcript: the last tool it called, or typing when it only wrote text.
-/// Only message types and tool names are looked at, never their contents.
+/// Only message types, tool names and a shell command's first word are
+/// looked at, never any other contents.
 pub fn last_action(tail: &str) -> Option<String> {
     for line in tail.lines().rev() {
         let Some(content) = assistant_content(line) else { continue };
         if let Some(tool) = content.iter().rev().find(|c| c.get("type").and_then(Value::as_str) == Some("tool_use")) {
-            return Some(tool_action(tool.get("name").and_then(Value::as_str).unwrap_or("")).to_string());
+            let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+            // A `git` command gets its own ledger station, not the cauldron.
+            if matches!(name, "Bash" | "BashOutput") {
+                if let Some(command) = tool.get("input").and_then(|i| i.get("command")).and_then(Value::as_str) {
+                    return Some(shell_action(command).to_string());
+                }
+            }
+            return Some(tool_action(name).to_string());
         }
         return Some("type".into());
     }
@@ -1050,12 +1058,13 @@ pub fn recent_action(file: Option<&str>, parse: fn(&str) -> Option<String>) -> O
 }
 
 /// A shell command that only looks at files (the way Codex reads them)
-/// counts as reading; anything else is brewing.
+/// counts as reading; `git` sends the hero to its ledger; anything else is
+/// brewing. Only the command's first word is looked at, never its arguments.
 pub fn shell_action(command: &str) -> &'static str {
     const READERS: [&str; 15] = ["cat", "rg", "grep", "sed", "ls", "find", "head", "tail", "nl", "wc", "less", "tree", "fd", "bat", "awk"];
     let first = command.split(|c| " ;|&\n".contains(c)).next().unwrap_or("");
     let base = Path::new(first).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-    if READERS.contains(&base.as_str()) { "read" } else { "brew" }
+    if base == "git" { "git" } else if READERS.contains(&base.as_str()) { "read" } else { "brew" }
 }
 
 /// The action of the latest Codex step in the tail of its rollout
@@ -1109,7 +1118,15 @@ pub fn kiro_action(tail: &str) -> Option<String> {
         let name = name.as_str();
         if ["read", "grep", "glob", "ls", "fs_read", "web_search", "web_fetch", "code"].contains(&name) { return Some("read".into()); }
         if ["write", "edit", "fs_write", "str_replace", "create"].contains(&name) { return Some("forge".into()); }
-        if ["shell", "execute_bash", "bash"].contains(&name) { return Some("brew".into()); }
+        if ["shell", "execute_bash", "bash"].contains(&name) {
+            // A `git` command gets its own ledger station, not the cauldron.
+            let command = tool
+                .and_then(|t| t.get("input").or_else(|| Some(t)))
+                .and_then(|i| i.get("command").or_else(|| i.get("cmd")))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            return Some(shell_action(command).to_string());
+        }
         if name.contains("todo") || name.contains("plan") { return Some("plan".into()); }
         if name.contains("agent") || name.contains("delegate") { return Some("summon".into()); }
         return Some("type".into());

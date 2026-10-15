@@ -130,6 +130,63 @@ impl Assets {
         prop("book_closed", pixel_image(&["kkkkk", "kRRRk", "kRYRk", "kRRRk", "kkkkk"], &book_colors), nearest);
         prop("book_open", pixel_image(&["kkkk.kkkk", "kWWWkWWWk", "kWlWkWWWk", "kWWWkWlWk", "kRRRkRRRk", ".kkkkkkk."], &book_colors), nearest);
         prop("book_open_flipped", pixel_image(&["kkkk.kkkk", "kWWWkWWWk", "kWWWkWlWk", "kWlWkWWWk", "kRRRkRRRk", ".kkkkkkk."], &book_colors), nearest);
+        // The git ledger: a huge tome the hero heaves onto the table, opens,
+        // writes in, then closes and carries away. Thick leather cover with
+        // a clasp and gilded corners; a broad two-page spread with ruled
+        // lines, the last of which the hero fills in as it writes.
+        let tome_colors = [
+            ('k', INK),
+            ('R', rgb(0.447, 0.102, 0.133)),      // deep leather cover
+            ('r', rgb(0.635, 0.149, 0.2)),        // cover highlight
+            ('Y', rgb(0.996, 0.906, 0.38)),       // gold clasp / corners
+            ('y', rgb(0.792, 0.651, 0.247)),      // gold shadow
+            ('W', rgb(0.953, 0.898, 0.776)),      // bright page
+            ('P', rgb(0.886, 0.816, 0.651)),      // page shadow near the spine
+            ('l', rgb(0.353, 0.412, 0.533)),      // written line
+            ('i', rgb(0.2, 0.235, 0.325)),        // fresh ink, darker
+        ];
+        prop("tome_closed", pixel_image(&[
+            "kkkkkkkkkkkkk",
+            "kYyrrrrrrrryk",
+            "krRRRRRRRRRrk",
+            "krRRRRRRRRRrk",
+            "krRRRRRRRRRYk",
+            "krRRRRRRRRRYk",
+            "krRRRRRRRRRrk",
+            "krRRRRRRRRRrk",
+            "kYyrrrrrrrryk",
+            "kkkkkkkkkkkkk",
+        ], &tome_colors), nearest);
+        // Open on the table: covers splayed, a thick block of pages each
+        // side, a central spine, ruled lines across both leaves.
+        prop("tome_open", pixel_image(&[
+            "kkkkkkkkkkkkkkkkk",
+            "kRRRRRRkkRRRRRRRk",
+            "kRWWWWWPkPWWWWWRk",
+            "kRWlllWPkPWlllWRk",
+            "kRWWWWWPkPWlllWRk",
+            "kRWlllWPkPWWWWWRk",
+            "kRWWWWWPkPWlllWRk",
+            "kRWlllWPkPWWWWWRk",
+            "kRWWWWWPkPWWWWWRk",
+            "kRRRRRRkkRRRRRRRk",
+            ".kkkkkkkkkkkkkk.",
+        ], &tome_colors), nearest);
+        // The same spread a beat later: a fresh line of ink appearing on the
+        // right-hand page as the hero writes.
+        prop("tome_open_write", pixel_image(&[
+            "kkkkkkkkkkkkkkkkk",
+            "kRRRRRRkkRRRRRRRk",
+            "kRWWWWWPkPWlllWRk",
+            "kRWlllWPkPWWWWWRk",
+            "kRWWWWWPkPWlllWRk",
+            "kRWlllWPkPWWWWWRk",
+            "kRWWWWWPkPWlllWRk",
+            "kRWlllWPkPWiiWWRk",
+            "kRWWWWWPkPWWWWWRk",
+            "kRRRRRRkkRRRRRRRk",
+            ".kkkkkkkkkkkkkk.",
+        ], &tome_colors), nearest);
         let scroll_colors = [('k', INK), ('D', rgb(0.722, 0.435, 0.314)), ('W', rgb(0.918, 0.831, 0.667)), ('l', rgb(0.635, 0.149, 0.2))];
         prop("scroll_closed", pixel_image(&["kkkkk", "kDWDk", "kkkkk"], &scroll_colors), nearest);
         prop("scroll_open", pixel_image(&["kkkkkkkkk", "kDWWWWWDk", "kDWlWlWDk", "kDWWWlWDk", "kkkkkkkkk"], &scroll_colors), nearest);
