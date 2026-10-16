@@ -225,3 +225,14 @@ Agents Pixel Dungeon is made by [Diabolo Studio](https://diabolostudio.com/). If
 Right-click Codex in the bottom HP panel (collapsed or expanded), then choose **Codex settings**. Set filesystem access, approval policy, automatic or manual review, web search, and command network access. **Save** updates `config.toml` under `CODEX_HOME` (normally `~/.codex`) while preserving unrelated settings and comments. Changes apply to new CLI sessions; project, launcher, and managed policies can override them. Existing agents are not restarted.
 
 Workspace write keeps `.git` protected, so commits can fail with approvals set to Never. Automatic review may authorize actions beyond the workspace; full access removes the filesystem boundary. Custom permission profiles and granular approval policies must be edited in the configuration file.
+
+## Windows
+
+The app, the integrated terminal and the guild run natively on Windows 10 (1803 or later) and 11. What is different there:
+
+- **Herdr** is in beta on Windows. The app reaches it through the named pipe it serves (`\\.\pipe\` followed by the path `herdr session list --json` gives as its socket) and finds `herdr.exe` on `PATH` or in `%LOCALAPPDATA%\Programs\Herdr\bin`. Without Herdr the viewer mode lists agents by their processes (`claude.exe`, `codex`, and the rest).
+- **Settings and the guild's data** live under `%APPDATA%\agents-pixel-dungeon` (the guild in `guild\` inside it; `HPD_GUILD_HOME` overrides it). The service listens on a Unix socket (AF_UNIX), which Windows 10 1803 and later provide.
+- **Integrated terminal**: PowerShell 7 (`pwsh`) when installed, else Windows PowerShell, else `%COMSPEC%`. **External terminal** opens Windows Terminal (`wt`) or a PowerShell console; reveal-in-folder uses Explorer.
+- **Agents' CLIs** are found on `PATH` with their `.exe`/`.cmd` extension, and in `%APPDATA%\npm`. Set `CLAUDE_BIN`, `CODEX_BIN`, `KIRO_CLI_BIN` or `HERDR_BIN` for another place.
+- **Stopping a guild member** ends its process tree (`taskkill /T /F`); Windows cannot send Ctrl-C to a child with piped input and output, so interrupting a Codex turn ends the process instead of only the turn. Setup, verifier and playtest commands run as the repository's `.guild/guild.toml` lists them, so write them for Windows (`python`, not `python3`).
+- **Not available yet**: the list of Claude Code background shells in an agent's room (it reads the Unix `ps`), the Cursor and keychain token for the HP viewer, and notification clicks that open the agent's chat.
