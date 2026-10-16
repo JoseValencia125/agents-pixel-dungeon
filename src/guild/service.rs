@@ -3315,13 +3315,15 @@ mod tests {
         assert!(parse_judge_output("```json\n{\"scores\": {}}\n```").is_err());
     }
 
+    const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
     /// A repository with the word game and its guild config, as a project.
     fn wordfight_repo(home: &TempHome) -> PathBuf {
         let repo = home.repo_path();
         std::fs::create_dir_all(repo.join(".guild")).unwrap();
         std::fs::write(repo.join("wordfight.py"), include_str!("../../fixtures/wordfight/wordfight.py")).unwrap();
         std::fs::write(repo.join("balance.json"), include_str!("../../fixtures/wordfight/balance.json")).unwrap();
-        std::fs::write(repo.join(".guild/guild.toml"), include_str!("../../fixtures/wordfight/.guild/guild.toml")).unwrap();
+        std::fs::write(repo.join(".guild/guild.toml"), include_str!("../../fixtures/wordfight/.guild/guild.toml").replace("python3", PYTHON)).unwrap();
         workspaces::git(&repo, &["init", "-q", "-b", "main"]).unwrap();
         workspaces::git(&repo, &["add", "-A"]).unwrap();
         workspaces::git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "wordfight"]).unwrap();
@@ -3485,7 +3487,7 @@ mod tests {
         let started = service.handle("play.start", &json!({"projectId": "wordfight", "player": "nacho", "seed": 4})).unwrap();
         let cwd = started["cwd"].as_str().unwrap().to_string();
         assert!(cwd.contains("worktrees") && Path::new(&cwd).join("wordfight.py").exists());
-        assert_eq!(started["argv"], json!(["python3", "wordfight.py", "profile=human", "seed=4"]));
+        assert_eq!(started["argv"], json!([PYTHON, "wordfight.py", "profile=human", "seed=4"]));
         let telemetry = started["env"]["GUILD_TELEMETRY"].as_str().unwrap().to_string();
         let pid = started["playtest"]["id"].as_str().unwrap().to_string();
         assert_eq!(started["playtest"]["status"], "running");
@@ -3505,7 +3507,7 @@ mod tests {
         assert!(o["build_sha"].as_str().unwrap().len() == 40);
         assert!(service.handle("observation.create", &json!({"projectId": "wordfight", "kind": "boring"})).is_err());
         // More play in the same session, as a player who always takes the longest word.
-        let out = std::process::Command::new("python3").args(["wordfight.py", "profile=greedy", "runs=4", "seed=1"]).current_dir(&cwd).env("GUILD_TELEMETRY", &telemetry).output().unwrap();
+        let out = std::process::Command::new(PYTHON).args(["wordfight.py", "profile=greedy", "runs=4", "seed=1"]).current_dir(&cwd).env("GUILD_TELEMETRY", &telemetry).output().unwrap();
         assert!(out.status.success());
         let done = service.handle("play.finish", &json!({"playtestId": pid})).unwrap();
         assert_eq!(done["status"], "finished");

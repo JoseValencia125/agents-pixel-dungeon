@@ -102,7 +102,8 @@ fn dropped_paths(ui: &Ui) -> Vec<String> {
 
 /// A path as the terminal would paste it: quoted when it holds a space.
 fn quoted_path(path: &str) -> String {
-    if path.contains(' ') { format!("'{}'", path.replace('\'', "'\\''")) } else { path.to_string() }
+    if !path.contains(' ') { return path.to_string(); }
+    if cfg!(windows) { format!("\"{path}\"") } else { format!("'{}'", path.replace('\'', "'\\''")) }
 }
 
 /// Add dropped files' paths to a draft, space-separated.

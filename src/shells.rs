@@ -50,6 +50,7 @@ pub struct Process {
 
 /// Every process, from one `ps` call.
 pub fn processes() -> Vec<Process> {
+    if cfg!(windows) { return vec![]; }
     let Ok(out) = Command::new("ps").args(["-Ao", "pid=,ppid=,lstart=,command="]).env("LC_ALL", "C").output() else { return vec![] };
     String::from_utf8_lossy(&out.stdout).lines().filter_map(parse_ps_line).collect()
 }
@@ -205,7 +206,7 @@ pub fn newest_output(output: Option<&str>, command: &str, cwd: &str) -> Option<S
     for pair in words.windows(2) {
         if matches!(pair[0], ">" | ">>" | "tee" | "1>") && !pair[1].starts_with('&') && pair[1] != "/dev/null" {
             let target = pair[1].trim_matches(|c| c == '"' || c == '\'' || c == ';');
-            candidates.push(if target.starts_with('/') { target.to_string() } else { Path::new(&base).join(target).to_string_lossy().to_string() });
+            candidates.push(if crate::herdr::is_absolute_path(target) { target.to_string() } else { Path::new(&base).join(target).to_string_lossy().to_string() });
         }
     }
     // The newest with text: a log just opened by a buffered program is empty.
@@ -277,6 +278,10 @@ static STOPPED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
 /// Stop a background shell: what it runs first, then the shell itself.
 pub fn stop(pid: u32) {
     STOPPED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashSet::new).insert(pid);
+    if cfg!(windows) {
+        std::thread::spawn(move || guild::platform::terminate_tree(pid as i32, true));
+        return;
+    }
     let pid = pid.to_string();
     std::thread::spawn(move || {
         let _ = Command::new("pkill").args(["-TERM", "-P", &pid]).status();
