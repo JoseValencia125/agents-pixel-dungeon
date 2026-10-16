@@ -2,7 +2,7 @@
 
 # Agents Pixel Dungeon
 
-**A native pixel-art guild for your live [Herdr](https://herdr.dev) agents, for macOS and Linux.** Made by [Diabolo Studio](https://diabolostudio.com/).
+**A native pixel-art guild for your live [Herdr](https://herdr.dev) agents, for macOS, Linux and Windows.** Made by [Diabolo Studio](https://diabolostudio.com/).
 
 Each coding agent is a hero in a dungeon room that changes with its real Herdr status: working at the forge, asking for your attention, exhausted on an infirmary cot until its usage limit resets, reading while it waits, done. Click a room to answer the agent, accept or decline its permission prompts, or summon a new one. Rust, `egui`, a status item in the menu bar or tray, no browser or server.
 
@@ -18,7 +18,7 @@ Each coding agent is a hero in a dungeon room that changes with its real Herdr s
 
 ## Download
 
-Binaries for macOS (`.app`) and Linux (x86_64) are on the [Releases](https://github.com/JoseValencia125/agents-pixel-dungeon/releases) page. The macOS app is ad-hoc signed, not notarized: the first time, right-click it and choose Open.
+Binaries for macOS (`.app`), Linux (x86_64) and Windows (x86_64, a portable `.zip`) are on the [Releases](https://github.com/JoseValencia125/agents-pixel-dungeon/releases) page. The macOS app is ad-hoc signed, not notarized: the first time, right-click it and choose Open. The Windows build is not code-signed, so SmartScreen may ask you to confirm the first run.
 
 ## States and rooms
 
@@ -105,8 +105,11 @@ cd agents-pixel-dungeon
 ./scripts/build.sh
 ```
 
+On Windows, from PowerShell: `.\scripts\build.ps1` (Rust stable with the MSVC toolchain, which needs the Visual Studio Build Tools with the C++ workload).
+
 - **macOS**: `open 'build/Agents Pixel Dungeon.app'` (optionally copy it to `~/Applications`).
 - **Linux** (X11 or Wayland): `./build/agents-pixel-dungeon`. Needs GTK 3, libayatana-appindicator, xdo and ALSA — on Debian/Ubuntu `sudo apt install libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libasound2-dev`. `build/` also has a `.desktop` entry and icon.
+- **Windows** (10 1803 or later): `.\build\agents-pixel-dungeon.exe`; the guild service (`agents-pixel-dungeon-guild.exe`) sits next to it. [Herdr](https://herdr.dev) has a Windows beta; see the [guide](docs/GUIDE.md#windows) for what differs.
 
 `cargo test` and `--self-test` run the checks; `--demo` shows fictional agents without Herdr.
 

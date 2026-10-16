@@ -5,12 +5,11 @@
 
 use crate::domain::*;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub type GitResult<T> = Result<T, String>;
 
 pub fn git(repo: &Path, args: &[&str]) -> GitResult<String> {
-    let output = Command::new("git").arg("-C").arg(repo).args(args).output().map_err(|e| format!("git: {e}"))?;
+    let output = crate::platform::command("git").arg("-C").arg(repo).args(args).output().map_err(|e| format!("git: {e}"))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
     } else {
@@ -84,7 +83,7 @@ pub fn run_with_timeout(cwd: &Path, argv: &[String], timeout_seconds: u64) -> Gi
     use std::io::Read;
     use std::time::{Duration, Instant};
     let (program, args) = argv.split_first().ok_or("empty command")?;
-    let mut child = Command::new(program)
+    let mut child = crate::platform::command(program)
         .args(args)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())

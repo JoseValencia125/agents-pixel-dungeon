@@ -74,10 +74,7 @@ impl KiroAcp {
         cmd.arg("acp");
         if self.engine == Engine::V3 { cmd.arg("--agent-engine=v3"); }
         cmd.current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::from(stderr));
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
+        crate::platform::detach(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| HarnessError::RuntimeFailed(format!("cannot start kiro-cli acp: {e}")))?;
         let pgid = child.id() as i32;
         let stdin = child.stdin.take().ok_or_else(|| HarnessError::RuntimeFailed("no stdin".into()))?;
@@ -103,14 +100,10 @@ fn find_binary() -> PathBuf {
         if !p.is_empty() { return PathBuf::from(p); }
     }
     let home = dirs::home_dir().unwrap_or_default();
-    for candidate in [home.join(".local/bin/kiro-cli"), PathBuf::from("/opt/homebrew/bin/kiro-cli"), PathBuf::from("/usr/local/bin/kiro-cli")] {
-        if candidate.exists() { return candidate; }
+    for dir in [home.join(".local/bin"), PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")] {
+        if let Some(found) = crate::platform::in_dir(&dir, "kiro-cli") { return found; }
     }
-    which("kiro-cli").unwrap_or_else(|| PathBuf::from("kiro-cli"))
-}
-
-fn which(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|d| d.join(name)).find(|p| p.is_file()))
+    crate::platform::which("kiro-cli").unwrap_or_else(|| PathBuf::from("kiro-cli"))
 }
 
 impl Proc {
@@ -151,18 +144,14 @@ impl Proc {
     }
 
     fn kill(&self) -> bool {
-        unsafe {
-            libc::killpg(self.pgid, libc::SIGTERM);
-        }
+        crate::platform::terminate_tree(self.pgid, false);
         let mut child = self.child.lock().unwrap();
         for _ in 0..30 {
             if let Ok(Some(_)) = child.try_wait() { return true; }
             std::thread::sleep(Duration::from_millis(100));
         }
         let _ = child.kill();
-        unsafe {
-            libc::killpg(self.pgid, libc::SIGKILL);
-        }
+        crate::platform::terminate_tree(self.pgid, true);
         matches!(child.try_wait(), Ok(Some(_)))
     }
 }
@@ -536,9 +525,7 @@ impl HarnessAdapter for KiroAcp {
 impl Drop for Proc {
     fn drop(&mut self) {
         let _ = self.log_path.as_path();
-        unsafe {
-            libc::killpg(self.pgid, libc::SIGTERM);
-        }
+        crate::platform::terminate_tree(self.pgid, false);
     }
 }
 

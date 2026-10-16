@@ -26,11 +26,7 @@ impl LineProc {
         let log_path = logs.join(format!("{log_name}.stderr.log"));
         let stderr = std::fs::File::create(&log_path).map_err(|e| HarnessError::RuntimeFailed(e.to_string()))?;
         cmd.current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::from(stderr));
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
+        crate::platform::detach(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| HarnessError::RuntimeFailed(format!("cannot start {:?}: {e}", cmd.get_program())))?;
         let pgid = child.id() as i32;
         let stdin = child.stdin.take();
@@ -65,26 +61,20 @@ impl LineProc {
     /// Ask the process group to end, then force it. True when it ended.
     pub fn kill(&self) -> bool {
         self.close_stdin();
-        unsafe {
-            libc::killpg(self.pgid, libc::SIGTERM);
-        }
+        crate::platform::terminate_tree(self.pgid, false);
         let mut child = self.child.lock().unwrap();
         for _ in 0..30 {
             if let Ok(Some(_)) = child.try_wait() { return true; }
             std::thread::sleep(Duration::from_millis(100));
         }
         let _ = child.kill();
-        unsafe {
-            libc::killpg(self.pgid, libc::SIGKILL);
-        }
+        crate::platform::terminate_tree(self.pgid, true);
         matches!(child.try_wait(), Ok(Some(_)))
     }
 
-    /// Send SIGINT to the group, as ctrl-c would.
+    /// Stop what the group is doing, as ctrl-c would (SIGINT; ends it on Windows).
     pub fn interrupt(&self) {
-        unsafe {
-            libc::killpg(self.pgid, libc::SIGINT);
-        }
+        crate::platform::interrupt_tree(self.pgid);
     }
 }
 
@@ -93,16 +83,18 @@ pub fn find_binary(env_key: &str, name: &str, candidates: &[&str]) -> PathBuf {
     if let Ok(p) = std::env::var(env_key) {
         if !p.trim().is_empty() { return PathBuf::from(p); }
     }
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') {
-            let p = Path::new(dir).join(name);
-            if p.is_file() { return p; }
-        }
-    }
+    if let Some(p) = crate::platform::which(name) { return p; }
     let home = dirs::home_dir().unwrap_or_default();
     for c in candidates {
         let p = if let Some(rest) = c.strip_prefix("~/") { home.join(rest) } else { PathBuf::from(c) };
         if p.is_file() { return p; }
+        if let (Some(dir), Some(file)) = (p.parent(), p.file_name().and_then(|f| f.to_str())) {
+            if let Some(found) = crate::platform::in_dir(dir, file) { return found; }
+        }
+    }
+    #[cfg(windows)]
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        if let Some(found) = crate::platform::in_dir(&PathBuf::from(appdata).join("npm"), name) { return found; }
     }
     PathBuf::from(name)
 }

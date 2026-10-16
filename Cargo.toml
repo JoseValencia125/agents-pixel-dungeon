@@ -2,7 +2,8 @@
 name = "agents-pixel-dungeon"
 version = "2.3.0"
 edition = "2021"
-description = "A native pixel-art guild for your live Herdr agents, for macOS and Linux."
+rust-version = "1.89"
+description = "A native pixel-art guild for your live Herdr agents, for macOS, Linux and Windows."
 license = "MIT"
 authors = ["Diabolo Studio (https://diabolostudio.com/)"]
 default-run = "agents-pixel-dungeon"
@@ -41,7 +42,17 @@ auto-launch = "0.5"
 sys-locale = "0.3"
 dirs = "6"
 chrono = "0.4"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_IO"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys = "0.6"

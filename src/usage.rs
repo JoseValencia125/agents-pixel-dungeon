@@ -79,18 +79,18 @@ pub fn claude(home: &Path, live: bool) -> Option<HarnessUsage> {
 /// token goes to curl on stdin, never on its command line.
 fn claude_live(home: &Path) -> Option<Value> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     static LAST: std::sync::Mutex<Option<(std::time::Instant, Option<Value>)>> = std::sync::Mutex::new(None);
     let mut last = LAST.lock().ok()?;
     if let Some((when, value)) = last.as_ref() { if when.elapsed().as_secs() < 120 { return value.clone(); } }
     let fetch = || -> Option<Value> {
-        let keychain = Command::new("security").args(["find-generic-password", "-s", "Claude Code-credentials", "-w"]).stderr(Stdio::null()).output().ok()
+        let keychain = guild::platform::command("security").args(["find-generic-password", "-s", "Claude Code-credentials", "-w"]).stderr(Stdio::null()).output().ok()
             .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
         let credentials: Value = serde_json::from_str(&keychain.or_else(|| std::fs::read_to_string(home.join(".claude").join(".credentials.json")).ok())?).ok()?;
         let oauth = credentials.get("claudeAiOauth")?;
         let token = oauth.get("accessToken")?.as_str()?;
         if oauth.get("expiresAt").and_then(Value::as_i64).map(|ms| ms / 1000 < unix_now() + 60).unwrap_or(false) { return None; }
-        let mut curl = Command::new("curl").args(["-s", "-f", "-m", "10", "-H", "@-", "https://api.anthropic.com/api/oauth/usage"])
+        let mut curl = guild::platform::command("curl").args(["-s", "-f", "-m", "10", "-H", "@-", "https://api.anthropic.com/api/oauth/usage"])
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
         curl.stdin.take()?.write_all(format!("Authorization: Bearer {token}\nanthropic-beta: oauth-2025-04-20\n").as_bytes()).ok()?;
         let output = curl.wait_with_output().ok()?;
@@ -243,13 +243,13 @@ pub fn reset_label(resets: i64, now: chrono::DateTime<chrono::Local>, hour: bool
 /// on stdin, never on its command line.
 pub fn cursor() -> Option<HarnessUsage> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     static LAST: std::sync::Mutex<Option<(std::time::Instant, Option<HarnessUsage>)>> = std::sync::Mutex::new(None);
     let mut last = LAST.lock().ok()?;
     if let Some((when, value)) = last.as_ref() { if when.elapsed().as_secs() < 120 { return value.clone(); } }
     let fetch = || -> Option<HarnessUsage> {
         let token = cursor_token()?;
-        let mut curl = Command::new("curl")
+        let mut curl = guild::platform::command("curl")
             .args([
                 "-s", "-f", "-m", "10",
                 "-X", "POST",
@@ -273,8 +273,8 @@ pub fn cursor() -> Option<HarnessUsage> {
 fn cursor_token() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        use std::process::{Command, Stdio};
-        let out = Command::new("security")
+        use std::process::Stdio;
+        let out = guild::platform::command("security")
             .args(["find-generic-password", "-s", "cursor-access-token", "-w"])
             .stderr(Stdio::null()).output().ok()?;
         if !out.status.success() { return None; }
