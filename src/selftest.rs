@@ -462,7 +462,7 @@ pub fn run() {
 /// The widget's size: fitted to the agents until the user resizes it, then
 /// kept whatever the agents or the chat panel need.
 fn window_sizing() {
-    use crate::{fit_panel, layout_height, layout_width, snap_columns, snap_rows};
+    use crate::{fit_panel, layout_height, layout_width, snap_columns, snap_rows, widget_origin, MARGIN};
     use crate::scene::{columns_fitting, GAP, ROW_H};
     use crate::ui::{MIN_PANEL, PANEL_HEIGHT};
     let rows = |n: f32| n * ROW_H + (n - 1.0) * GAP;
@@ -496,6 +496,16 @@ fn window_sizing() {
     assert_eq!(fit_panel(900.0, 1000.0, chrome), 1000.0 - chrome - ROW_H, "The chat must leave a row of rooms");
     assert_eq!(fit_panel(900.0, 300.0, chrome), MIN_PANEL);
     assert_eq!(fit_panel(10.0, 1000.0, chrome), MIN_PANEL);
+    // The widget's place: a wide screen above the menu-bar one, starting
+    // left of it, must not push the corner past every screen.
+    let laptop = egui::Rect::from_min_size(egui::pos2(0.0, 25.0), egui::vec2(1800.0, 1144.0));
+    let above = egui::Rect::from_min_size(egui::pos2(-525.0, -1440.0), egui::vec2(2560.0, 1440.0));
+    let (screens, size) = ([laptop, above], egui::vec2(458.0, 851.0));
+    assert_eq!(widget_origin(None, size, &screens), egui::pos2(1800.0 - MARGIN - 458.0, 25.0 + MARGIN), "The first place is the menu-bar screen's top-right corner");
+    assert_eq!(widget_origin(Some((1500.0, 40.0)), size, &screens), egui::pos2(1042.0, 40.0));
+    assert_eq!(widget_origin(Some((2000.0, -1300.0)), size, &screens), egui::pos2(1542.0, -1300.0), "A spot on the screen above, at negative coordinates, is kept");
+    assert_eq!(widget_origin(Some((2548.0, 37.0)), size, &screens), egui::pos2(1800.0 - MARGIN - 458.0, 25.0 + MARGIN), "A spot off every screen goes back to the corner");
+    assert_eq!(widget_origin(Some((300.0, 40.0)), size, &screens), egui::pos2(0.0, 40.0), "The widget stays inside its screen");
     // The columns and rows remembered for the next start: the nearest.
     assert!(snap_columns(width_for(3)) == 3 && snap_columns(width_for(3) + 100.0) == 3 && snap_columns(width_for(3) + 130.0) == 4 && snap_columns(10.0) == 1 && snap_columns(9000.0) == 8);
     assert!(snap_rows(chrome + rows(2.0), chrome) == 2 && snap_rows(chrome + rows(2.0) + 0.4 * (ROW_H + GAP), chrome) == 2 && snap_rows(chrome + rows(2.0) + 0.6 * (ROW_H + GAP), chrome) == 3 && snap_rows(chrome, chrome) == 1);
