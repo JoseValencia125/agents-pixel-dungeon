@@ -278,7 +278,7 @@ pub fn run() {
     assert_eq!(link_at(line, at("3.5")), None, "A number is not a file");
     assert_eq!(link_at(line, at("Abre")), None, "A word is not a link");
     let cwd = env!("CARGO_MANIFEST_DIR");
-    assert_eq!(resolve_link("src/ui.rs:42:7", cwd), Some(format!("{cwd}/src/ui.rs")), "Path with line not resolved");
+    assert_eq!(resolve_link("src/ui.rs:42:7", cwd), Some(std::path::Path::new(cwd).join("src/ui.rs").to_string_lossy().to_string()), "Path with line not resolved");
     assert_eq!(resolve_link("src/nope.rs", cwd), None, "A missing file must not open");
     let ask = "Lo que veo:\n- algo\n\nneeds input: ¿para qué es la rama nueva? Opciones:\n\n1. **Rama de PR** desde `main`\n2. Renombrar";
     assert_eq!(question_lines(ask, Some("¿para qué es la rama nueva? Opciones:")), vec!["¿para qué es la rama nueva? Opciones:", "1. Rama de PR desde main", "2. Renombrar"], "Question not cut at the ask");

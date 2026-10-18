@@ -1,7 +1,9 @@
 //! Agents Pixel Dungeon: a native pixel-art guild for your live Herdr agents,
-//! for macOS and Linux. Each agent is an animated hero in a dungeon room
+//! for macOS, Linux and Windows. Each agent is an animated hero in a dungeon room
 //! that changes with its real Herdr status, in a small floating widget with
 //! a status item in the menu bar or tray.
+
+#![cfg_attr(all(windows, not(debug_assertions), not(test)), windows_subsystem = "windows")]
 
 mod codex_settings;
 mod alerts;
@@ -112,8 +114,29 @@ fn set_regular_app(regular: bool) {
 #[cfg(not(target_os = "macos"))]
 fn set_regular_app(_regular: bool) {}
 
+#[cfg(windows)]
+fn attach_parent_console() {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 { return; }
+        for which in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let current = GetStdHandle(which);
+            if !current.is_null() && current != INVALID_HANDLE_VALUE { continue; }
+            if let Ok(console) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+                SetStdHandle(which, console.into_raw_handle());
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if args.iter().any(|a| a == "--self-test" || a == "--diagnose") {
+        attach_parent_console();
+    }
     if args.iter().any(|a| a == "--self-test") {
         selftest::run();
         return;

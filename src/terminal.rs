@@ -34,24 +34,44 @@ impl Default for Terminals {
 fn working_directory(cwd: &str) -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     if cwd.trim().is_empty() || cwd == "~" { home }
-    else if let Some(rest) = cwd.strip_prefix("~/") { home.join(rest) }
+    else if let Some(rest) = cwd.strip_prefix("~/").or_else(|| cwd.strip_prefix("~\\")) { home.join(rest) }
     else { PathBuf::from(cwd) }
+}
+
+fn login_shell() -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        for name in ["pwsh", "powershell"] {
+            if let Some(found) = guild::platform::which(name) { return (found.to_string_lossy().to_string(), vec!["-NoLogo".into()]); }
+        }
+        (std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()), vec![])
+    }
+    #[cfg(not(windows))]
+    {
+        (std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/bash".into()), vec!["-l".into()])
+    }
 }
 
 /// What the pty runs: the login shell, or a program with variables
 /// added (through env, so the program finds them on start).
 fn settings_for(cwd: &PathBuf, command: Option<&(Vec<String>, Vec<(String, String)>)>) -> BackendSettings {
     match command {
-        Some((argv, env)) => BackendSettings {
-            shell: "/usr/bin/env".into(),
-            args: env.iter().map(|(k, v)| format!("{k}={v}")).chain(argv.iter().cloned()).collect(),
-            working_directory: Some(cwd.clone()),
-        },
-        None => BackendSettings {
-            shell: std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/bash".into()),
-            args: vec!["-l".into()],
-            working_directory: Some(cwd.clone()),
-        },
+        Some((argv, env)) => {
+            let vars = env.iter().map(|(k, v)| format!("{k}={v}"));
+            #[cfg(windows)]
+            let (shell, args) = {
+                let guild = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(format!("agents-pixel-dungeon-guild{}", std::env::consts::EXE_SUFFIX)))).unwrap_or_else(|| "agents-pixel-dungeon-guild".into());
+                let args: Vec<String> = std::iter::once("env".to_string()).chain(vars).chain(std::iter::once("--".to_string())).chain(argv.iter().cloned()).collect();
+                (guild.to_string_lossy().to_string(), args)
+            };
+            #[cfg(not(windows))]
+            let (shell, args) = ("/usr/bin/env".to_string(), vars.chain(argv.iter().cloned()).collect::<Vec<String>>());
+            BackendSettings { shell, args, working_directory: Some(cwd.clone()) }
+        }
+        None => {
+            let (shell, args) = login_shell();
+            BackendSettings { shell, args, working_directory: Some(cwd.clone()) }
+        }
     }
 }
 
@@ -158,6 +178,7 @@ mod tests {
         assert_eq!(terminals.sessions.len(), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_game_runs_in_the_pty_with_its_telemetry_variable_and_reports_its_end() {
         use std::time::{Duration, Instant};
@@ -185,6 +206,7 @@ mod tests {
         assert!(terminals.take_finished().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn pty_runs_commands_in_the_requested_directory_and_exits() {
         use egui_term::BackendCommand;

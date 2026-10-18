@@ -73,6 +73,28 @@ ENVIRONMENT
   CODEX_BIN          codex binary        CLAUDE_BIN  claude binary
 ";
 
+fn run_with_env(args: &[String]) -> ExitCode {
+    let split = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let (vars, rest) = args.split_at(split);
+    let rest = rest.get(1..).unwrap_or(&[]);
+    let Some(program) = rest.first() else {
+        eprintln!("usage: env K=V… -- program [args…]");
+        return ExitCode::FAILURE;
+    };
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(&rest[1..]);
+    for var in vars {
+        if let Some((key, value)) = var.split_once('=') { cmd.env(key, value); }
+    }
+    match cmd.status() {
+        Ok(status) => ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8),
+        Err(e) => {
+            eprintln!("error: cannot start {program}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
@@ -82,6 +104,9 @@ fn main() -> ExitCode {
     if args[0] == "--version" {
         println!("agents-pixel-dungeon-guild {}", service::SERVICE_VERSION);
         return ExitCode::SUCCESS;
+    }
+    if args[0] == "env" {
+        return run_with_env(&args[1..]);
     }
     let result = match args[0].as_str() {
         "serve" => serve(&args[1..]),
@@ -166,12 +191,10 @@ fn serve(args: &[String]) -> Result<(), String> {
     result
 }
 
-/// One service per home: an exclusive flock on a lock file.
+/// One service per home: an exclusive lock on a lock file.
 fn acquire_lock() -> Result<std::fs::File, String> {
-    use std::os::unix::io::AsRawFd;
     let file = std::fs::OpenOptions::new().create(true).write(true).open(paths::lock_path()).map_err(|e| e.to_string())?;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
+    if file.try_lock().is_err() {
         return Err(format!("another guild service already owns {}", paths::home().display()));
     }
     Ok(file)
@@ -183,10 +206,8 @@ fn daemonize(forward: &[String]) -> Result<(), String> {
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths::log_path()).map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("serve").args(forward).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::from(log.try_clone().map_err(|e| e.to_string())?)).stderr(std::process::Stdio::from(log));
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    guild::platform::keep_stdio_private();
+    guild::platform::detach(&mut cmd);
     cmd.spawn().map_err(|e| e.to_string())?;
     let client = Client::default_socket();
     let started = Instant::now();

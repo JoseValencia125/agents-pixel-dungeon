@@ -1,6 +1,6 @@
 # Contributing
 
-Build on macOS or Linux with `./scripts/build.sh` (Rust stable; see the README for the Linux packages). Run `cargo test` and the built executable with `--self-test`.
+Build on macOS or Linux with `./scripts/build.sh`, or on Windows with `.\scripts\build.ps1` (Rust stable; see the README for the Linux packages). Run `cargo test` and the built executable with `--self-test`.
 
 Use `--demo` for screenshots so no private project names or terminal titles appear. Verify the native window, search, state filter, selection, menu-bar reopening, reduced motion and reconnection where relevant.
 
@@ -19,4 +19,4 @@ Commit subjects follow [Conventional Commits](https://www.conventionalcommits.or
 - `feat!: …`, or a `BREAKING CHANGE:` footer, makes a major release (2.1.2 → 3.0.0).
 - `docs:`, `test:`, `refactor:`, `chore:` and `ci:` change no version and stay out of the changelog.
 
-Releases are cut by [release-please](https://github.com/googleapis/release-please) (`.github/workflows/release-please.yml`). Every push to `main` keeps a `release: X.Y.Z` pull request up to date with the version in `Cargo.toml` and `Cargo.lock` and a new `CHANGELOG.md` section built from the commits. Edit that section in the pull request before merging if the commit subjects need prose. Merging it tags `vX.Y.Z`, publishes the GitHub release and attaches the macOS and Linux builds. Do not bump versions or tag by hand; the app bundle takes its version from `Cargo.toml` at build time.
+Releases are cut by [release-please](https://github.com/googleapis/release-please) (`.github/workflows/release-please.yml`). Every push to `main` keeps a `release: X.Y.Z` pull request up to date with the version in `Cargo.toml` and `Cargo.lock` and a new `CHANGELOG.md` section built from the commits. Edit that section in the pull request before merging if the commit subjects need prose. Merging it tags `vX.Y.Z`, publishes the GitHub release and attaches the macOS, Linux and Windows builds. Do not bump versions or tag by hand; the app bundle takes its version from `Cargo.toml` at build time.

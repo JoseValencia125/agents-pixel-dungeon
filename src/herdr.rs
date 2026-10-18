@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -270,13 +270,17 @@ pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
+pub fn is_absolute_path(path: &str) -> bool {
+    path.starts_with('/') || Path::new(path).is_absolute()
+}
+
 /// `/Users/me/x` → `~/x`.
 pub fn abbreviate_home(path: &str) -> String {
     let home = home_dir().to_string_lossy().to_string();
     if path == home {
         "~".to_string()
-    } else if let Some(rest) = path.strip_prefix(&format!("{home}/")) {
-        format!("~/{rest}")
+    } else if let Some(rest) = path.strip_prefix(&format!("{home}/")).or_else(|| path.strip_prefix(&format!("{home}{}", std::path::MAIN_SEPARATOR))) {
+        format!("~/{}", rest.replace(std::path::MAIN_SEPARATOR, "/"))
     } else {
         path.to_string()
     }
@@ -286,7 +290,7 @@ pub fn abbreviate_home(path: &str) -> String {
 pub fn expand_home(path: &str) -> String {
     if path == "~" {
         home_dir().to_string_lossy().to_string()
-    } else if let Some(rest) = path.strip_prefix("~/") {
+    } else if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
         home_dir().join(rest).to_string_lossy().to_string()
     } else {
         path.to_string()
@@ -304,8 +308,10 @@ pub fn herdr_binary() -> Result<PathBuf, MonitorError> {
     candidates.push(home.join(".local/bin/herdr"));
     candidates.push(PathBuf::from("/opt/homebrew/bin/herdr"));
     candidates.push(PathBuf::from("/usr/local/bin/herdr"));
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') { candidates.push(Path::new(dir).join("herdr")); }
+    #[cfg(windows)]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") { candidates.push(PathBuf::from(local).join("Programs/Herdr/bin/herdr.exe")); }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) { candidates.push(dir.join(if cfg!(windows) { "herdr.exe" } else { "herdr" })); }
     }
     candidates
         .into_iter()
@@ -314,15 +320,14 @@ pub fn herdr_binary() -> Result<PathBuf, MonitorError> {
 }
 
 fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    guild::platform::is_executable(path)
 }
 
 /// Run `herdr [--session s] <arguments>` and return its stdout. The process
 /// is killed after `timeout` so a stuck server never hangs the UI.
 pub fn run_herdr(arguments: &[&str], session: &str, timeout: Duration) -> Result<Vec<u8>, MonitorError> {
     let binary = herdr_binary()?;
-    let mut command = Command::new(binary);
+    let mut command = guild::platform::command(binary);
     if session != "default" { command.args(["--session", session]); }
     command.args(arguments).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let unreachable = || MonitorError::Message(tr("Sin conexión con Herdr. Abre tu sesión; reintentamos automáticamente."));
@@ -422,7 +427,10 @@ pub struct BackgroundJob {
 }
 
 pub fn default_daemon_root() -> String {
-    format!("/tmp/cc-daemon-{}", unsafe { libc::getuid() })
+    #[cfg(unix)]
+    { format!("/tmp/cc-daemon-{}", unsafe { libc::getuid() }) }
+    #[cfg(not(unix))]
+    { String::new() }
 }
 
 /// Jobs whose process is alive: Claude Code's daemon keeps one terminal
@@ -590,7 +598,7 @@ pub fn session_limit(session: &str) -> Option<Option<i64>> {
 
 /// ~/.claude/projects/<project>/<session>.jsonl for a session id.
 pub fn claude_transcript(session: &str) -> Option<String> {
-    if session.starts_with('/') { return Some(session.to_string()); }
+    if is_absolute_path(session) { return Some(session.to_string()); }
     let dirs = std::fs::read_dir(home_dir().join(".claude/projects")).ok()?;
     dirs.flatten().map(|d| d.path().join(format!("{session}.jsonl"))).find(|f| f.exists()).map(|f| f.to_string_lossy().to_string())
 }
@@ -814,14 +822,24 @@ pub fn resolve_link(link: &str, cwd: &str) -> Option<String> {
         if let Some((head, tail)) = path.rsplit_once(':') { if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) { path = head; } }
     }
     let expanded = expand_home(path);
-    let full = if expanded.starts_with('/') { PathBuf::from(&expanded) } else { PathBuf::from(expand_home(cwd)).join(&expanded) };
+    let full = if is_absolute_path(&expanded) { PathBuf::from(&expanded) } else { PathBuf::from(expand_home(cwd)).join(&expanded) };
     full.exists().then(|| full.to_string_lossy().to_string())
 }
 
 /// A terminal window in `cwd`, to type a command in: Terminal on macOS,
 /// the first terminal emulator found on Linux.
+#[cfg_attr(windows, allow(unreachable_code))]
 pub fn open_terminal(cwd: &str) {
     let cwd = if cwd.trim().is_empty() { home_dir().to_string_lossy().to_string() } else { expand_home(cwd) };
+    #[cfg(windows)]
+    {
+        if guild::platform::which("wt").is_some() {
+            if guild::platform::command("wt").args(["-d", &cwd]).spawn().is_ok() { return; }
+        }
+        let shell = if guild::platform::which("pwsh").is_some() { "pwsh.exe" } else { "powershell.exe" };
+        let _ = guild::platform::command("cmd").args(["/C", "start", "", shell, "-NoLogo"]).current_dir(&cwd).spawn();
+        return;
+    }
     if cfg!(target_os = "macos") {
         let _ = std::process::Command::new("open").args(["-a", "Terminal", &cwd]).spawn();
         return;
@@ -834,9 +852,17 @@ pub fn open_terminal(cwd: &str) {
 /// What ⌘-click on a link does: a URL opens in the browser; a file or a
 /// folder is shown in Finder (selected in its folder), or in the file
 /// manager on Linux, instead of being opened.
+#[cfg_attr(windows, allow(unreachable_code))]
 pub fn reveal_target(target: &str) {
     if ["http://", "https://"].iter().any(|p| target.starts_with(p)) { return open_target(target); }
     let path = target.strip_prefix("file://").unwrap_or(target);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let native = path.trim_start_matches('/').replace('/', "\\");
+        let _ = std::process::Command::new("explorer.exe").raw_arg(format!("/select,\"{native}\"")).spawn();
+        return;
+    }
     if cfg!(target_os = "macos") {
         let _ = std::process::Command::new("open").args(["-R", path]).spawn();
         return;
@@ -852,7 +878,13 @@ pub fn reveal_target(target: &str) {
 }
 
 /// Open a URL or a path with the system (open / xdg-open).
+#[cfg_attr(windows, allow(unreachable_code))]
 pub fn open_target(target: &str) {
+    #[cfg(windows)]
+    {
+        let _ = guild::platform::command("explorer.exe").arg(target).spawn();
+        return;
+    }
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     let _ = std::process::Command::new(opener).arg(target).spawn();
 }
@@ -865,9 +897,11 @@ pub fn installed_kinds() -> Vec<&'static str> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     dirs.extend([".local/bin", ".cargo/bin", ".bun/bin", ".npm-global/bin", ".volta/bin", ".opencode/bin"].iter().map(|d| home.join(d)));
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].iter().map(PathBuf::from));
+    #[cfg(windows)]
+    dirs.push(home.join("AppData/Roaming/npm"));
     let found: Vec<&'static str> = CREATABLE_KINDS.iter().copied().filter(|kind| {
         let commands: &[&str] = match *kind { "kiro" => &["kiro-cli"], "cursor" => &["agent", "cursor-agent"], _ => std::slice::from_ref(kind) };
-        dirs.iter().any(|d| commands.iter().any(|command| d.join(command).is_file()))
+        dirs.iter().any(|d| commands.iter().any(|command| guild::platform::in_dir(d, command).is_some()))
     }).collect();
     if found.is_empty() { CREATABLE_KINDS.to_vec() } else { found }
 }
@@ -1209,7 +1243,7 @@ static TRANSCRIPT_PATHS: Mutex<Option<HashMap<String, String>>> = Mutex::new(Non
 /// Codex's rollout for a session: an absolute path as given, else the
 /// newest `rollout-*-<session>.jsonl` in the last two weeks of day folders.
 pub fn codex_transcript(session: &str) -> Option<String> {
-    if session.starts_with('/') { return Some(session.to_string()); }
+    if is_absolute_path(session) { return Some(session.to_string()); }
     let mut guard = TRANSCRIPT_PATHS.lock().unwrap_or_else(|e| e.into_inner());
     let paths = guard.get_or_insert_with(HashMap::new);
     if let Some(known) = paths.get(session) { return Some(known.clone()); }
@@ -1268,7 +1302,7 @@ pub fn kiro_session_for(folder: &str) -> Option<(String, String)> {
 }
 
 pub fn kiro_transcript(session: &str) -> Option<String> {
-    if session.starts_with('/') { return Some(session.to_string()); }
+    if is_absolute_path(session) { return Some(session.to_string()); }
     let path = home_dir().join(format!(".kiro/sessions/cli/{session}.jsonl"));
     path.exists().then(|| path.to_string_lossy().to_string())
 }

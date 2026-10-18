@@ -5,7 +5,6 @@
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::mpsc::{channel, Receiver};
 
 /// A changed file: git's status letter (M, A, D, R, U, or ? when untracked),
@@ -53,7 +52,7 @@ fn tool(name: &str) -> PathBuf {
 
 /// Run git in `cwd` without taking the index lock an agent may need.
 fn git(cwd: &str, args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new(tool("git")).arg("-C").arg(cwd).args(args).env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C").output().ok()?;
+    let output = guild::platform::command(tool("git")).arg("-C").arg(cwd).args(args).env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C").output().ok()?;
     output.status.success().then_some(output.stdout)
 }
 
@@ -185,7 +184,7 @@ pub fn parse_pull_request(data: &[u8]) -> Option<PullRequest> {
 
 /// The pull request of the folder's branch, if `gh` finds one.
 pub fn pull_request(cwd: &str) -> Option<PullRequest> {
-    let output = Command::new(tool("gh")).current_dir(cwd).args(["pr", "view", "--json", "number,title,url,state,isDraft"]).env("GH_PROMPT_DISABLED", "1").output().ok()?;
+    let output = guild::platform::command(tool("gh")).current_dir(cwd).args(["pr", "view", "--json", "number,title,url,state,isDraft"]).env("GH_PROMPT_DISABLED", "1").output().ok()?;
     if !output.status.success() { return None; }
     parse_pull_request(&output.stdout)
 }
@@ -342,6 +341,7 @@ const DEMO_FILES: [(char, &str, u32, u32, &str); 5] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn statuses() {

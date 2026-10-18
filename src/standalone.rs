@@ -25,9 +25,10 @@ pub struct Process {
 /// hosts, daemons, one-shot prints) are not agents.
 pub fn identify(args: &[String]) -> Option<&'static str> {
     let first = args.first()?;
+    let first_path = first.replace('\\', "/");
     let basename = |p: &str| Path::new(p).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default().to_lowercase();
     let lookup = |name: &str| -> Option<&'static str> {
-        let name = name.trim_end_matches(".js").trim_end_matches(".mjs").trim_end_matches(".cjs");
+        let name = name.trim_end_matches(".js").trim_end_matches(".mjs").trim_end_matches(".cjs").trim_end_matches(".exe").trim_end_matches(".cmd");
         Some(match name {
             "pi" => "pi",
             "claude" | "claude-code" => "claude",
@@ -63,13 +64,14 @@ pub fn identify(args: &[String]) -> Option<&'static str> {
     if rest.iter().take(3).any(|a| helper.contains(a)) { return None; }
     let name = basename(first);
     // Claude Code's launcher execs a versioned binary under .../claude/versions/<v>.
-    if first.contains("/claude/versions/") { return Some("claude"); }
+    if first_path.contains("/claude/versions/") { return Some("claude"); }
     if let Some(agent) = lookup(&name) { return Some(agent); }
     if ["node", "bun", "deno", "python", "python3", "sh", "bash", "zsh"].contains(&name.as_str()) {
         for arg in rest.iter().take(2) {
             if let Some(agent) = lookup(&basename(arg)) { return Some(agent); }
-            if arg.contains("/cursor-agent/versions/") && basename(arg) == "index.js" { return Some("cursor"); }
-            if arg.contains("/claude/versions/") { return Some("claude"); }
+            let arg_path = arg.replace('\\', "/");
+            if arg_path.contains("/cursor-agent/versions/") && basename(arg) == "index.js" { return Some("cursor"); }
+            if arg_path.contains("/claude/versions/") { return Some("claude"); }
         }
     }
     None
@@ -77,13 +79,15 @@ pub fn identify(args: &[String]) -> Option<&'static str> {
 
 /// Every process with a controlling terminal, with its arguments and cwd.
 pub fn processes() -> Vec<Process> {
+    #[cfg(windows)]
+    { windows_processes() }
     #[cfg(target_os = "linux")]
     { linux_processes() }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     { ps_processes() }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn ps_processes() -> Vec<Process> {
     let Ok(output) = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,tty=,args="]).output() else { return vec![] };
     let text = String::from_utf8_lossy(&output.stdout);
@@ -110,6 +114,30 @@ fn ps_processes() -> Vec<Process> {
                     if let Some(process) = found.iter_mut().find(|x| x.pid == p) { process.cwd = Some(path.to_string()); }
                 }
             }
+        }
+    }
+    found
+}
+
+#[cfg(windows)]
+fn windows_processes() -> Vec<Process> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always));
+    let mut found: Vec<Process> = system
+        .processes()
+        .values()
+        .filter_map(|p| {
+            let args: Vec<String> = p.cmd().iter().map(|a| a.to_string_lossy().to_string()).collect();
+            if args.is_empty() { return None; }
+            Some(Process { pid: p.pid().as_u32(), ppid: p.parent().map(|x| x.as_u32()).unwrap_or(0), tty: true, args, cwd: None })
+        })
+        .collect();
+    let agents: Vec<Pid> = found.iter().filter(|p| identify(&p.args).is_some()).map(|p| Pid::from_u32(p.pid)).collect();
+    if !agents.is_empty() {
+        system.refresh_processes_specifics(ProcessesToUpdate::Some(&agents), true, ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always));
+        for process in found.iter_mut().filter(|p| agents.contains(&Pid::from_u32(p.pid))) {
+            process.cwd = system.process(Pid::from_u32(process.pid)).and_then(|p| p.cwd()).map(|c| c.to_string_lossy().to_string());
         }
     }
     found
@@ -337,7 +365,13 @@ pub fn open_herdr() -> Result<(), String> {
         let script = "tell application \"Terminal\"\n activate\n do script \"herdr\"\nend tell";
         return std::process::Command::new("osascript").args(["-e", script]).spawn().map(|_| ()).map_err(|e| e.to_string());
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let herdr = crate::herdr::herdr_binary().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "herdr".into());
+        if guild::platform::which("wt").is_some() && guild::platform::command("wt").arg(&herdr).spawn().is_ok() { return Ok(()); }
+        return guild::platform::command("cmd").args(["/C", "start", "", &herdr]).spawn().map(|_| ()).map_err(|e| e.to_string());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         for (terminal, args) in [("x-terminal-emulator", vec!["-e", "herdr"]), ("gnome-terminal", vec!["--", "herdr"]), ("konsole", vec!["-e", "herdr"]), ("xterm", vec!["-e", "herdr"])] {
             if std::process::Command::new(terminal).args(&args).spawn().is_ok() { return Ok(()); }
@@ -348,6 +382,13 @@ pub fn open_herdr() -> Result<(), String> {
 
 /// Herdr's official installer, run to completion; Ok carries its last lines.
 pub fn install_herdr() -> Result<String, String> {
+    #[cfg(windows)]
+    let output = {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let powershell = std::path::Path::new(&root).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe");
+        guild::platform::command(powershell).args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://herdr.dev/install.ps1 | iex"]).output().map_err(|e| e.to_string())?
+    };
+    #[cfg(not(windows))]
     let output = std::process::Command::new("sh").args(["-c", "curl -fsSL https://herdr.dev/install.sh | sh"]).output().map_err(|e| e.to_string())?;
     let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     let last: Vec<&str> = text.lines().rev().take(3).collect::<Vec<_>>().into_iter().rev().collect();

@@ -292,14 +292,14 @@ impl GuildView {
         let outbox = self.outbox.clone();
         let wake = self.wake.clone();
         std::thread::spawn(move || {
-            let exe = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("agents-pixel-dungeon-guild")));
-            let binary = exe.filter(|p| p.exists()).or_else(|| which("agents-pixel-dungeon-guild"));
+            let exe = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(format!("agents-pixel-dungeon-guild{}", std::env::consts::EXE_SUFFIX))));
+            let binary = exe.filter(|p| p.exists()).or_else(|| guild::platform::which("agents-pixel-dungeon-guild"));
             let Some(binary) = binary else {
                 let _ = outbox.send(Msg::Note(tr("No encuentro agents-pixel-dungeon-guild junto a la app"), "blocked"));
                 wake();
                 return;
             };
-            let output = std::process::Command::new(binary).args(["serve", "--daemon"]).output();
+            let output = guild::platform::command(binary).args(["serve", "--daemon"]).output();
             let note = match output {
                 Ok(o) if o.status.success() => (tr("Servicio de la guild arrancado"), "info"),
                 Ok(o) => (format!("Guild: {}", String::from_utf8_lossy(&o.stderr).trim()), "blocked"),
@@ -329,10 +329,6 @@ impl GuildView {
         let project = quest.as_ref().and_then(|q| snap.projects.iter().find(|p| p.id == q.project_id)).cloned();
         Some((member, attempt, task, quest, project))
     }
-}
-
-fn which(name: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|d| d.join(name)).find(|p| p.is_file()))
 }
 
 /// The attempt a member's room shows: the active one, else the latest
