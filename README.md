@@ -39,7 +39,7 @@ The session limit is not a Herdr state: the dungeon reads it from Claude Code's 
 
 Click `>_` in an agent's chat, or choose the terminal action from its room's context menu, to open an integrated shell in that agent's folder. Each folder has its own session, with terminal colours, scrolling, selection, paste and interactive commands. Closing the terminal window keeps its session alive while the app runs; open it again from the same folder to continue. Run `exit` to end the shell, then choose **New session** to start again. Quitting the app closes its terminals. **External terminal** remains available in the terminal toolbar.
 
-This shell is independent from the agent's chat and runs your login shell (`$SHELL`, with `/bin/bash` as fallback).
+This shell is independent from the agent's chat and runs your login shell (`$SHELL`, with `/bin/bash` as fallback; on Windows, PowerShell).
 
 ## Heroes
 
@@ -64,10 +64,10 @@ Original pixel art drawn in Aseprite (sources in `art/`), coloured after each to
 - **Chimes and desktop notifications** when an agent needs help or finishes.
 - **Subagents** as small heroes at the station of their own tool (Claude Code).
 - **Filters, search and an activity log**; the window resizes to whole rooms, scrolls, and remembers where you left it.
-- **Full screen** (⌃⌘F, F11 on Linux): its own space, one column of rooms on the left, the live console (colours and all) in the rest.
+- **Full screen** (⌃⌘F, F11 on Linux and Windows): its own space, one column of rooms on the left, the live console (colours and all) in the rest.
 - **See an agent's diff** in full screen: **± Diff** in its chat lists the files changed in its folder (uncommitted, unpushed, or against main as in a pull request) with lines added and removed; click one for its diff. A **PR #N** chip opens the branch's pull request.
 - **Event-driven**: Herdr's socket events the moment they happen, snapshots only to reconcile.
-- **The guild** (preview): found one for a repository from the guild window (⌘⇧G): members with roles from a game studio's catalogue (systems designer, gameplay engineer, reviewer, art director, exploit hunter…) on Kiro, Codex or Claude Code, and the game design in three levels, the experience, the loops and the parts, which every agent gets with its task. Give it a quest split into tasks, from the quest board (⌘G) or the CLI, and its members attempt each one in their own git worktree, ask you for permissions in their room, leave a candidate commit the project's verifiers check, and wait for you to accept it before it is squashed into the quest's branch. The work survives restarts: sessions are resumed where the harness allows it.
+- **The guild** (preview): found one for a repository from the guild window (⌘⇧G, Ctrl+Shift+G on Linux and Windows): members with roles from a game studio's catalogue (systems designer, gameplay engineer, reviewer, art director, exploit hunter…) on Kiro, Codex or Claude Code, and the game design in three levels, the experience, the loops and the parts, which every agent gets with its task. Give it a quest split into tasks, from the quest board (⌘G, Ctrl+G) or the CLI, and its members attempt each one in their own git worktree, ask you for permissions in their room, leave a candidate commit the project's verifiers check, and wait for you to accept it before it is squashed into the quest's branch. The work survives restarts: sessions are resumed where the harness allows it.
 - Spanish, English, French, Italian and Portuguese.
 
 The [guide](docs/GUIDE.md) has the details: how states are read, background jobs, the menu, configuration, privacy and the optional viewer mode without Herdr.
@@ -81,7 +81,7 @@ Play the current build from the guild window and note what you notice (confusing
 The guild window (⌘⇧G) founds a guild: the repository, its members with a role each (a video game studio's roles in one click), and a design from the **video game** template, which it then lets you shape in three tabs, Experience, Loops and Parts, and export to `game-design/` in the repo. The quest board (⌘G) has the forms for members and for a new quest with its tasks one per line and **Create and start**. The same from the command line:
 
 ```sh
-G='build/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild'   # Linux: build/agents-pixel-dungeon-guild
+G='build/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild'   # Linux: build/agents-pixel-dungeon-guild · Windows: build\agents-pixel-dungeon-guild.exe
 "$G" found ~/code/my-game --template videogame --member Sellers:systems-designer:kiro --member Orin:gameplay-engineer:codex
 "$G" project add ~/code/my-repo                       # or just a project: members and verifiers from .guild/guild.toml, if any
 "$G" member add aria --harness kiro --role implementer --model claude-sonnet-5.5
@@ -131,6 +131,8 @@ Thank you for supporting independent open-source development. ⚔️
 ## Credits and licenses
 
 Created by **[Diabolo Studio](https://diabolostudio.com/)** (Nacho Valencia): code and all pixel art. MIT, see [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
+
+Thanks to everyone who sends pull requests: [promandev](https://github.com/promandev) brought it to Windows, and [nogara](https://github.com/nogara) kept the widget on screen with several monitors.
 
 Inspired by **[Claude Dungeon](https://github.com/thousandsky2024/claude-pixel-agent-web)** by [thousandsky2024](https://github.com/thousandsky2024), which first pictured coding agents as dungeon heroes. No code or artwork from it is included.
 
