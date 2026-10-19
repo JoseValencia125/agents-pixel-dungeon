@@ -30,6 +30,7 @@ struct MockState {
     sessions: Vec<(String, PathBuf, Option<String>)>,
     pending: Vec<(String, String, std::sync::mpsc::Sender<bool>)>,
     interrupted: Vec<String>,
+    prompts: Vec<String>,
     resumed: Vec<String>,
 }
 
@@ -55,6 +56,8 @@ impl MockHarness {
     pub fn set_analysis_reply(&self, text: impl Into<String>) { *self.analysis_reply.lock().unwrap() = Some(text.into()); }
     pub fn set_orchestrator_reply(&self, text: impl Into<String>) { *self.orchestrator_reply.lock().unwrap() = Some(text.into()); }
     /// Session ids that were reopened through `resume_session`.
+    /// Every prompt sent, in order.
+    pub fn prompts(&self) -> Vec<String> { self.state.lock().unwrap().prompts.clone() }
     pub fn resumed(&self) -> Vec<String> { self.state.lock().unwrap().resumed.clone() }
 }
 
@@ -103,6 +106,7 @@ impl HarnessAdapter for MockHarness {
     }
 
     fn prompt(&self, session: &SessionRef, request_id: &str, text: &str) -> HarnessResult<TurnHandle> {
+        self.state.lock().unwrap().prompts.push(text.to_string());
         let mut behaviour = self.behaviour.lock().unwrap().clone();
         if text.contains("## Candidates") {
             if let Some(reply) = self.judge_reply.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(reply); }

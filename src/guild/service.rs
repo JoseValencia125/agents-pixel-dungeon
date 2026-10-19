@@ -1489,7 +1489,18 @@ impl Service {
         };
         self.move_attempt(attempt_id, AttemptState::Provisioning, None)?;
         let base = workspaces::ensure_integration_branch(&project, &quest).map_err(ApiError::internal)?;
-        let workspace = workspaces::provision(&project, &quest.id, &task.id, attempt_id, &base).map_err(ApiError::internal)?;
+        // A retry learns why the earlier attempts were turned down and, when
+        // the last one left a candidate (and this is not a race), goes on
+        // from it: asked to fix one line, it fixes that line.
+        let earlier: Vec<Attempt> = {
+            let store = self.store.lock().unwrap();
+            let mut v: Vec<Attempt> = store.attempts_of_task(&task.id)?.into_iter().filter(|a| a.id != attempt.id && a.kind == AttemptKind::Work && a.failure.is_some()).collect();
+            v.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            v
+        };
+        let feedback: Vec<String> = earlier.iter().rev().take(3).rev().filter_map(|a| a.failure.clone()).collect();
+        let resume_from = if attempt.kind == AttemptKind::Work && task.candidates <= 1 { earlier.last().and_then(|a| a.candidate.as_ref()).map(|c| c.head_sha.clone()) } else { None };
+        let workspace = workspaces::provision(&project, &quest.id, &task.id, attempt_id, &base, resume_from.as_deref()).map_err(ApiError::internal)?;
         {
             let store = self.store.lock().unwrap();
             store.put_workspace(&workspace)?;
@@ -1516,7 +1527,7 @@ impl Service {
         let prompt = match attempt.kind {
             AttemptKind::Judge => self.compose_judge_prompt(&role_prompt, &task, design.as_ref())?,
             AttemptKind::Analysis => self.compose_analysis_prompt(&role_prompt, &task, design.as_ref())?,
-            AttemptKind::Work => compose_prompt(&role_prompt, &task, &workspace, design.as_ref()),
+            AttemptKind::Work => compose_prompt(&role_prompt, &task, &workspace, design.as_ref(), &feedback, resume_from.is_some()),
         };
         self.run_turn(attempt_id, &attempt, &member, &adapter, session, &prompt)
     }
@@ -2744,7 +2755,7 @@ fn parse_strategy(params: &Value) -> Res<ExecutionStrategy> {
     })
 }
 
-fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>) -> String {
+fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>, feedback: &[String], continued: bool) -> String {
     let mut s = String::new();
     s.push_str(role_prompt.trim());
     s.push_str("\n\n# Task: ");
@@ -2761,6 +2772,15 @@ fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design:
         "\n## Rules\n- Your working directory is a dedicated git worktree on branch `{}`. Work only inside it.\n- Do not commit, push or switch branches; the guild commits your work when you finish.\n- Do not ask whether to proceed: do the work, then reply with a short summary of what changed, how you verified it, and anything left undone.\n",
         workspace.branch
     ));
+    if !feedback.is_empty() {
+        s.push_str("\n## Earlier attempts were turned down\n");
+        for f in feedback { s.push_str(&format!("- {}\n", f.trim())); }
+        if continued {
+            s.push_str("Your worktree already holds the last candidate. Keep what was not objected to and make exactly the changes asked for above.\n");
+        } else {
+            s.push_str("Avoid what was objected to above.\n");
+        }
+    }
     if let Some(d) = design { s.push_str(&crate::design::prompt_context(d)); }
     s
 }
@@ -2952,6 +2972,33 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_candidate_is_retried_from_where_it_was_with_the_reason() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        let mock = Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "a.txt".into(), content: "first\n".into() }));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Two files", "maxAttempts": 3})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "first candidate", |s| s.tasks[0].state == TaskState::Verifying);
+        let first = snap.attempts[0].candidate.clone().unwrap();
+        mock.set_behaviour(MockBehaviour::Succeed { file: "b.txt".into(), content: "fix\n".into() });
+        service.handle("task.reject", &json!({"taskId": "t1", "reason": "also add b.txt, keep a.txt"})).unwrap();
+        let snap = wait_for(&service, "second candidate", |s| s.attempts.len() == 2 && s.attempts.iter().any(|a| a.state == AttemptState::Submitted));
+        let prompt = mock.prompts().last().cloned().unwrap();
+        assert!(prompt.contains("also add b.txt, keep a.txt") && prompt.contains("already holds the last candidate"), "{prompt}");
+        let second = snap.attempts.iter().find(|a| a.state == AttemptState::Submitted).unwrap().candidate.clone().unwrap();
+        // It went on from the first candidate, and is still measured against the quest's base.
+        assert_eq!(second.base_sha, first.base_sha);
+        assert_eq!(second.files_changed, 2, "a.txt from the first candidate plus b.txt");
+    }
+
+    #[test]
     fn claude_orchestrates_through_mcp_from_quest_to_integration() {
         let (_home, service, _) = setup(MockBehaviour::Succeed { file: "poison.txt".into(), content: "tick\n".into() });
         let call = |m: &str, p: Value| service.handle(m, &p).map_err(|e| e.message);
@@ -3103,7 +3150,7 @@ mod tests {
         let design: crate::design::GameDesign = serde_json::from_value(saved).unwrap();
         let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now() };
         let ws = Workspace { id: "w".into(), attempt_id: "a".into(), project_id: design.project_id.clone(), path: "/tmp/w".into(), branch: "guild/x".into(), base_sha: "0".into(), state: WorkspaceState::Ready, created_at: now(), updated_at: now() };
-        let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design));
+        let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design), &[], false);
         assert!(prompt.contains("Avoid: a dominant strategy; always choosing the longest word; obvious decisions; grinding"));
         assert!(prompt.contains("Loop \"Economy\": earn → spend ↺"));
         assert!(prompt.contains("part, a loop or the whole"));
@@ -3222,7 +3269,7 @@ mod tests {
         let project = store.project(&quest.project_id).unwrap().unwrap();
         let id = new_id();
         let base = workspaces::ensure_integration_branch(&project, &quest).unwrap();
-        let ws = workspaces::provision(&project, &quest.id, &task.id, &id, &base).unwrap();
+        let ws = workspaces::provision(&project, &quest.id, &task.id, &id, &base, None).unwrap();
         store.put_workspace(&ws).unwrap();
         let candidate = change.map(|(file, content)| {
             std::fs::write(Path::new(&ws.path).join(file), content).unwrap();
