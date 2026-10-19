@@ -8,12 +8,24 @@ use std::path::{Path, PathBuf};
 
 pub type GitResult<T> = Result<T, String>;
 
+/// Worktrees share one object store. On Windows, two of them writing the
+/// same loose object at once (racing candidates that produce the same blob)
+/// lose with "Permission denied" while the other holds the file; nothing was
+/// written to a ref, so the command is retried.
 pub fn git(repo: &Path, args: &[&str]) -> GitResult<String> {
-    let output = crate::platform::command("git").arg("-C").arg(repo).args(args).output().map_err(|e| format!("git: {e}"))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
-    } else {
-        Err(format!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim()))
+    let mut tries = 0;
+    loop {
+        let output = crate::platform::command("git").arg("-C").arg(repo).args(args).output().map_err(|e| format!("git: {e}"))?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tries += 1;
+        if tries < 5 && stderr.contains("Permission denied") && stderr.contains("objects") {
+            std::thread::sleep(std::time::Duration::from_millis(50 * tries));
+            continue;
+        }
+        return Err(format!("git {} failed: {}", args.join(" "), stderr.trim()));
     }
 }
 
