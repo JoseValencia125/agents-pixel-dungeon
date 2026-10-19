@@ -34,12 +34,10 @@ pub fn branch_name(quest_id: &str, task_id: &str, attempt_id: &str) -> String {
 
 fn short(id: &str) -> &str { if id.len() > 8 { &id[id.len() - 8..] } else { id } }
 
-/// Create the worktree for an attempt on a fresh branch from `start` (a
-/// retry goes on from the candidate it was asked to fix), else from
-/// `base_sha`, which candidates are always measured against.
+/// Create the worktree for an attempt from `base_sha`, on a fresh branch.
 /// Adopts an existing checkout at the same path when it already points at
 /// that branch (a crash between creating it and recording it).
-pub fn provision(project: &Project, quest_id: &str, task_id: &str, attempt_id: &str, base_sha: &str, start: Option<&str>) -> GitResult<Workspace> {
+pub fn provision(project: &Project, quest_id: &str, task_id: &str, attempt_id: &str, base_sha: &str) -> GitResult<Workspace> {
     let repo = Path::new(&project.repo_path);
     if !is_repo(repo) { return Err(format!("{} is not a git repository", project.repo_path)); }
     let path = worktree_path(&project.id, attempt_id);
@@ -55,7 +53,7 @@ pub fn provision(project: &Project, quest_id: &str, task_id: &str, attempt_id: &
         if ref_exists(repo, &format!("refs/heads/{branch}")) {
             git(repo, &["worktree", "add", &path_s, &branch])?;
         } else {
-            git(repo, &["worktree", "add", "-b", &branch, &path_s, start.unwrap_or(base_sha)])?;
+            git(repo, &["worktree", "add", "-b", &branch, &path_s, base_sha])?;
         }
     }
     let now = now();
@@ -70,6 +68,20 @@ pub fn provision(project: &Project, quest_id: &str, task_id: &str, attempt_id: &
         created_at: now.clone(),
         updated_at: now,
     })
+}
+
+/// Bring an earlier candidate's changes into a fresh worktree, uncommitted,
+/// on top of its base (which may have moved on since: other tasks were
+/// integrated), so a retry goes on from it. Git merges in three ways; on a
+/// conflict the worktree is put back as it was and false is returned.
+pub fn carry(workspace: &Workspace, candidate: &Candidate) -> bool {
+    let path = Path::new(&workspace.path);
+    let range = format!("{}..{}", candidate.base_sha, candidate.head_sha);
+    if git(path, &["cherry-pick", "--no-commit", &range]).is_ok() { return true; }
+    let _ = git(path, &["cherry-pick", "--abort"]);
+    let _ = git(path, &["reset", "--hard", &workspace.base_sha]);
+    let _ = git(path, &["clean", "-fdq"]);
+    false
 }
 
 /// Run the project's setup command in the worktree, returning its output.
@@ -308,7 +320,7 @@ mod tests {
         let (dir, project) = temp_repo();
         std::env::set_var("HPD_GUILD_HOME", dir.path().join("home").display().to_string());
         let base = rev_parse(Path::new(&project.repo_path), "HEAD").unwrap();
-        let ws = provision(&project, "q1", "t1", "a1", &base, None).unwrap();
+        let ws = provision(&project, "q1", "t1", "a1", &base).unwrap();
         assert!(Path::new(&ws.path).join("README.md").exists());
         assert!(commit_candidate(&ws, "nothing").unwrap().is_none());
         std::fs::write(Path::new(&ws.path).join("new.txt"), "x\n").unwrap();

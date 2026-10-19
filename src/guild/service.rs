@@ -1499,8 +1499,10 @@ impl Service {
             v
         };
         let feedback: Vec<String> = earlier.iter().rev().take(3).rev().filter_map(|a| a.failure.clone()).collect();
-        let resume_from = if attempt.kind == AttemptKind::Work && task.candidates <= 1 { earlier.last().and_then(|a| a.candidate.as_ref()).map(|c| c.head_sha.clone()) } else { None };
-        let workspace = workspaces::provision(&project, &quest.id, &task.id, attempt_id, &base, resume_from.as_deref()).map_err(ApiError::internal)?;
+        let resume_from = if attempt.kind == AttemptKind::Work && task.candidates <= 1 { earlier.last().and_then(|a| a.candidate.clone()) } else { None };
+        let workspace = workspaces::provision(&project, &quest.id, &task.id, attempt_id, &base).map_err(ApiError::internal)?;
+        // On the current base, with the last candidate's changes carried over.
+        let continued = resume_from.as_ref().is_some_and(|c| workspaces::carry(&workspace, c));
         {
             let store = self.store.lock().unwrap();
             store.put_workspace(&workspace)?;
@@ -1527,7 +1529,7 @@ impl Service {
         let prompt = match attempt.kind {
             AttemptKind::Judge => self.compose_judge_prompt(&role_prompt, &task, design.as_ref())?,
             AttemptKind::Analysis => self.compose_analysis_prompt(&role_prompt, &task, design.as_ref())?,
-            AttemptKind::Work => compose_prompt(&role_prompt, &task, &workspace, design.as_ref(), &feedback, resume_from.is_some()),
+            AttemptKind::Work => compose_prompt(&role_prompt, &task, &workspace, design.as_ref(), &feedback, continued),
         };
         self.run_turn(attempt_id, &attempt, &member, &adapter, session, &prompt)
     }
@@ -2999,6 +3001,38 @@ mod tests {
     }
 
     #[test]
+    fn a_retry_carries_its_candidate_onto_work_integrated_meanwhile() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        let mock = Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "logic.txt".into(), content: "v1\n".into() }));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "orin", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "logic", "title": "Logic", "memberId": "orin", "maxAttempts": 3})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "logic's first candidate", |s| s.tasks.iter().any(|t| t.id == "logic" && t.state == TaskState::Verifying));
+        // The UI is done and integrated while logic waits for review.
+        mock.set_behaviour(MockBehaviour::Succeed { file: "ui.txt".into(), content: "ui\n".into() });
+        // Orin's candidate waiting for review keeps Orin busy: Lira does the UI.
+        service.handle("member.add", &json!({"id": "lira", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "ui", "title": "UI", "memberId": "lira"})).unwrap();
+        wait_for(&service, "ui's candidate", |s| s.tasks.iter().any(|t| t.id == "ui" && t.state == TaskState::Verifying));
+        service.handle("task.accept", &json!({"taskId": "ui", "integrate": true})).unwrap();
+        wait_for(&service, "ui integrated", |s| s.tasks.iter().any(|t| t.id == "ui" && t.state == TaskState::Completed));
+        mock.set_behaviour(MockBehaviour::Succeed { file: "logic.txt".into(), content: "v2\n".into() });
+        service.handle("task.reject", &json!({"taskId": "logic", "reason": "write v2"})).unwrap();
+        let snap = wait_for(&service, "logic's retry", |s| s.attempts.iter().filter(|a| a.task_id == "logic").count() == 2 && s.tasks.iter().any(|t| t.id == "logic" && t.state == TaskState::Verifying));
+        let retry = snap.attempts.iter().filter(|a| a.task_id == "logic").max_by(|a, b| a.created_at.cmp(&b.created_at)).unwrap();
+        let diff = service.handle("artifact.read", &json!({"artifactId": retry.candidate.as_ref().unwrap().diff_artifact_id.clone().unwrap()})).unwrap()["text"].as_str().unwrap().to_string();
+        assert!(diff.contains("logic.txt") && !diff.contains("ui.txt"), "the retry's diff is its own change only, nothing of the UI reverted:\n{diff}");
+        assert!(mock.prompts().last().unwrap().contains("already holds the last candidate"));
+    }
+
+    #[test]
     fn claude_orchestrates_through_mcp_from_quest_to_integration() {
         let (_home, service, _) = setup(MockBehaviour::Succeed { file: "poison.txt".into(), content: "tick\n".into() });
         let call = |m: &str, p: Value| service.handle(m, &p).map_err(|e| e.message);
@@ -3269,7 +3303,7 @@ mod tests {
         let project = store.project(&quest.project_id).unwrap().unwrap();
         let id = new_id();
         let base = workspaces::ensure_integration_branch(&project, &quest).unwrap();
-        let ws = workspaces::provision(&project, &quest.id, &task.id, &id, &base, None).unwrap();
+        let ws = workspaces::provision(&project, &quest.id, &task.id, &id, &base).unwrap();
         store.put_workspace(&ws).unwrap();
         let candidate = change.map(|(file, content)| {
             std::fs::write(Path::new(&ws.path).join(file), content).unwrap();
