@@ -1929,7 +1929,8 @@ impl Scene {
                             response.terminal = Some(id.clone());
                             ui.close_menu();
                         }
-                        if ui.button(tr("Finalizar agente (/exit)")).clicked() {
+                        let guild_member = id.starts_with(crate::guild_view::ID_PREFIX);
+                        if ui.button(tr(if guild_member { "Quitar de la guild" } else { "Finalizar agente (/exit)" })).clicked() {
                             response.finish = Some(id.clone());
                             ui.close_menu();
                         }
