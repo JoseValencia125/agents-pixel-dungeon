@@ -405,6 +405,8 @@ struct Light {
 
 struct Mini {
     pos: Pos2,
+    /// Where its walk to `target` started.
+    from: Pos2,
     target: Pos2,
     action: String,
     facing: f32,
@@ -545,6 +547,21 @@ impl Room {
         let art = self.size.remap(self.style.status, Room::art_point(p));
         let f = self.drawn_frame();
         pos2(f.min.x + art.x * 1.5, f.min.y + art.y * 1.5)
+    }
+
+    /// Where the hero is drawn. A walk is placed at its ends and drawn
+    /// straight between them: placing each point on the way would jump the
+    /// hero back and forth wherever it crosses from one block of a medium or
+    /// small room's furniture into another.
+    fn place_hero(&self, hero: Pos2) -> Pos2 {
+        match self.runner.as_ref().and_then(|r| r.current()) {
+            Some((Step { kind: StepKind::Walk { from, to }, dur }, e)) if self.size != RoomSize::Large => {
+                let k = e / dur.max(0.001);
+                let base = lerp_pos(Room::rp(*from), Room::rp(*to), k);
+                lerp_pos(self.place(Room::rp(*from)), self.place(Room::rp(*to)), k) + (hero - base)
+            }
+            _ => self.place(hero),
+        }
     }
 
     /// The room's art at the size it is drawn.
@@ -843,12 +860,13 @@ impl Room {
             let facing = found.map(|s| s.1).unwrap_or(1.0) * if at_desk { if n < 0.0 { 1.0 } else { -1.0 } } else { 1.0 };
             let front = art.y > self.style.spot.y;
             if let Some(mini) = self.party.get_mut(i) {
+                if mini.target != home { mini.from = mini.pos; }
                 mini.target = home;
                 mini.action = action;
                 mini.facing = facing;
                 mini.front = front;
             } else {
-                self.party.push(Mini { pos: home, target: home, action, facing, front });
+                self.party.push(Mini { pos: home, from: home, target: home, action, facing, front });
             }
         }
     }
@@ -1239,7 +1257,7 @@ impl Room {
             for mini in self.party.iter().filter(|m| !m.front) { self.draw_mini(&clipped, mini, origin, assets, mini_tint); }
         }
         // The hero.
-        let hero_at = at(hero_pos);
+        let hero_at = origin + self.place_hero(hero_pos).to_vec2();
         if style.lying && !self.in_transition {
             let shuffle = t - (self.shuffle_at - self.shuffle_period);
             let wobble = if shuffle < 0.15 { lerp(0.0, 0.12, shuffle / 0.15) } else if shuffle < 0.35 { lerp(0.12, -0.08, (shuffle - 0.15) / 0.2) } else if shuffle < 0.6 { lerp(-0.08, 0.0, (shuffle - 0.35) / 0.25) } else { 0.0 };
@@ -1473,7 +1491,10 @@ impl Room {
     fn draw_mini(&self, painter: &Painter, mini: &Mini, origin: Pos2, assets: &Assets, tint: Color32) {
         let frame = (self.clock / 0.16) as usize % 3;
         let sprite = assets.hero_frame(self.harness, "work", frame);
-        let placed = self.place(mini.pos);
+        // Placed at the ends of its walk, like the hero's.
+        let span = (mini.target - mini.from).length();
+        let k = if span > 0.5 { 1.0 - (mini.target - mini.pos).length() / span } else { 1.0 };
+        let placed = lerp_pos(self.place(mini.from), self.place(mini.target), k.clamp(0.0, 1.0));
         let at = pos2(origin.x + placed.x, origin.y + placed.y);
         draw_sprite(painter, sprite, at, vec2(24.0, 24.0), mini.facing < 0.0, 0.0, tint);
         // Readers and planners hold an open book or scroll.
@@ -2024,6 +2045,28 @@ mod tests {
 
     fn agent(id: &str, status: &str) -> Agent {
         Agent::new(id, "claude", status, id, "Doing a long task that would never fit on one line of a window", &format!("/nonexistent/{id}"))
+    }
+
+    #[test]
+    fn a_hero_walking_between_rooms_never_jumps_at_any_size() {
+        for size in RoomSize::ALL {
+            for (from, to) in [("idle", "working"), ("working", "idle"), ("blocked", "done"), ("done", "limited"), ("limited", "working")] {
+                let mut room = Room::new(&agent("a", from), 1);
+                room.size = size;
+                room.update(&agent("a", from), false);
+                room.update(&agent("a", to), true);
+                let mut last = room.place_hero(room.hero_view().0);
+                for _ in 0..600 {
+                    room.advance(1.0 / 60.0);
+                    if !room.in_transition { break; }
+                    let now = room.place_hero(room.hero_view().0);
+                    // Leaving the room is the one teleport: outside, out of sight.
+                    let swapped = matches!(room.runner.as_ref().and_then(|r| r.current()), Some((Step { kind: StepKind::Walk { from, .. }, .. }, e)) if *from == OUTSIDE && e < 0.02);
+                    assert!(swapped || (now - last).length() < 6.0, "{size:?} {from}→{to}: jumped from {last:?} to {now:?}");
+                    last = now;
+                }
+            }
+        }
     }
 
     #[test]
