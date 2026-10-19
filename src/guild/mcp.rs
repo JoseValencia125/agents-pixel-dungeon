@@ -151,7 +151,7 @@ fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) -> R
             let busy: Vec<&str> = snap.attempts.iter().filter(|a| a.state.is_active()).map(|a| a.member_id.as_str()).collect();
             out.push_str("members:\n");
             for m in snap.members.iter().filter(|m| m.enabled) {
-                out.push_str(&format!("- {} ({}) roles {} · {}\n", m.name, m.harness, m.roles.join(", "), if busy.contains(&m.id.as_str()) { "busy" } else { "free" }));
+                out.push_str(&format!("- {} ({} · {}) roles {} · {}\n", m.name, m.harness, m.model_id.as_deref().unwrap_or("default model"), m.roles.join(", "), if busy.contains(&m.id.as_str()) { "busy" } else { "free" }));
             }
             if snap.members.iter().all(|m| !m.enabled) { out.push_str("- none: add members in the guild window or with `guild member add`\n"); }
             let wanted = s("questId");
