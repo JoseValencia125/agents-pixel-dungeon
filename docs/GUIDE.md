@@ -123,6 +123,16 @@ In the dungeon the guild is **one double room**, its hall: two halves in one fra
 
 Click the hall to talk to the **orchestrator**, the only member you address: the enabled member with the planner role, or the first enabled member when none has it. It reads the repository, the members and their roles, what is under way, the design and the conversation so far, answers in a few sentences and, when your message asks for work, plans it: the guild turns the plan into a quest with its tasks and dependencies and starts it at once, and the scheduler hands the tasks to the members (a task whose role nobody holds goes to an implementer). The orchestrator works in a scratch folder of its own, never in your checkout. Above the chat, **Needs you** lists the members waiting for a permission or a decision on a candidate, and **Under the hood** has one chip per member; either opens that member's work (its task, permission, candidate and transcript) inside the panel, with **← Back to the hall**.
 
+### Claude Code as the orchestrator
+
+`agents-pixel-dungeon-guild mcp` is an MCP server on stdio, so a Claude Code session can run the guild while its members (Kiro, Codex…) do the work:
+
+```sh
+claude mcp add guild -- "/Applications/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild" mcp
+```
+
+Claude then has `guild_status`, `guild_start_quest` (a quest and its tasks with acceptance, roles or a pinned member, dependencies and races, started at once), `guild_wait` (blocks until a task needs it or the quest ends), `guild_task` (attempts, verifiers, permission, the member's last words), `guild_diff`, `guild_decide` (accept integrates into the quest's branch, reject with a reason, retry, cancel) and `guild_permission`. The members still work in their own worktrees and the verifiers still gate every candidate; accepting only merges into `guild/quest/<id>`, never `main`. The service starts on its own if it is not up.
+
 What it manages:
 
 - **Project**: a git repository. `project add <path>` reads `.guild/guild.toml` from it, if present, for members, a setup command and verifiers.

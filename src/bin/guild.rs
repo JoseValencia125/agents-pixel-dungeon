@@ -19,6 +19,7 @@ agents-pixel-dungeon-guild — the guild that plans, builds, verifies and integr
 
 USAGE
   guild serve [--daemon] [--concurrency N] [--attempt-timeout MIN]
+  guild mcp                          an MCP server on stdio, so Claude Code orchestrates the guild
   guild status                       the guild at a glance
   guild snapshot                     the whole state as JSON
   guild stop                         stop the service
@@ -110,6 +111,8 @@ fn main() -> ExitCode {
     }
     let result = match args[0].as_str() {
         "serve" => serve(&args[1..]),
+        // An MCP server on stdio, for Claude Code: `claude mcp add guild -- <this binary> mcp`.
+        "mcp" => ensure_running().map(|client| guild::mcp::serve_stdio(&|method, params| call(&client, method, params))),
         other => client_command(other, &args[1..]),
     };
     match result {

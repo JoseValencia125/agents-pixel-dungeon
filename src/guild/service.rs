@@ -2952,6 +2952,30 @@ mod tests {
     }
 
     #[test]
+    fn claude_orchestrates_through_mcp_from_quest_to_integration() {
+        let (_home, service, _) = setup(MockBehaviour::Succeed { file: "poison.txt".into(), content: "tick\n".into() });
+        let call = |m: &str, p: Value| service.handle(m, &p).map_err(|e| e.message);
+        let tool = |name: &str, args: Value| {
+            let r = crate::mcp::handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}), &call, &std::thread::sleep).unwrap();
+            (r["result"]["content"][0]["text"].as_str().unwrap_or("").to_string(), r["result"]["isError"] == true)
+        };
+        let (text, failed) = tool("guild_start_quest", json!({"title": "Poison", "tasks": [{"id": "t1", "title": "Poison tick", "instructions": "Write poison.txt", "acceptance": ["poison.txt exists"]}]}));
+        assert!(!failed, "{text}");
+        let quest_id = service.snapshot().unwrap().quests.iter().find(|q| q.title == "Poison").unwrap().id.clone();
+        let (text, _) = tool("guild_wait", json!({"questId": quest_id, "timeoutSeconds": 30}));
+        assert!(text.starts_with("something needs you") && text.contains("candidate ready"), "{text}");
+        let task_id = format!("{}-t1", &quest_id[quest_id.len() - 8..]);
+        let (diff, failed) = tool("guild_diff", json!({"taskId": task_id}));
+        assert!(!failed && diff.contains("poison.txt"), "{diff}");
+        let (text, failed) = tool("guild_decide", json!({"taskId": task_id, "decision": "accept"}));
+        assert!(!failed, "{text}");
+        let snap = wait_for(&service, "integrated", |s| s.tasks.iter().any(|t| t.id == task_id && t.state == TaskState::Completed));
+        assert_eq!(snap.quests.iter().find(|q| q.id == quest_id).unwrap().state, QuestState::Completed);
+        let (text, _) = tool("guild_status", json!({"questId": quest_id}));
+        assert!(text.contains("1/1 done") && text.contains("guild/quest/"), "{text}");
+    }
+
+    #[test]
     fn the_orchestrator_answers_and_its_plan_starts_a_quest() {
         let home = TempHome::new();
         let repo = home.repo();
