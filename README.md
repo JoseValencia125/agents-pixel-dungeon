@@ -16,17 +16,40 @@ Each coding agent is a hero in a dungeon room that changes with its real Herdr s
 
 <p align="center"><a href="docs/media/demo.mp4">Watch the full demo video</a> · <a href="docs/media/widget.png">Full-size screenshot</a> · <a href="docs/GUIDE.md">Guide</a></p>
 
-## Download
+## Install
 
-**macOS, with Homebrew** (Apple silicon, macOS 13 or later):
+The latest release is on the [Releases](https://github.com/JoseValencia125/agents-pixel-dungeon/releases/latest) page. The app needs no server or browser; it finds [Herdr](https://herdr.dev) on your machine and shows its agents.
+
+### macOS
+
+Apple silicon, macOS 13 or later. With [Homebrew](https://brew.sh):
 
 ```sh
 brew install --cask josevalencia125/tap/agents-pixel-dungeon
 ```
 
-That installs the app in `/Applications` and puts the guild's command line, `agents-pixel-dungeon-guild`, on your PATH. `brew upgrade` follows the releases.
+`brew upgrade` follows the releases, and `agents-pixel-dungeon-guild`, the guild's command line, lands on your PATH.
 
-**macOS, Linux and Windows, by hand**: the binaries are on the [Releases](https://github.com/JoseValencia125/agents-pixel-dungeon/releases) page: a `.app` for macOS, a `tar.gz` for Linux (x86_64) and a portable `.zip` for Windows (x86_64). The macOS app is signed with a Developer ID and notarized, so it opens like any other app; drag it to Applications. The Windows build is not code-signed, so SmartScreen may ask you to confirm the first run.
+By hand: download **Agents-Pixel-Dungeon-macOS.zip**, unzip it and drag **Agents Pixel Dungeon** to Applications. The app is signed with a Developer ID and notarized, so it opens like any other app, no warnings.
+
+### Linux
+
+x86_64. Download **agents-pixel-dungeon-linux-x86_64.tar.gz**, then:
+
+```sh
+tar -xzf agents-pixel-dungeon-linux-x86_64.tar.gz
+./agents-pixel-dungeon
+```
+
+For a launcher entry, put `agents-pixel-dungeon` on your PATH (`~/.local/bin`), `agents-pixel-dungeon.desktop` in `~/.local/share/applications/` and `agents-pixel-dungeon.png` in `~/.local/share/icons/`. It needs GTK 3, libxdo and ALSA (on Debian and Ubuntu: `libgtk-3-0 libxdo3 libasound2`, plus `libayatana-appindicator3-1` for the tray icon).
+
+### Windows
+
+x86_64, Windows 10 (1803 or later) and 11. Download **agents-pixel-dungeon-windows-x86_64.zip**, unzip it anywhere and run **agents-pixel-dungeon.exe**; the guild service sits next to it. The build is not code-signed, so SmartScreen may ask the first time: **More info**, then **Run anyway**. The [guide](docs/GUIDE.md#windows) says what differs on Windows.
+
+### Herdr
+
+The dungeon shows the agents that run inside [Herdr](https://herdr.dev) (tested with 0.9.x): `brew install herdr`, or `curl -fsSL https://herdr.dev/install.sh | sh`. Without it the app offers to install it, or a viewer mode that lists the agents by their processes.
 
 ## States and rooms
 
