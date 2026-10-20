@@ -46,6 +46,18 @@ pub struct Agent {
     /// What the room's hero is doing when it is not what the room shows as
     /// a whole: the hall's orchestrator, free while the members work.
     pub hero_status: Option<String>,
+    /// A training hall's crew (the guild's members), each walking to the
+    /// station of what it does; the room's own hero leads from the dais.
+    pub crew: Vec<CrewMember>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrewMember {
+    pub name: String,
+    /// Its sprite: the member's harness.
+    pub harness: String,
+    pub status: String,
+    pub action: Option<String>,
 }
 
 impl Agent {
@@ -70,6 +82,7 @@ impl Agent {
             subagent_harnesses: vec![],
             annex: None,
             hero_status: None,
+            crew: vec![],
         }
     }
 
