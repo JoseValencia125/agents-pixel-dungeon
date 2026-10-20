@@ -24,7 +24,8 @@ USAGE
   guild snapshot                     the whole state as JSON
   guild stop                         stop the service
 
-  guild project add <path> [--id ID] [--name NAME]
+  guild project add <path> [--id ID] [--name NAME] [--target-ref BRANCH]
+                                     the branch quests start from and integrate into (default: the checkout's)
   guild found <path> [--name NAME] [--template videogame|blank|none] [--member NAME:ROLE:HARNESS[:MODEL]]...
   guild roles                        the roles of the catalogue
   guild design <project> [get|template|export]   the game design: show it, start from the template, write game-design/ into the repo
@@ -278,6 +279,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             let mut params = json!({"repoPath": path});
             if let Some(id) = a.flag("id") { params["id"] = json!(id); }
             if let Some(name) = a.flag("name") { params["name"] = json!(name); }
+            if let Some(r) = a.flag("target-ref") { params["targetRef"] = json!(if r.starts_with("refs/") || r == "HEAD" { r.to_string() } else { format!("refs/heads/{r}") }); }
             let r = call(&ensure_running()?, "project.add", params)?;
             println!("project {} at {} ({} members from .guild/guild.toml)", r["project"]["id"].as_str().unwrap_or(""), r["project"]["repo_path"].as_str().unwrap_or(""), r["membersFromConfig"]);
             Ok(())
@@ -709,7 +711,7 @@ fn print_event(e: &Value) {
         "verifier.finished" => format!("✓ verifier {} {}", p["verifierId"].as_str().unwrap_or(""), p["status"].as_str().unwrap_or("")),
         _ => {
             let mut s = p.as_object().map(|o| o.iter().filter(|(k, _)| *k != "text").map(|(k, v)| format!("{k}={}", v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect::<Vec<_>>().join(" ")).unwrap_or_default();
-            s.truncate(160);
+            guild::domain::cut(&mut s, 160);
             s
         }
     };

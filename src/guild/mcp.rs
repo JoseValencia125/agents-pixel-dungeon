@@ -236,7 +236,7 @@ fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) -> R
             let artifact = snap.attempts.iter().filter(|a| a.task_id == task_id).filter_map(|a| a.candidate.as_ref().and_then(|c| c.diff_artifact_id.clone()).map(|d| (a.created_at.clone(), d))).max().map(|x| x.1).ok_or("no candidate diff yet")?;
             let r = call("artifact.read", json!({"artifactId": artifact}))?;
             let mut text = r["text"].as_str().unwrap_or("").to_string();
-            if text.len() > 60_000 { text.truncate(60_000); text.push_str("\n… (truncated)"); }
+            if crate::domain::cut(&mut text, 60_000) { text.push_str("\n… (truncated)"); }
             Ok(text)
         }
         "guild_decide" => {

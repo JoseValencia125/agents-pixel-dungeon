@@ -73,7 +73,7 @@ pub fn compose(project: &Project, members: &[Member], snap: &Snapshot, design: O
         s.push_str(&format!("{}: {}\n", if line.author == "user" { "User" } else { "You" }, line.text.trim()));
     }
     s.push_str(&format!("User: {}\n", message.trim()));
-    s.push_str("\nAnswer the user in a few sentences. If the message asks for work, end with one fenced ```json block, nothing after it: {\"title\": \"…\", \"description\": \"…\", \"tasks\": [{\"id\": \"t1\", \"title\": \"…\", \"instructions\": \"…\", \"acceptance\": [\"…\"], \"role\": \"<a member's role>\", \"dependsOn\": []}]}. Keep tasks small, each with verifiable acceptance; dependsOn names earlier task ids. With no work to do, give no block.\n");
+    s.push_str("\nAnswer the user in a few sentences. If the message asks for work, end with one fenced ```json block, nothing after it: {\"title\": \"…\", \"description\": \"…\", \"tasks\": [{\"id\": \"t1\", \"title\": \"…\", \"instructions\": \"…\", \"acceptance\": [\"…\"], \"role\": \"<a member's role>\", \"dependsOn\": []}]}. Keep tasks small, each with verifiable acceptance; dependsOn names earlier task ids. When you split one change between members, write the shared interface into every part's instructions (names, signatures, keys, where each thing lives), and end with an integration task that depends on the parts and checks them together: the whole flow tested end to end, and nothing left over from working apart (placeholders, comments about the merge, changes outside the task). With no work to do, give no block.\n");
     s
 }
 
