@@ -1085,7 +1085,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
     ], asked_at: t.clone() });
     let mut a4 = attempt("a4", "t4", "lira", HarnessId::named("claude"), "claude-opus-5.5", AttemptState::Submitted);
     a4.candidate = Some(Candidate { base_sha: "490acd6".into(), head_sha: "dcdbee6".into(), tree_sha: "e3b0c44".into(), files_changed: 3, insertions: 48, deletions: 6, diff_artifact_id: Some("art-demo".into()) });
-    a4.verifier_results = vec![VerifierResult { id: "unit".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1840, log_artifact_id: None, tail: "12 passed".into() }];
+    a4.verifier_results = vec![VerifierResult { id: "unit".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1840, log_artifact_id: None, tail: "12 passed".into(), evidence: vec![] }];
     a4.summary = tr("Fixtures y pruebas del contrato listos");
     if tick % 2 == 1 {
         // The user answered the demo's permission: Orin works again.

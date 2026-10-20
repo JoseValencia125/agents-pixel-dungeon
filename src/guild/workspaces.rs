@@ -106,12 +106,18 @@ pub fn setup(workspace: &Workspace, argv: &[String], timeout_seconds: u64) -> Gi
 
 /// (exit code, combined output)
 pub fn run_with_timeout(cwd: &Path, argv: &[String], timeout_seconds: u64) -> GitResult<(i32, String)> {
+    run_with_timeout_env(cwd, argv, timeout_seconds, &[])
+}
+
+/// `run_with_timeout` with extra environment variables.
+pub fn run_with_timeout_env(cwd: &Path, argv: &[String], timeout_seconds: u64, env: &[(String, String)]) -> GitResult<(i32, String)> {
     use std::io::Read;
     use std::time::{Duration, Instant};
     let (program, args) = argv.split_first().ok_or("empty command")?;
     let mut child = crate::platform::command(program)
         .args(args)
         .current_dir(cwd)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

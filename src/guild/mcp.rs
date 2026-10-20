@@ -212,7 +212,10 @@ fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) -> R
                 out.push_str(&format!("attempt {} by {member}: {:?}", a.id, a.state));
                 if let Some(c) = &a.candidate { out.push_str(&format!(" · candidate {} files +{} -{}", c.files_changed, c.insertions, c.deletions)); }
                 out.push('\n');
-                for v in &a.verifier_results { out.push_str(&format!("  verifier {} {}: {}\n", v.id, v.status, v.tail.lines().last().unwrap_or(""))); }
+                for v in &a.verifier_results {
+                    out.push_str(&format!("  verifier {} {}: {}\n", v.id, v.status, v.tail.lines().last().unwrap_or("")));
+                    for e in &v.evidence { out.push_str(&format!("    capture {e} (open it to see what the player sees)\n")); }
+                }
                 if let Some(p) = &a.pending_permission {
                     out.push_str(&format!("  PERMISSION {}: {}\n", p.title, p.detail));
                     for o in &p.options { out.push_str(&format!("    option {} ({}, {})\n", o.id, o.name, o.kind)); }
