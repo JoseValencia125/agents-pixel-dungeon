@@ -270,11 +270,11 @@ impl Tray {
                     let _ = icon.set_tooltip(Some(tooltip));
                 }
                 None => {
-                    let (rgba, w, h) = orb_rgba(36, [0, 0, 0]);
+                    let (rgba, w, h) = if cfg!(windows) { orb_rgba(32, [230, 230, 230]) } else { orb_rgba(36, [0, 0, 0]) };
                     let built = TrayIconBuilder::new()
                         .with_menu(Box::new(menu))
                         .with_menu_on_left_click(false)
-                        .with_icon_as_template(true)
+                        .with_icon_as_template(cfg!(target_os = "macos"))
                         .with_tooltip(tooltip)
                         .with_icon(Icon::from_rgba(rgba, w, h).expect("orb icon"))
                         .build();

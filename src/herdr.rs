@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -38,6 +38,14 @@ pub struct Agent {
     /// Shells it left running in the background, and how its last ones ended.
     pub shells: Vec<crate::shells::Shell>,
     pub shell_results: Vec<crate::shells::ShellResult>,
+    /// Each subagent's own harness (its sprite), when it is not the lead's.
+    pub subagent_harnesses: Vec<String>,
+    /// The other half of a double room (the guild's hall): drawn beside or
+    /// under this one, inside the same frame.
+    pub annex: Option<Box<Agent>>,
+    /// What the room's hero is doing when it is not what the room shows as
+    /// a whole: the hall's orchestrator, free while the members work.
+    pub hero_status: Option<String>,
 }
 
 impl Agent {
@@ -59,6 +67,9 @@ impl Agent {
             limit_resets: None,
             shells: vec![],
             shell_results: vec![],
+            subagent_harnesses: vec![],
+            annex: None,
+            hero_status: None,
         }
     }
 
@@ -270,13 +281,17 @@ pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
+pub fn is_absolute_path(path: &str) -> bool {
+    path.starts_with('/') || Path::new(path).is_absolute()
+}
+
 /// `/Users/me/x` → `~/x`.
 pub fn abbreviate_home(path: &str) -> String {
     let home = home_dir().to_string_lossy().to_string();
     if path == home {
         "~".to_string()
-    } else if let Some(rest) = path.strip_prefix(&format!("{home}/")) {
-        format!("~/{rest}")
+    } else if let Some(rest) = path.strip_prefix(&format!("{home}/")).or_else(|| path.strip_prefix(&format!("{home}{}", std::path::MAIN_SEPARATOR))) {
+        format!("~/{}", rest.replace(std::path::MAIN_SEPARATOR, "/"))
     } else {
         path.to_string()
     }
@@ -286,7 +301,7 @@ pub fn abbreviate_home(path: &str) -> String {
 pub fn expand_home(path: &str) -> String {
     if path == "~" {
         home_dir().to_string_lossy().to_string()
-    } else if let Some(rest) = path.strip_prefix("~/") {
+    } else if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
         home_dir().join(rest).to_string_lossy().to_string()
     } else {
         path.to_string()
@@ -304,8 +319,10 @@ pub fn herdr_binary() -> Result<PathBuf, MonitorError> {
     candidates.push(home.join(".local/bin/herdr"));
     candidates.push(PathBuf::from("/opt/homebrew/bin/herdr"));
     candidates.push(PathBuf::from("/usr/local/bin/herdr"));
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') { candidates.push(Path::new(dir).join("herdr")); }
+    #[cfg(windows)]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") { candidates.push(PathBuf::from(local).join("Programs/Herdr/bin/herdr.exe")); }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) { candidates.push(dir.join(if cfg!(windows) { "herdr.exe" } else { "herdr" })); }
     }
     candidates
         .into_iter()
@@ -314,15 +331,14 @@ pub fn herdr_binary() -> Result<PathBuf, MonitorError> {
 }
 
 fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    guild::platform::is_executable(path)
 }
 
 /// Run `herdr [--session s] <arguments>` and return its stdout. The process
 /// is killed after `timeout` so a stuck server never hangs the UI.
 pub fn run_herdr(arguments: &[&str], session: &str, timeout: Duration) -> Result<Vec<u8>, MonitorError> {
     let binary = herdr_binary()?;
-    let mut command = Command::new(binary);
+    let mut command = guild::platform::command(binary);
     if session != "default" { command.args(["--session", session]); }
     command.args(arguments).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let unreachable = || MonitorError::Message(tr("Sin conexión con Herdr. Abre tu sesión; reintentamos automáticamente."));
@@ -422,7 +438,10 @@ pub struct BackgroundJob {
 }
 
 pub fn default_daemon_root() -> String {
-    format!("/tmp/cc-daemon-{}", unsafe { libc::getuid() })
+    #[cfg(unix)]
+    { format!("/tmp/cc-daemon-{}", unsafe { libc::getuid() }) }
+    #[cfg(not(unix))]
+    { String::new() }
 }
 
 /// Jobs whose process is alive: Claude Code's daemon keeps one terminal
@@ -590,9 +609,74 @@ pub fn session_limit(session: &str) -> Option<Option<i64>> {
 
 /// ~/.claude/projects/<project>/<session>.jsonl for a session id.
 pub fn claude_transcript(session: &str) -> Option<String> {
-    if session.starts_with('/') { return Some(session.to_string()); }
+    if is_absolute_path(session) { return Some(session.to_string()); }
     let dirs = std::fs::read_dir(home_dir().join(".claude/projects")).ok()?;
     dirs.flatten().map(|d| d.path().join(format!("{session}.jsonl"))).find(|f| f.exists()).map(|f| f.to_string_lossy().to_string())
+}
+
+/// The model an agent is using, as its own terminal or files say: Codex and
+/// Kiro print it on their status line, Claude Code writes it on each reply
+/// of its transcript, Cursor keeps the chosen one in its CLI config.
+pub fn agent_model(agent: &Agent, screen: &str) -> Option<String> {
+    match harness_for(&agent.name) {
+        "claude" => agent.session.as_deref().and_then(claude_transcript).and_then(|path| claude_model(&path)),
+        "cursor" => cursor_model(&std::fs::read_to_string(home_dir().join(".cursor/cli-config.json")).ok()?),
+        harness => model_on_screen(harness, screen),
+    }
+}
+
+/// The model on a terminal's status line. Codex: the first non-empty line
+/// under its prompt, "GPT-6-Astra medium · ~/proj". Kiro: "agent · model ·
+/// ◔ 15%" above its prompt.
+pub fn model_on_screen(harness: &str, screen: &str) -> Option<String> {
+    let rows: Vec<&str> = screen.lines().map(str::trim).collect();
+    match harness {
+        "codex" => {
+            let prompt = rows.iter().rposition(|l| l.starts_with('›') && option_prefix(l).is_none())?;
+            let status = rows[prompt + 1..].iter().find(|l| !l.is_empty())?;
+            let (model, _) = status.split_once(" · ")?;
+            Some(model.trim().to_string()).filter(|m| !m.is_empty())
+        }
+        "kiro" => rows.iter().rev().find_map(|l| {
+            let parts: Vec<&str> = l.split(" · ").collect();
+            (parts.len() >= 3 && parts[2].starts_with(['○', '◔', '◑', '◕', '●'])).then(|| parts[1].trim().to_string())
+        }),
+        _ => None,
+    }
+}
+
+/// The model of a Claude Code transcript's latest reply, named as Claude
+/// Code names it: "claude-opus-5-5" is "Opus 5.5".
+pub fn claude_model(path: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(512 * 1024))).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    let id = text.lines().rev().find_map(|line| {
+        let at = line.find("\"model\":\"")? + 9;
+        let id = &line[at..at + line[at..].find('"')?];
+        id.starts_with("claude-").then(|| id.to_string())
+    })?;
+    Some(claude_model_name(&id))
+}
+
+/// "claude-sonnet-4-5-20250929" is "Sonnet 4.5" (the date is dropped).
+pub fn claude_model_name(id: &str) -> String {
+    let parts: Vec<&str> = id.trim_start_matches("claude-").split('-').filter(|p| p.len() < 8).collect();
+    let Some((family, version)) = parts.split_first() else { return id.to_string() };
+    let mut name: String = family.chars().take(1).flat_map(char::to_uppercase).chain(family.chars().skip(1)).collect();
+    if !version.is_empty() { name += &format!(" {}", version.join(".")); }
+    name
+}
+
+/// Cursor's chosen model, from ~/.cursor/cli-config.json.
+pub fn cursor_model(config: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(config).ok()?;
+    let model = &value["model"];
+    model["displayName"].as_str().or(model["displayModelId"].as_str()).map(str::to_string)
 }
 
 fn parse_iso8601(text: &str) -> Option<SystemTime> {
@@ -749,14 +833,24 @@ pub fn resolve_link(link: &str, cwd: &str) -> Option<String> {
         if let Some((head, tail)) = path.rsplit_once(':') { if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) { path = head; } }
     }
     let expanded = expand_home(path);
-    let full = if expanded.starts_with('/') { PathBuf::from(&expanded) } else { PathBuf::from(expand_home(cwd)).join(&expanded) };
+    let full = if is_absolute_path(&expanded) { PathBuf::from(&expanded) } else { PathBuf::from(expand_home(cwd)).join(&expanded) };
     full.exists().then(|| full.to_string_lossy().to_string())
 }
 
 /// A terminal window in `cwd`, to type a command in: Terminal on macOS,
 /// the first terminal emulator found on Linux.
+#[cfg_attr(windows, allow(unreachable_code))]
 pub fn open_terminal(cwd: &str) {
     let cwd = if cwd.trim().is_empty() { home_dir().to_string_lossy().to_string() } else { expand_home(cwd) };
+    #[cfg(windows)]
+    {
+        if guild::platform::which("wt").is_some() {
+            if guild::platform::command("wt").args(["-d", &cwd]).spawn().is_ok() { return; }
+        }
+        let shell = if guild::platform::which("pwsh").is_some() { "pwsh.exe" } else { "powershell.exe" };
+        let _ = guild::platform::command("cmd").args(["/C", "start", "", shell, "-NoLogo"]).current_dir(&cwd).spawn();
+        return;
+    }
     if cfg!(target_os = "macos") {
         let _ = std::process::Command::new("open").args(["-a", "Terminal", &cwd]).spawn();
         return;
@@ -769,9 +863,17 @@ pub fn open_terminal(cwd: &str) {
 /// What ⌘-click on a link does: a URL opens in the browser; a file or a
 /// folder is shown in Finder (selected in its folder), or in the file
 /// manager on Linux, instead of being opened.
+#[cfg_attr(windows, allow(unreachable_code))]
 pub fn reveal_target(target: &str) {
     if ["http://", "https://"].iter().any(|p| target.starts_with(p)) { return open_target(target); }
     let path = target.strip_prefix("file://").unwrap_or(target);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let native = path.trim_start_matches('/').replace('/', "\\");
+        let _ = std::process::Command::new("explorer.exe").raw_arg(format!("/select,\"{native}\"")).spawn();
+        return;
+    }
     if cfg!(target_os = "macos") {
         let _ = std::process::Command::new("open").args(["-R", path]).spawn();
         return;
@@ -787,7 +889,13 @@ pub fn reveal_target(target: &str) {
 }
 
 /// Open a URL or a path with the system (open / xdg-open).
+#[cfg_attr(windows, allow(unreachable_code))]
 pub fn open_target(target: &str) {
+    #[cfg(windows)]
+    {
+        let _ = guild::platform::command("explorer.exe").arg(target).spawn();
+        return;
+    }
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     let _ = std::process::Command::new(opener).arg(target).spawn();
 }
@@ -800,9 +908,11 @@ pub fn installed_kinds() -> Vec<&'static str> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     dirs.extend([".local/bin", ".cargo/bin", ".bun/bin", ".npm-global/bin", ".volta/bin", ".opencode/bin"].iter().map(|d| home.join(d)));
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].iter().map(PathBuf::from));
+    #[cfg(windows)]
+    dirs.push(home.join("AppData/Roaming/npm"));
     let found: Vec<&'static str> = CREATABLE_KINDS.iter().copied().filter(|kind| {
         let commands: &[&str] = match *kind { "kiro" => &["kiro-cli"], "cursor" => &["agent", "cursor-agent"], _ => std::slice::from_ref(kind) };
-        dirs.iter().any(|d| commands.iter().any(|command| d.join(command).is_file()))
+        dirs.iter().any(|d| commands.iter().any(|command| guild::platform::in_dir(d, command).is_some()))
     }).collect();
     if found.is_empty() { CREATABLE_KINDS.to_vec() } else { found }
 }
@@ -967,7 +1077,11 @@ pub fn demo_agents(tick: usize) -> Vec<Agent> {
             let cwd = format!("~/demo/{}", s.1.to_lowercase().replace(' ', "-"));
             let mut agent = Agent::new(&format!("demo:{i}"), s.0, s.2, s.1, &tr(s.3), &cwd);
             agent.branch = branches[i].map(str::to_string);
-            if i == 0 { agent.action = Some(["read", "forge", "brew", "git", "summon", "plan", "type"][(tick / 8) % 7].to_string()); }
+            if i == 0 {
+                // HPD_TEST_ACTION pins the lead hero's action (for captures).
+                let cycle = ["read", "forge", "brew", "git", "summon", "plan", "type"][(tick / 8) % 7].to_string();
+                agent.action = Some(std::env::var("HPD_TEST_ACTION").unwrap_or(cycle));
+            }
             if agent.status == "limited" {
                 // Fixed for the whole run, so the countdown ticks down.
                 static DEMO_RESET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
@@ -1140,7 +1254,7 @@ static TRANSCRIPT_PATHS: Mutex<Option<HashMap<String, String>>> = Mutex::new(Non
 /// Codex's rollout for a session: an absolute path as given, else the
 /// newest `rollout-*-<session>.jsonl` in the last two weeks of day folders.
 pub fn codex_transcript(session: &str) -> Option<String> {
-    if session.starts_with('/') { return Some(session.to_string()); }
+    if is_absolute_path(session) { return Some(session.to_string()); }
     let mut guard = TRANSCRIPT_PATHS.lock().unwrap_or_else(|e| e.into_inner());
     let paths = guard.get_or_insert_with(HashMap::new);
     if let Some(known) = paths.get(session) { return Some(known.clone()); }
@@ -1199,7 +1313,7 @@ pub fn kiro_session_for(folder: &str) -> Option<(String, String)> {
 }
 
 pub fn kiro_transcript(session: &str) -> Option<String> {
-    if session.starts_with('/') { return Some(session.to_string()); }
+    if is_absolute_path(session) { return Some(session.to_string()); }
     let path = home_dir().join(format!(".kiro/sessions/cli/{session}.jsonl"));
     path.exists().then(|| path.to_string_lossy().to_string())
 }

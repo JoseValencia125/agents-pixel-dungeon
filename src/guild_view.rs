@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const ID_PREFIX: &str = "guild:";
+/// The guild's one room: a double hall with every member in it.
+pub const HALL_ID: &str = "guild:hall";
 
 enum Msg {
     Connected(bool),
@@ -83,6 +85,12 @@ pub struct GuildView {
     pub studio: crate::guild_studio::Studio,
     /// Answers to `request`, by tag, until taken or replaced.
     pub results: std::collections::HashMap<String, Value>,
+    /// The member whose work the hall's panel shows, if one is open.
+    pub hall_member: Option<String>,
+    /// What the user is writing to the orchestrator.
+    pub draft: String,
+    /// The demo's conversation, as the user types to it.
+    demo_chat: Vec<guild::orchestrator::ChatLine>,
 }
 
 impl GuildView {
@@ -108,6 +116,9 @@ impl GuildView {
             form: QuestForm::default(),
             studio: Default::default(),
             results: Default::default(),
+            hall_member: None,
+            draft: String::new(),
+            demo_chat: vec![],
         }
     }
 
@@ -158,7 +169,7 @@ impl GuildView {
             }
         }
         if self.demo && self.snapshot.as_ref().map(|s| s.service_version != "demo").unwrap_or(true) {
-            self.snapshot = Some(demo_snapshot(self.demo_tick));
+            self.snapshot = Some(self.demo_snapshot());
             changed = true;
         }
         changed
@@ -167,7 +178,7 @@ impl GuildView {
     pub fn set_demo(&mut self, demo: bool) {
         self.demo = demo;
         self.dirty = true;
-        self.snapshot = if demo { Some(demo_snapshot(self.demo_tick)) } else { None };
+        self.snapshot = if demo { Some(self.demo_snapshot()) } else { None };
         self.transcript.clear();
         self.transcript_of = None;
     }
@@ -185,10 +196,21 @@ impl GuildView {
     }
 
     /// Send a command on a thread; failures land in the activity log.
+    fn demo_snapshot(&self) -> Snapshot {
+        let mut snap = demo_snapshot(self.demo_tick);
+        snap.conversation.extend(self.demo_chat.iter().cloned());
+        snap
+    }
+
     pub fn command(&mut self, method: &str, params: Value) {
         if self.demo {
+            if method == "orchestrator.say" {
+                let line = |author: &str, text: String| guild::orchestrator::ChatLine { author: author.into(), text, quest_id: None, at: now() };
+                self.demo_chat.push(line("user", params["text"].as_str().unwrap_or("").into()));
+                self.demo_chat.push(line("orchestrator", tr("Entendido. Lo reparto: Orin en la lógica, Lira en las pruebas. Te aviso cuando haya un candidato.")));
+            }
             self.demo_tick += 1;
-            self.snapshot = Some(demo_snapshot(self.demo_tick));
+            self.snapshot = Some(self.demo_snapshot());
             return;
         }
         let client = self.client.clone();
@@ -253,7 +275,7 @@ impl GuildView {
         let form = std::mem::take(&mut self.form);
         if self.demo {
             self.demo_tick += 1;
-            self.snapshot = Some(demo_snapshot(self.demo_tick));
+            self.snapshot = Some(self.demo_snapshot());
             return;
         }
         let client = self.client.clone();
@@ -292,14 +314,14 @@ impl GuildView {
         let outbox = self.outbox.clone();
         let wake = self.wake.clone();
         std::thread::spawn(move || {
-            let exe = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("agents-pixel-dungeon-guild")));
-            let binary = exe.filter(|p| p.exists()).or_else(|| which("agents-pixel-dungeon-guild"));
+            let exe = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(format!("agents-pixel-dungeon-guild{}", std::env::consts::EXE_SUFFIX))));
+            let binary = exe.filter(|p| p.exists()).or_else(|| guild::platform::which("agents-pixel-dungeon-guild"));
             let Some(binary) = binary else {
                 let _ = outbox.send(Msg::Note(tr("No encuentro agents-pixel-dungeon-guild junto a la app"), "blocked"));
                 wake();
                 return;
             };
-            let output = std::process::Command::new(binary).args(["serve", "--daemon"]).output();
+            let output = guild::platform::command(binary).args(["serve", "--daemon"]).output();
             let note = match output {
                 Ok(o) if o.status.success() => (tr("Servicio de la guild arrancado"), "info"),
                 Ok(o) => (format!("Guild: {}", String::from_utf8_lossy(&o.stderr).trim()), "blocked"),
@@ -312,10 +334,12 @@ impl GuildView {
 
     pub fn member_agent_id(member_id: &str) -> String { format!("{ID_PREFIX}{member_id}") }
 
-    /// The guild's members as agents, so the scene draws them as rooms.
+    /// The guild as one double room: the orchestrator at the desk, the
+    /// members around it at the stations of what they do. The user only
+    /// talks to the orchestrator; the members work below.
     pub fn agents(&self) -> Vec<Agent> {
         let Some(snap) = &self.snapshot else { return vec![] };
-        snap.members.iter().filter(|m| m.enabled).map(|m| member_agent(snap, m)).collect()
+        hall_agent(snap).into_iter().collect()
     }
 
     /// The member, its active (or latest) attempt, that attempt's task and quest.
@@ -329,10 +353,6 @@ impl GuildView {
         let project = quest.as_ref().and_then(|q| snap.projects.iter().find(|p| p.id == q.project_id)).cloned();
         Some((member, attempt, task, quest, project))
     }
-}
-
-fn which(name: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|d| d.join(name)).find(|p| p.is_file()))
 }
 
 /// The attempt a member's room shows: the active one, else the latest
@@ -376,6 +396,60 @@ fn member_agent(snap: &Snapshot, m: &Member) -> Agent {
     agent.branch = workspace.map(|w| w.branch.clone());
     agent.action = attempt.and_then(|a| a.action.clone()).or_else(|| match room { "verifying" => Some("brew".into()), "integrating" => Some("forge".into()), _ => None });
     agent
+}
+
+/// The most pressing of some rooms' states: asking, then working, then a
+/// candidate ready, then free.
+fn most_pressing<'a>(states: impl Iterator<Item = &'a str>) -> &'static str {
+    let states: Vec<&str> = states.collect();
+    ["blocked", "working", "done", "unknown"].into_iter().find(|s| states.contains(s)).unwrap_or("idle")
+}
+
+fn hall_agent(snap: &Snapshot) -> Option<Agent> {
+    let members: Vec<&Member> = snap.members.iter().filter(|m| m.enabled).collect();
+    let lead = snap.orchestrator.as_ref().and_then(|id| members.iter().find(|m| &m.id == id)).or_else(|| members.first()).copied()?;
+    let rooms: Vec<(&Member, Agent)> = members.iter().map(|m| (*m, member_agent(snap, m))).collect();
+    // Whoever needs the user most leads the other half: its hero carries the alert.
+    let urgency = |s: &str| ["blocked", "done", "working", "unknown"].iter().position(|x| *x == s).unwrap_or(4);
+    let mut crew: Vec<&(&Member, Agent)> = rooms.iter().filter(|(m, _)| m.id != lead.id).collect();
+    crew.sort_by_key(|(_, a)| urgency(&a.status));
+    let project = snap.projects.first();
+    let cwd = project.map(|p| p.repo_path.clone()).unwrap_or_default();
+    let name = project.map(|p| p.name.clone()).unwrap_or_else(|| "Guild".into());
+    let mine = rooms.iter().find(|(m, _)| m.id == lead.id).map(|(_, a)| a.clone());
+    let working = rooms.iter().filter(|(_, a)| a.status == "working").count();
+    let activity = if snap.orchestrator_busy {
+        trf("{} piensa…", &[&lead.name])
+    } else if let Some(asking) = rooms.iter().find(|(_, a)| a.status == "blocked") {
+        asking.1.activity.clone()
+    } else if working > 0 {
+        trf("Habla con {} · {} trabajando", &[&lead.name, &working.to_string()])
+    } else {
+        trf("Habla con {}", &[&lead.name])
+    };
+    let status = if snap.orchestrator_busy { "working" } else { most_pressing(rooms.iter().map(|(_, a)| a.status.as_str())) };
+    let mut hall = Agent::new(HALL_ID, lead.harness.as_str(), status, &name, &activity, &cwd);
+    hall.hero_status = Some(if snap.orchestrator_busy { "working".into() } else { mine.as_ref().map(|a| a.status.clone()).unwrap_or_else(|| "idle".into()) });
+    // The orchestrator plans at the desk while it answers, else it does its own task.
+    hall.action = if snap.orchestrator_busy { Some("plan".into()) } else { mine.and_then(|a| a.action) };
+    let action_of = |a: &Agent| a.action.clone().unwrap_or_else(|| if a.status == "working" { "type".into() } else { "idle".into() });
+    // The other half: the first member leads it, the next four stand in
+    // it; whoever is left joins the orchestrator's half.
+    if let Some(((first, first_agent), rest)) = crew.split_first().map(|(f, r)| ((f.0, &f.1), r)) {
+        let (beside, more) = rest.split_at(rest.len().min(4));
+        let mut annex = first_agent.clone();
+        annex.id = format!("{HALL_ID}:annex");
+        annex.name = first.harness.as_str().into();
+        annex.subagents = beside.len();
+        annex.subagent_actions = beside.iter().map(|(_, a)| action_of(a)).collect();
+        annex.subagent_harnesses = beside.iter().map(|(m, _)| m.harness.as_str().to_string()).collect();
+        hall.annex = Some(Box::new(annex));
+        let more = &more[..more.len().min(4)];
+        hall.subagent_actions = more.iter().map(|(_, a)| action_of(a)).collect();
+        hall.subagent_harnesses = more.iter().map(|(m, _)| m.harness.as_str().to_string()).collect();
+    }
+    hall.subagents = hall.subagent_actions.len();
+    Some(hall)
 }
 
 #[allow(non_snake_case)]
@@ -512,6 +586,94 @@ fn mono(text: &str, size: f32) -> RichText { RichText::new(text).font(egui::Font
 fn button(ui: &mut Ui, text: &str, color: Color32) -> bool {
     let label = mono(text, 11.0).strong().color(Color32::from_rgb(20, 18, 26));
     ui.add(egui::Button::new(label).fill(color).corner_radius(CornerRadius::same(3)).stroke(Stroke::NONE)).clicked()
+}
+
+/// The hall's panel: the chat with the orchestrator, what needs the user,
+/// and the crew below. A member's own work opens in place, with a way back.
+pub fn hall_panel(ui: &mut Ui, view: &mut GuildView, now: f64, wide: bool) -> PanelAction {
+    let mut action = PanelAction::default();
+    let Some(snap) = view.snapshot.clone() else {
+        ui.label(mono(&tr("Servicio de la guild apagado"), 12.0).color(DIM));
+        return action;
+    };
+    if let Some(id) = view.hall_member.clone() {
+        if let Some(member) = snap.members.iter().find(|m| m.id == id) {
+            if ui.add(egui::Button::new(mono(&tr("← Volver a la sala"), 11.0).color(INK)).frame(false)).clicked() { view.hall_member = None; return action; }
+            let inner = panel(ui, view, &member_agent(&snap, member), now, wide);
+            if inner.close { view.hall_member = None; }
+            action.terminal = inner.terminal;
+            return action;
+        }
+        view.hall_member = None;
+    }
+    view.watch(None);
+    let lead = snap.orchestrator.as_ref().and_then(|id| snap.members.iter().find(|m| &m.id == id));
+    let lead_name = lead.map(|m| m.name.clone()).unwrap_or_else(|| tr("nadie"));
+    ui.spacing_mut().item_spacing = vec2(6.0, 5.0);
+    ui.horizontal(|ui| {
+        ui.label(mono(&snap.projects.first().map(|p| p.name.clone()).unwrap_or_else(|| "Guild".into()), 13.0).strong().color(INK));
+        ui.label(mono(&trf("hablas con {}", &[&lead_name]), 11.0).color(DIM));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add(egui::Button::new(mono("x", 11.0).strong().color(INK)).frame(false)).on_hover_text(tr("Cerrar")).clicked() { action.close = true; }
+        });
+    });
+    // What only the user can decide: a permission, a candidate to accept.
+    let members: Vec<&Member> = snap.members.iter().filter(|m| m.enabled).collect();
+    let crew: Vec<(&Member, Agent)> = members.iter().map(|m| (*m, member_agent(&snap, m))).collect();
+    let asking: Vec<&(&Member, Agent)> = crew.iter().filter(|(_, a)| a.status == "blocked" || a.status == "done").collect();
+    if !asking.is_empty() {
+        ui.label(mono(&tr("Necesita tu atención"), 10.5).strong().color(Color32::from_rgb(254, 174, 52)));
+        for (m, a) in asking {
+            let row = ui.add(egui::Label::new(mono(&format!("▸ {}", a.activity), 10.5).color(INK)).truncate().sense(egui::Sense::click()));
+            if row.on_hover_text(tr("Ver su trabajo")).clicked() { view.hall_member = Some(m.id.clone()); }
+        }
+    }
+    // The crew, below: one chip each, its state's colour; a click shows its work.
+    ui.horizontal_wrapped(|ui| {
+        ui.label(mono(&tr("Bajo el capó:"), 10.5).color(DIM));
+        for (m, a) in &crew {
+            let color = match a.status.as_str() { "working" => Color32::from_rgb(254, 231, 97), "blocked" => Color32::from_rgb(228, 59, 68), "done" => Color32::from_rgb(99, 199, 77), _ => DIM };
+            let chip = ui.add(egui::Label::new(mono(&format!("● {}", m.name), 10.5).color(color)).sense(egui::Sense::click()));
+            if chip.on_hover_text(&a.activity).clicked() { view.hall_member = Some(m.id.clone()); }
+        }
+    });
+    ui.separator();
+    // The conversation, newest at the bottom; the composer under it.
+    let composer_h = 64.0;
+    egui::ScrollArea::vertical().id_salt("guild-hall-chat").stick_to_bottom(true).auto_shrink([false, false]).max_height((ui.available_height() - composer_h).max(60.0)).show(ui, |ui| {
+        if snap.conversation.is_empty() {
+            ui.label(mono(&trf("Dile a {} qué quieres: lo reparte entre la guild.", &[&lead_name]), 11.0).color(DIM));
+        }
+        for line in &snap.conversation {
+            let mine = line.author == "user";
+            let who = if mine { tr("Tú") } else { lead_name.clone() };
+            ui.label(mono(&who, 10.5).strong().color(if mine { Color32::from_rgb(44, 232, 245) } else { Color32::from_rgb(254, 174, 52) }));
+            ui.label(mono(&line.text, 11.5).color(INK));
+            if let Some(q) = line.quest_id.as_ref().and_then(|id| snap.quests.iter().find(|q| &q.id == id)) {
+                let tasks: Vec<&Task> = snap.tasks.iter().filter(|t| t.quest_id == q.id).collect();
+                let done = tasks.iter().filter(|t| t.state == TaskState::Completed).count();
+                ui.label(mono(&trf("misión: {} · {}/{} tareas", &[&q.title, &done.to_string(), &tasks.len().to_string()]), 10.0).color(DIM));
+            }
+            ui.add_space(4.0);
+        }
+        if snap.orchestrator_busy { ui.label(mono(&trf("{} piensa…", &[&lead_name]), 11.0).italics().color(DIM)); }
+    });
+    let busy = snap.orchestrator_busy || lead.is_none();
+    let mut send = false;
+    ui.horizontal(|ui| {
+        let edit = egui::TextEdit::multiline(&mut view.draft).desired_rows(2).desired_width(ui.available_width() - 60.0).hint_text(trf("Escribe a {}…", &[&lead_name])).font(egui::FontId::monospace(crate::ui::fs(11.5)));
+        let response = ui.add_enabled(!busy, edit);
+        if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) { send = true; }
+        if ui.add_enabled(!busy && !view.draft.trim().is_empty(), egui::Button::new(mono(&tr("Enviar"), 11.0))).clicked() { send = true; }
+    });
+    if send && !busy {
+        let text = view.draft.trim().to_string();
+        if !text.is_empty() {
+            view.command("orchestrator.say", json!({"text": text, "projectId": snap.projects.first().map(|p| p.id.clone())}));
+            view.draft.clear();
+        }
+    }
+    action
 }
 
 pub fn panel(ui: &mut Ui, view: &mut GuildView, agent: &Agent, _now: f64, wide: bool) -> PanelAction {
@@ -974,10 +1136,17 @@ fn demo_snapshot(tick: usize) -> Snapshot {
             member("aria", "Aria", HarnessId::named("kiro"), "claude-sonnet-5.5", "implementer"),
             member("orin", "Orin", HarnessId::named("codex"), "gpt-5.5", "implementer"),
             member("lira", "Lira", HarnessId::named("claude"), "claude-opus-5.5", "tester"),
+            member("kael", "Kael", HarnessId::named("claude"), "claude-opus-5.5", "planner"),
         ],
         attempts: vec![a2, a3, a4],
         workspaces: vec![workspace("a2", "guild/q1/t2/a2"), workspace("a3", "guild/q1/t3/a3"), workspace("a4", "guild/q1/t4/a4")],
         harnesses: vec![],
+        conversation: vec![
+            guild::orchestrator::ChatLine { author: "user".into(), text: tr("Quiero efectos de estado en el combate: veneno y escudo."), quest_id: None, at: t.clone() },
+            guild::orchestrator::ChatLine { author: "orchestrator".into(), text: tr("Lo armé en cinco tareas: el contrato de datos primero, luego combate, interfaz y pruebas en paralelo, y al final integración con QA visual."), quest_id: Some("q1".into()), at: t.clone() },
+        ],
+        orchestrator: Some("kael".into()),
+        orchestrator_busy: false,
     }
 }
 

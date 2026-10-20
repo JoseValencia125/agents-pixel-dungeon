@@ -4,6 +4,56 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.3.0...v2.4.0) (2026-10-18)
+
+
+### Added
+
+* a huge git ledger the hero writes in and puts away ([7bbd121](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/7bbd121182ca53ef42d7e788fef5d89f6a51ef0d))
+* a task can race several candidates, verified apart, with the best one integrated alone ([74b5d53](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/74b5d53d14442318d3724513d320e7512e9a1ace))
+* add Codex settings to the HP panel ([1cb5043](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/1cb5043bd01f36d58247cf003d3263d0619dfd6d))
+* add Cursor detection and pixel hero ([6e005fd](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/6e005fd29ce9f4ddcdb4f904474ff5ff9ae98b53))
+* add mark as waiting to agent chat ([5d80498](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/5d804988374bc679baf7a0bdf7f3dba3ebc447d0))
+* Codex and Claude Code join the guild as harness adapters ([52e0a0b](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/52e0a0b116bdc93f68edc30e43cf2c6f51315304))
+* Cursor's slash commands in the chat, and its /model picker takes the arrows ([daec9b3](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/daec9b3ca68b73976252436e2bd7b291df24bfe5))
+* design hypotheses become experiments whose variants are built, playtested, measured and analysed, then decided by the human ([504ba73](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/504ba735b6ee337766d7cfeb1ec280ed291e708b))
+* drag a file over a room to open its chat, drop it to put the path in the message ([e84f992](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/e84f9920112c30e824cd75ea00e8ea924b3d436e))
+* drag rooms to reorder them in full screen ([8a6cad5](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/8a6cad55c60813a485a7fad031add81ee6433dd3))
+* hold a room's band in full screen to drag it up or down ([9ff4240](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/9ff4240ba13e56a890dd776ac59771bcc9e051e4))
+* leave the status out of the chat header, the dot already shows it ([218e438](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/218e438a133fe9bf6fe397affb4c8bed472ae253))
+* play the build from the guild, note what you notice, and decide experiments in the laboratory ([e206434](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/e206434a66b0766d5f168e601d2ac0c2f3bce6cb))
+* run on Windows: the app, the integrated terminal, Herdr and the guild ([debc7b1](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/debc7b1cda2efab148fdb0ec42e7b9a208a1e500))
+* send gh commands to the git ledger too ([c0d6dad](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/c0d6dad9a586f86cc23e8a5dd8d992d0df765cb0))
+* show Cursor's remaining HP in the guild panel ([5de2831](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/5de2831a92a205fa6f770ee95a2a746e65a5325a))
+* show the model each agent is using in its chat header ([c7c653b](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/c7c653b3d3e5408907ebe1bf09bdc9988e36f585))
+* state and events commit together, the design lands on a managed branch, harness ids are open, and recovery holds its invariants ([d3f5283](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/d3f5283b7440443e4d0d6b35a4bc2f8205f67c69))
+* summon Kiro with full permission so it stops asking every time ([1c3823e](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/1c3823eec2f27d435014ed4de332d4c5e28533a8))
+* tasks declare an execution strategy, a judge decides races behind anonymous labels, and every decision and attempt is a durable row ([612433d](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/612433dee0f281bacfce3cc11766ca79b9f1a29b))
+* the emblem takes brand colours, a charge colour of its own and letters as charges ([68394eb](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/68394ebc7878849e496cc1145144455de4b557d0))
+* the guild resumes attempts after a restart, takes new quests from the board and reports the agent's phases ([f588bf0](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/f588bf07929421e423709669264086ef4108b1b5))
+* the guild service runs quests as tasks and attempts in their own worktrees, Kiro-first ([7f083aa](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/7f083aa24a9e1df22ca1a1808d1a25f9b8f02605))
+* the guild window founds a guild, assigns roles from a studio catalogue and shapes the game design ([c002630](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/c0026306acb05d0ff03090beafccb527873a604b))
+* the guild, a studio of agents with interchangeable harnesses, candidate races, a judge, design experiments and a living game design ([b8b5381](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/b8b5381656ec30a95ccd8e2963b8f7b6b1e08c5e))
+* the guild's members are rooms, with a quest board and an attempt panel ([4ce7b2a](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/4ce7b2a4608d75cf712f637a072ed550623cd152))
+* the living game design, from Sellers' concept template to detailed documentation by evidence, with questions and decisions kept apart from the current design ([0e87e06](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/0e87e06d2eaf3426ce5b7f922989d56a8f32ae98))
+* the seated reader sits still and turns the page now and then ([07dc13d](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/07dc13d76fb9e46d3322dd3d9289f80674672965))
+* turn the ledger's pages and write with a quill ([64f2828](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/64f2828a02c76c08c545ebe35c1512e72ed1195d))
+
+
+### Fixed
+
+* auto mode stays under the session limit until it really resets ([4850b56](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/4850b56c6dfb8ac8d7404c7b934e97f138285634))
+* Cursor's menus take the arrows: permissions, workspace trust and the /model picker, plus its slash commands ([80b125e](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/80b125e39cd7e09ea0fd7800bb274a813197678b))
+* Cursor's permission menus take the arrows and the buttons ([418cc57](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/418cc57080637fc206837bf50557d3e1ad0271ba))
+* Enter picks the highlighted option as soon as a chat opens ([c07b746](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/c07b7467f0c17b54bc165ea39b9711fd0ac48e22))
+* Kiro no longer hides under the HP panel; the reader sits still ([20470a6](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/20470a6e97d89668d65f9733e5fe920e29142636))
+* Kiro with full permission starts again ([affaae6](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/affaae6e0a52ecb670f1ea77decd36c8739f6f31))
+* lay the git tome flat on the desk, in the room's perspective ([d1166b0](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/d1166b0b1d5409256321bb7d2a8ee979e76423d2))
+* place the widget on a real screen with several monitors ([9105f1d](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/9105f1dae589f7ec970945d691cc9e26576e479c))
+* redraw the git ledger in Aseprite, flat on the desk, writing and turning pages ([4ed93d4](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/4ed93d4c2eb9ccacfe9113d05f4cb47f7f887ccb))
+* the Guild HP panel takes the height it draws, so Kiro is never cut off ([5bbddcb](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/5bbddcb1347013eb97ab8dcb7c1fddc8d8b80ae9))
+* the guild window and the quest board read on parchment ([340731b](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/340731b5293199e538f16c905c11d0b298f472d9))
+
 ## [2.3.0](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.2.0...v2.3.0) (2026-10-13)
 
 

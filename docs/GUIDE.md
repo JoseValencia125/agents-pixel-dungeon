@@ -119,6 +119,20 @@ Command-line flags: `--demo` (fictional agents), `--fullscreen` (start in full s
 
 The guild is a second binary, `agents-pixel-dungeon-guild`, built next to the app. Run as `serve` it keeps a SQLite database, an append-only event log, the worktrees and the artifacts under the app's data folder (`~/Library/Application Support/agents-pixel-dungeon/guild` on macOS, `~/.config/agents-pixel-dungeon/guild` on Linux; `HPD_GUILD_HOME` overrides it) and listens on a Unix socket. Every other subcommand talks to it and starts it in the background when it is not up; **Quest board** in the menu (or ⌘G) shows it in the app, with a button to start the service.
 
+In the dungeon the guild is **one double room**, its hall: two halves in one frame, side by side where two columns fit and one over the other in a narrow column. The orchestrator stands in the first half in its own state (the inn's armchair while free, at the desk while it answers); the member who needs you most leads the second half, carrying the alert, and the others work around them as small heroes of their own harness, each at the station of what it does. The band under the hall says the guild's most pressing state.
+
+Click the hall to talk to the **orchestrator**, the only member you address: the enabled member with the planner role, or the first enabled member when none has it. It reads the repository, the members and their roles, what is under way, the design and the conversation so far, answers in a few sentences and, when your message asks for work, plans it: the guild turns the plan into a quest with its tasks and dependencies and starts it at once, and the scheduler hands the tasks to the members (a task whose role nobody holds goes to an implementer). The orchestrator works in a scratch folder of its own, never in your checkout. Above the chat, **Needs you** lists the members waiting for a permission or a decision on a candidate, and **Under the hood** has one chip per member; either opens that member's work (its task, permission, candidate and transcript) inside the panel, with **← Back to the hall**.
+
+### Claude Code as the orchestrator
+
+`agents-pixel-dungeon-guild mcp` is an MCP server on stdio, so a Claude Code session can run the guild while its members (Kiro, Codex…) do the work:
+
+```sh
+claude mcp add guild -- "/Applications/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild" mcp
+```
+
+Claude then has `guild_status`, `guild_start_quest` (a quest and its tasks with acceptance, roles or a pinned member, dependencies and races, started at once), `guild_wait` (blocks until a task needs it or the quest ends), `guild_task` (attempts, verifiers, permission, the member's last words), `guild_diff`, `guild_decide` (accept integrates into the quest's branch, reject with a reason, retry, cancel) and `guild_permission`. The members still work in their own worktrees and the verifiers still gate every candidate; accepting only merges into `guild/quest/<id>`, never `main`. The service starts on its own if it is not up.
+
 What it manages:
 
 - **Project**: a git repository. `project add <path>` reads `.guild/guild.toml` from it, if present, for members, a setup command and verifiers.
@@ -231,3 +245,14 @@ Agents Pixel Dungeon is made by [Diabolo Studio](https://diabolostudio.com/). If
 Right-click Codex in the bottom HP panel (collapsed or expanded), then choose **Codex settings**. Set filesystem access, approval policy, automatic or manual review, web search, and command network access. **Save** updates `config.toml` under `CODEX_HOME` (normally `~/.codex`) while preserving unrelated settings and comments. Changes apply to new CLI sessions; project, launcher, and managed policies can override them. Existing agents are not restarted.
 
 Workspace write keeps `.git` protected, so commits can fail with approvals set to Never. Automatic review may authorize actions beyond the workspace; full access removes the filesystem boundary. Custom permission profiles and granular approval policies must be edited in the configuration file.
+
+## Windows
+
+The app, the integrated terminal and the guild run natively on Windows 10 (1803 or later) and 11. What is different there:
+
+- **Herdr** is in beta on Windows. The app reaches it through the named pipe it serves (`\\.\pipe\` followed by the path `herdr session list --json` gives as its socket) and finds `herdr.exe` on `PATH` or in `%LOCALAPPDATA%\Programs\Herdr\bin`. Without Herdr the viewer mode lists agents by their processes (`claude.exe`, `codex`, and the rest).
+- **Settings and the guild's data** live under `%APPDATA%\agents-pixel-dungeon` (the guild in `guild\` inside it; `HPD_GUILD_HOME` overrides it). The service listens on a Unix socket (AF_UNIX), which Windows 10 1803 and later provide.
+- **Integrated terminal**: PowerShell 7 (`pwsh`) when installed, else Windows PowerShell, else `%COMSPEC%`. **External terminal** opens Windows Terminal (`wt`) or a PowerShell console; reveal-in-folder uses Explorer.
+- **Agents' CLIs** are found on `PATH` with their `.exe`/`.cmd` extension, and in `%APPDATA%\npm`. Set `CLAUDE_BIN`, `CODEX_BIN`, `KIRO_CLI_BIN` or `HERDR_BIN` for another place.
+- **Stopping a guild member** ends its process tree (`taskkill /T /F`); Windows cannot send Ctrl-C to a child with piped input and output, so interrupting a Codex turn ends the process instead of only the turn. Setup, verifier and playtest commands run as the repository's `.guild/guild.toml` lists them, so write them for Windows (`python`, not `python3`).
+- **Not available yet**: the list of Claude Code background shells in an agent's room (it reads the Unix `ps`), the Cursor and keychain token for the HP viewer, and notification clicks that open the agent's chat.

@@ -230,6 +230,20 @@ impl Store {
         Ok(out)
     }
 
+    /// The last `limit` events whose type starts with `prefix`, oldest first.
+    pub fn events_of_kind(&self, prefix: &str, limit: usize) -> StoreResult<Vec<Event>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT json FROM (SELECT seq, json FROM events WHERE type LIKE ?1 ORDER BY seq DESC LIMIT ?2) ORDER BY seq")
+            .map_err(e)?;
+        let rows = stmt.query_map(params![format!("{prefix}%"), limit as i64], |r| r.get::<_, String>(0)).map_err(e)?;
+        let mut out = vec![];
+        for row in rows {
+            out.push(serde_json::from_str(&row.map_err(e)?).map_err(e)?);
+        }
+        Ok(out)
+    }
+
     pub fn events_of_attempt(&self, attempt_id: &str, limit: usize) -> StoreResult<Vec<Event>> {
         let mut stmt = self
             .conn
@@ -322,6 +336,9 @@ impl Store {
             findings: self.findings()?,
             designs: self.designs()?,
             roles: vec![],
+            conversation: vec![],
+            orchestrator: None,
+            orchestrator_busy: false,
         })
     }
 }

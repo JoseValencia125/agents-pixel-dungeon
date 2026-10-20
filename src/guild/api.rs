@@ -7,7 +7,7 @@
 use crate::domain::Event;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use crate::ipc::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -49,10 +49,8 @@ pub trait Handler: Send + Sync {
 }
 
 pub fn serve(path: &Path, handler: Arc<dyn Handler>, stop: Arc<std::sync::atomic::AtomicBool>) -> std::io::Result<()> {
-    if path.exists() {
-        // A stale socket from a dead service; a live one answered the lock check before we got here.
-        let _ = std::fs::remove_file(path);
-    }
+    // A stale socket from a dead service; a live one answered the lock check before we got here.
+    let _ = std::fs::remove_file(path);
     if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
     let listener = UnixListener::bind(path)?;
     listener.set_nonblocking(true)?;

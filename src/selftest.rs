@@ -222,6 +222,11 @@ pub fn run() {
     assert_eq!((crate::ui::prompt_line(&cursor_models), crate::ui::picker_open(&cursor_models)), (None, true), "Cursor's /model picker not seen as a picker");
     let cursor_slash = crate::commands::slash_commands("cursor", "/nonexistent", std::path::Path::new("/nonexistent"));
     assert!(cursor_slash.iter().any(|c| c.name == "model") && cursor_slash.iter().any(|c| c.name == "resume"), "Cursor's slash commands missing");
+    // The chat's header names the model: Codex and Kiro from their status lines, Claude from its transcript ids, Cursor from its config.
+    let kiro_idle = " Trust All Tools active, confirmations are off · /quit to exit\n────────\nkiro_default · auto · ◔ 15%                       ~/agents-pixel-dungeon · (main)\n›  ask a question or describe a task ↵";
+    assert_eq!((crate::herdr::model_on_screen("codex", idle), crate::herdr::model_on_screen("kiro", kiro_idle)), (Some("GPT-6-Astra medium".to_string()), Some("auto".to_string())), "Model not read from Codex's or Kiro's status line");
+    assert_eq!((crate::herdr::claude_model_name("claude-opus-5-5"), crate::herdr::claude_model_name("claude-sonnet-4-5-20250929"), crate::herdr::claude_model_name("claude-fable-5-1")), ("Opus 5.5".to_string(), "Sonnet 4.5".to_string(), "Fable 5.1".to_string()), "Claude model ids badly named");
+    assert_eq!(crate::herdr::cursor_model(r#"{"model":{"modelId":"default","displayModelId":"auto","displayName":"Auto"}}"#), Some("Auto".to_string()), "Cursor's model not read from its config");
     // Folder trust starts on "No, exit": accepting picks the yes.
     let trust: Vec<String> = [" Claude Code'll be able to read, edit, and execute files here.", " ❯ No, exit", "   Yes, I trust this folder", " Enter to confirm · Esc to cancel"].map(String::from).to_vec();
     assert_eq!(MenuOptions::new(&trust).affirmative(), Some(1), "Accepting Claude's folder trust would exit it");
@@ -256,6 +261,9 @@ pub fn run() {
     assert_eq!(codex.meters.iter().map(|m| (m.window, m.hp(100))).collect::<Vec<_>>(), vec![("5h", 100.0), ("sem", 78.0)], "Codex meters (a reset window is full)");
     let kiro: serde_json::Value = serde_json::from_str(r#"{"session_state":{"conversation_metadata":{"user_turn_metadatas":[{"end_timestamp":"2026-10-08T12:00:00Z","metering_usage":[{"value":1.5},{"value":0.5}]},{"end_timestamp":"2026-09-08T12:00:00Z","metering_usage":[{"value":9.0}]}]}}}"#).unwrap();
     assert_eq!(crate::usage::kiro_month_credits(&kiro, "2026-10"), 2.0, "Kiro credits of the month");
+    let cursor = crate::usage::cursor_from_usage(&serde_json::from_str(r#"{"billingCycleEnd":"1793976731000","planUsage":{"totalSpend":933,"limit":2000}}"#).unwrap()).expect("Cursor usage not read");
+    assert_eq!((cursor.harness, cursor.meters[0].window, cursor.meters[0].resets, cursor.credits), ("cursor", "mes", Some(1793976731), Some((9.33, Some(20)))), "Cursor HP is the cycle's included spend over its limit");
+    assert!((cursor.meters[0].used - 46.65).abs() < 0.01 && crate::usage::cursor_from_usage(&serde_json::from_str(r#"{"planUsage":{"totalSpend":0,"limit":0}}"#).unwrap()).is_none(), "Cursor used percent, and no limit means no HP");
     {
         use chrono::TimeZone;
         let now = chrono::Local.with_ymd_and_hms(2026, 10, 9, 21, 0, 0).unwrap();
@@ -270,7 +278,7 @@ pub fn run() {
     assert_eq!(link_at(line, at("3.5")), None, "A number is not a file");
     assert_eq!(link_at(line, at("Abre")), None, "A word is not a link");
     let cwd = env!("CARGO_MANIFEST_DIR");
-    assert_eq!(resolve_link("src/ui.rs:42:7", cwd), Some(format!("{cwd}/src/ui.rs")), "Path with line not resolved");
+    assert_eq!(resolve_link("src/ui.rs:42:7", cwd), Some(std::path::Path::new(cwd).join("src/ui.rs").to_string_lossy().to_string()), "Path with line not resolved");
     assert_eq!(resolve_link("src/nope.rs", cwd), None, "A missing file must not open");
     let ask = "Lo que veo:\n- algo\n\nneeds input: ¿para qué es la rama nueva? Opciones:\n\n1. **Rama de PR** desde `main`\n2. Renombrar";
     assert_eq!(question_lines(ask, Some("¿para qué es la rama nueva? Opciones:")), vec!["¿para qué es la rama nueva? Opciones:", "1. Rama de PR desde main", "2. Renombrar"], "Question not cut at the ask");
@@ -454,7 +462,7 @@ pub fn run() {
 /// The widget's size: fitted to the agents until the user resizes it, then
 /// kept whatever the agents or the chat panel need.
 fn window_sizing() {
-    use crate::{fit_panel, layout_height, layout_width, snap_columns, snap_rows};
+    use crate::{fit_panel, layout_height, layout_width, snap_columns, snap_rows, widget_origin, MARGIN};
     use crate::scene::{columns_fitting, GAP, ROW_H};
     use crate::ui::{MIN_PANEL, PANEL_HEIGHT};
     let rows = |n: f32| n * ROW_H + (n - 1.0) * GAP;
@@ -488,6 +496,16 @@ fn window_sizing() {
     assert_eq!(fit_panel(900.0, 1000.0, chrome), 1000.0 - chrome - ROW_H, "The chat must leave a row of rooms");
     assert_eq!(fit_panel(900.0, 300.0, chrome), MIN_PANEL);
     assert_eq!(fit_panel(10.0, 1000.0, chrome), MIN_PANEL);
+    // The widget's place: a wide screen above the menu-bar one, starting
+    // left of it, must not push the corner past every screen.
+    let laptop = egui::Rect::from_min_size(egui::pos2(0.0, 25.0), egui::vec2(1800.0, 1144.0));
+    let above = egui::Rect::from_min_size(egui::pos2(-525.0, -1440.0), egui::vec2(2560.0, 1440.0));
+    let (screens, size) = ([laptop, above], egui::vec2(458.0, 851.0));
+    assert_eq!(widget_origin(None, size, &screens), egui::pos2(1800.0 - MARGIN - 458.0, 25.0 + MARGIN), "The first place is the menu-bar screen's top-right corner");
+    assert_eq!(widget_origin(Some((1500.0, 40.0)), size, &screens), egui::pos2(1042.0, 40.0));
+    assert_eq!(widget_origin(Some((2000.0, -1300.0)), size, &screens), egui::pos2(1542.0, -1300.0), "A spot on the screen above, at negative coordinates, is kept");
+    assert_eq!(widget_origin(Some((2548.0, 37.0)), size, &screens), egui::pos2(1800.0 - MARGIN - 458.0, 25.0 + MARGIN), "A spot off every screen goes back to the corner");
+    assert_eq!(widget_origin(Some((300.0, 40.0)), size, &screens), egui::pos2(0.0, 40.0), "The widget stays inside its screen");
     // The columns and rows remembered for the next start: the nearest.
     assert!(snap_columns(width_for(3)) == 3 && snap_columns(width_for(3) + 100.0) == 3 && snap_columns(width_for(3) + 130.0) == 4 && snap_columns(10.0) == 1 && snap_columns(9000.0) == 8);
     assert!(snap_rows(chrome + rows(2.0), chrome) == 2 && snap_rows(chrome + rows(2.0) + 0.4 * (ROW_H + GAP), chrome) == 2 && snap_rows(chrome + rows(2.0) + 0.6 * (ROW_H + GAP), chrome) == 3 && snap_rows(chrome, chrome) == 1);

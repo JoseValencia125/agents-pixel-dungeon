@@ -2,7 +2,7 @@
 
 # Agents Pixel Dungeon
 
-**A native pixel-art guild for your live [Herdr](https://herdr.dev) agents, for macOS and Linux.** Made by [Diabolo Studio](https://diabolostudio.com/).
+**A native pixel-art guild for your live [Herdr](https://herdr.dev) agents, for macOS, Linux and Windows.** Made by [Diabolo Studio](https://diabolostudio.com/).
 
 Each coding agent is a hero in a dungeon room that changes with its real Herdr status: working at the forge, asking for your attention, exhausted on an infirmary cot until its usage limit resets, reading while it waits, done. Click a room to answer the agent, accept or decline its permission prompts, or summon a new one. Rust, `egui`, a status item in the menu bar or tray, no browser or server.
 
@@ -18,7 +18,7 @@ Each coding agent is a hero in a dungeon room that changes with its real Herdr s
 
 ## Download
 
-Binaries for macOS (`.app`) and Linux (x86_64) are on the [Releases](https://github.com/JoseValencia125/agents-pixel-dungeon/releases) page. The macOS app is ad-hoc signed, not notarized: the first time, right-click it and choose Open.
+Binaries for macOS (`.app`), Linux (x86_64) and Windows (x86_64, a portable `.zip`) are on the [Releases](https://github.com/JoseValencia125/agents-pixel-dungeon/releases) page. The macOS app is ad-hoc signed, not notarized: the first time, right-click it and choose Open. The Windows build is not code-signed, so SmartScreen may ask you to confirm the first run.
 
 ## States and rooms
 
@@ -39,7 +39,7 @@ The session limit is not a Herdr state: the dungeon reads it from Claude Code's 
 
 Click `>_` in an agent's chat, or choose the terminal action from its room's context menu, to open an integrated shell in that agent's folder. Each folder has its own session, with terminal colours, scrolling, selection, paste and interactive commands. Closing the terminal window keeps its session alive while the app runs; open it again from the same folder to continue. Run `exit` to end the shell, then choose **New session** to start again. Quitting the app closes its terminals. **External terminal** remains available in the terminal toolbar.
 
-This shell is independent from the agent's chat and runs your login shell (`$SHELL`, with `/bin/bash` as fallback).
+This shell is independent from the agent's chat and runs your login shell (`$SHELL`, with `/bin/bash` as fallback; on Windows, PowerShell).
 
 ## Heroes
 
@@ -64,24 +64,24 @@ Original pixel art drawn in Aseprite (sources in `art/`), coloured after each to
 - **Chimes and desktop notifications** when an agent needs help or finishes.
 - **Subagents** as small heroes at the station of their own tool (Claude Code).
 - **Filters, search and an activity log**; the window resizes to whole rooms, scrolls, and remembers where you left it.
-- **Full screen** (⌃⌘F, F11 on Linux): its own space, one column of rooms on the left, the live console (colours and all) in the rest.
+- **Full screen** (⌃⌘F, F11 on Linux and Windows): its own space, one column of rooms on the left, the live console (colours and all) in the rest.
 - **See an agent's diff** in full screen: **± Diff** in its chat lists the files changed in its folder (uncommitted, unpushed, or against main as in a pull request) with lines added and removed; click one for its diff. A **PR #N** chip opens the branch's pull request.
 - **Event-driven**: Herdr's socket events the moment they happen, snapshots only to reconcile.
-- **The guild** (preview): found one for a repository from the guild window (⌘⇧G): members with roles from a game studio's catalogue (systems designer, gameplay engineer, reviewer, art director, exploit hunter…) on Kiro, Codex or Claude Code, and the game design in three levels, the experience, the loops and the parts, which every agent gets with its task. Give it a quest split into tasks, from the quest board (⌘G) or the CLI, and its members attempt each one in their own git worktree, ask you for permissions in their room, leave a candidate commit the project's verifiers check, and wait for you to accept it before it is squashed into the quest's branch. The work survives restarts: sessions are resumed where the harness allows it. Play the build yourself and note what you notice, or let a member play it as an AI player; the exploit hunter files what it breaks with a replay the guild can rerun.
+- **The guild** (preview): found one for a repository from the guild window (⌘⇧G, Ctrl+Shift+G on Linux and Windows): members with roles from a game studio's catalogue (systems designer, gameplay engineer, reviewer, art director, exploit hunter…) on Kiro, Codex or Claude Code, and the game design in three levels, the experience, the loops and the parts, which every agent gets with its task. The guild is one double room in the dungeon with every member in it, and you talk to one of them only, the **orchestrator** (the planner): tell it what you want in the room's chat and it answers, splits the work into a quest with tasks and starts it, and the members take the tasks below, without you addressing them. You can also give it a quest from the quest board (⌘G, Ctrl+G) or the CLI, or let a Claude Code session orchestrate it through the guild's MCP server (`agents-pixel-dungeon-guild mcp`) with Kiro or Codex members as its workers. Its members attempt each task in their own git worktree, ask you for permissions in the hall, leave a candidate commit the project's verifiers check, and wait for you to accept it before it is squashed into the quest's branch. The work survives restarts: sessions are resumed where the harness allows it. Play the build yourself and note what you notice, or let a member play it as an AI player; the exploit hunter files what it breaks with a replay the guild can rerun.
 - Spanish, English, French, Italian and Portuguese.
 
 The [guide](docs/GUIDE.md) has the details: how states are read, background jobs, the menu, configuration, privacy and the optional viewer mode without Herdr.
 
 ## The guild (preview)
 
-Besides watching Herdr's agents, the dungeon can run a guild of its own: a local service (`agents-pixel-dungeon-guild`, built next to the app) that takes a **quest**, its **tasks** with dependencies and acceptance criteria, and **members** bound to a harness and a model. Each attempt runs in its own git worktree under the app's data folder, so your checkout is never touched; the member's room shows what it does, asks for its permissions, and when the agent stops the guild commits a candidate, runs the project's verifiers and waits for your decision. Accepted candidates are squashed into the quest's integration branch (`guild/quest/<id>`); publishing to `main` is yours. An uncertain task can be a race: `--candidates 3` runs three members at once, each verified on its own, and `--auto-integrate` merges the best passing one alone. The guild owns the work and its state; agents are ephemeral: if the service or an agent dies, the quest, its tasks, attempts and events are still there, and a running attempt is resumed in a reopened session or its worktree adopted as the candidate.
+Besides watching Herdr's agents, the dungeon can run a guild of its own: a local service (`agents-pixel-dungeon-guild`, built next to the app) that takes a **quest**, its **tasks** with dependencies and acceptance criteria, and **members** bound to a harness and a model. Each attempt runs in its own git worktree under the app's data folder, so your checkout is never touched; the hall shows each member at the station of what it does, and asks for its permissions, and when the agent stops the guild commits a candidate, runs the project's verifiers and waits for your decision. Accepted candidates are squashed into the quest's integration branch (`guild/quest/<id>`); publishing to `main` is yours. An uncertain task can be a race: `--candidates 3` runs three members at once, each verified on its own, and `--auto-integrate` merges the best passing one alone. The guild owns the work and its state; agents are ephemeral: if the service or an agent dies, the quest, its tasks, attempts and events are still there, and a running attempt is resumed in a reopened session or its worktree adopted as the candidate.
 
 Play the current build from the guild window and note what you notice (confusing, frustrating, a great moment…): every note is tied to the build, the run and the round, and can become a design question; the raw telemetry is laid out next to what the design wants. The Laboratory turns questions into hypotheses and experiments and ends each one in a decision that is yours: accept a variant, iterate or reject.
 
 The guild window (⌘⇧G) founds a guild: the repository, its members with a role each (a video game studio's roles in one click), and a design from the **video game** template, which it then lets you shape in three tabs, Experience, Loops and Parts, and export to `game-design/` in the repo. The quest board (⌘G) has the forms for members and for a new quest with its tasks one per line and **Create and start**. The same from the command line:
 
 ```sh
-G='build/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild'   # Linux: build/agents-pixel-dungeon-guild
+G='build/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild'   # Linux: build/agents-pixel-dungeon-guild · Windows: build\agents-pixel-dungeon-guild.exe
 "$G" found ~/code/my-game --template videogame --member Sellers:systems-designer:kiro --member Orin:gameplay-engineer:codex
 "$G" project add ~/code/my-repo                       # or just a project: members and verifiers from .guild/guild.toml, if any
 "$G" member add aria --harness kiro --role implementer --model claude-sonnet-5.5
@@ -105,8 +105,11 @@ cd agents-pixel-dungeon
 ./scripts/build.sh
 ```
 
+On Windows, from PowerShell: `.\scripts\build.ps1` (Rust stable with the MSVC toolchain, which needs the Visual Studio Build Tools with the C++ workload).
+
 - **macOS**: `open 'build/Agents Pixel Dungeon.app'` (optionally copy it to `~/Applications`).
 - **Linux** (X11 or Wayland): `./build/agents-pixel-dungeon`. Needs GTK 3, libayatana-appindicator, xdo and ALSA — on Debian/Ubuntu `sudo apt install libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libasound2-dev`. `build/` also has a `.desktop` entry and icon.
+- **Windows** (10 1803 or later): `.\build\agents-pixel-dungeon.exe`; the guild service (`agents-pixel-dungeon-guild.exe`) sits next to it. [Herdr](https://herdr.dev) has a Windows beta; see the [guide](docs/GUIDE.md#windows) for what differs.
 
 `cargo test` and `--self-test` run the checks; `--demo` shows fictional agents without Herdr.
 
@@ -128,6 +131,8 @@ Thank you for supporting independent open-source development. ⚔️
 ## Credits and licenses
 
 Created by **[Diabolo Studio](https://diabolostudio.com/)** (Nacho Valencia): code and all pixel art. MIT, see [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
+
+Thanks to everyone who sends pull requests: [promandev](https://github.com/promandev) brought it to Windows, and [nogara](https://github.com/nogara) kept the widget on screen with several monitors.
 
 Inspired by **[Claude Dungeon](https://github.com/thousandsky2024/claude-pixel-agent-web)** by [thousandsky2024](https://github.com/thousandsky2024), which first pictured coding agents as dungeon heroes. No code or artwork from it is included.
 

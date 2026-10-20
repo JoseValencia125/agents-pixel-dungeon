@@ -4,7 +4,7 @@
 //! wanders; status changes walk the hero out through the door and into the new room.
 //! Animation is driven by elapsed time, so Reduce Motion simply stops it.
 
-use crate::assets::{Assets, Sprite};
+use crate::assets::{Assets, Sprite, GIT_TOME_FRAME, GIT_TOME_HERO};
 use crate::herdr::{harness_for, Agent};
 use crate::identity::{Identity, ProjectMeta, ProjectOverride};
 use crate::l10n::tr;
@@ -19,6 +19,9 @@ pub const ROW_H: f32 = 158.0 + HEADER + FOOTER; // room art 100 px at 1.5 pt/px 
 pub const ROW_W: f32 = 220.0; // room art 144 px at 1.5 pt/px + 4 pt frame
 pub const HERO: f32 = 32.0; // 16 px sprite at 2 pt/px
 pub const GAP: f32 = 6.0;
+/// A room's side wall in points (8 art pixels): a double room hides the
+/// two that would stand between its halves.
+pub const SIDE_WALL: f32 = 12.0;
 pub const LINE_H: f32 = 30.0; // full screen's spare room, as a line
 /// Between full screen's rooms: their cells already leave 4 pt above and
 /// below the frame, so this brings two frames 6 pt apart.
@@ -199,6 +202,11 @@ impl RoomSize {
         match self { RoomSize::Large => ART.y, RoomSize::Medium => 64.0, RoomSize::Small => 40.0 }
     }
 
+    /// The bottom wall in points, which a hall's upper half drops.
+    pub fn bottom_wall(self) -> f32 {
+        match self { RoomSize::Small => 6.0, _ => 12.0 }
+    }
+
     /// A room's whole cell: frame, repo band, art at 1.5 pt/px, footer.
     pub fn cell_h(self) -> f32 {
         8.0 + HEADER + self.art_h() * 1.5 + FOOTER
@@ -289,8 +297,8 @@ enum StepKind {
     Act { station: &'static str, face: f32, pose: Pose },
     /// Read a book or a scroll at a station.
     Read { station: &'static str, scroll: bool, seconds: f32 },
-    /// Keep the git ledger: heave a huge tome onto the table, open it,
-    /// write, then close it and carry it away.
+    /// Keep the git ledger: set a huge tome flat on the desk, open it,
+    /// write and turn its pages, then close it and carry it away.
     Git { station: &'static str },
     /// Look left and right (wandering).
     Look,
@@ -404,6 +412,8 @@ struct Light {
 }
 
 struct Mini {
+    /// Its own sprite: a guild member's harness, else the lead's.
+    harness: &'static str,
     pos: Pos2,
     target: Pos2,
     action: String,
@@ -469,6 +479,13 @@ pub struct Room {
     shuffle_at: f32,
     shuffle_period: f32,
     rng: Rng,
+    subagent_harnesses: Vec<String>,
+    /// A double room's other half, with its own heroes and state.
+    annex: Option<Box<Room>>,
+    /// Whether the other half stands beside this one (else under it).
+    pub beside: bool,
+    /// The state the band shows when it is not the hero's room.
+    band: Option<RoomStyle>,
 }
 
 impl Room {
@@ -516,6 +533,10 @@ impl Room {
             shuffle_at: 0.0,
             shuffle_period: 9.0,
             rng: Rng::new(seed),
+            subagent_harnesses: vec![],
+            annex: None,
+            beside: false,
+            band: None,
         };
         room.update(agent, false);
         room
@@ -580,20 +601,29 @@ impl Room {
         self.shells = agent.shells.clone();
         self.harness = harness_for(&agent.name);
         self.limit_resets = agent.limit_resets;
+        // The hero's own state picks its room; the band shows the whole's.
+        let status = agent.hero_status.as_ref().unwrap_or(&agent.status);
+        self.band = agent.hero_status.is_some().then(|| style_for(&agent.status));
         if agent.action != self.action {
             self.action = agent.action.clone();
-            if self.style.status == "working" && agent.status == "working" && !self.in_transition {
+            if self.style.status == "working" && status == "working" && !self.in_transition {
                 self.restart_working();
             }
         }
-        if agent.status != self.status {
-            self.status = agent.status.clone();
-            self.apply_room(style_for(&agent.status), animated);
+        if *status != self.status {
+            self.status = status.clone();
+            self.apply_room(style_for(status), animated);
         }
-        if agent.subagents != self.subagents || agent.subagent_actions != self.subagent_actions {
+        if agent.subagents != self.subagents || agent.subagent_actions != self.subagent_actions || agent.subagent_harnesses != self.subagent_harnesses {
             self.subagents = agent.subagents;
             self.subagent_actions = agent.subagent_actions.clone();
+            self.subagent_harnesses = agent.subagent_harnesses.clone();
             self.set_party();
+        }
+        match (&agent.annex, &mut self.annex) {
+            (Some(other), Some(annex)) => annex.update(other, animated),
+            (Some(other), None) => self.annex = Some(Box::new(Room::new(other, self.rng.0.wrapping_add(17)))),
+            (None, _) => self.annex = None,
         }
     }
 
@@ -842,13 +872,15 @@ impl Room {
             let home = Room::rp(art);
             let facing = found.map(|s| s.1).unwrap_or(1.0) * if at_desk { if n < 0.0 { 1.0 } else { -1.0 } } else { 1.0 };
             let front = art.y > self.style.spot.y;
+            let harness = self.subagent_harnesses.get(i).map(|h| harness_for(h)).unwrap_or(self.harness);
             if let Some(mini) = self.party.get_mut(i) {
+                mini.harness = harness;
                 mini.target = home;
                 mini.action = action;
                 mini.facing = facing;
                 mini.front = front;
             } else {
-                self.party.push(Mini { pos: home, target: home, action, facing, front });
+                self.party.push(Mini { harness, pos: home, target: home, action, facing, front });
             }
         }
     }
@@ -857,6 +889,7 @@ impl Room {
 
     pub fn advance(&mut self, dt: f32) {
         if dt <= 0.0 { return; }
+        if let Some(annex) = &mut self.annex { annex.size = self.size; annex.advance(dt); }
         self.clock += dt;
         self.frame_clock += dt;
         if !self.in_transition { self.routine_clock += dt; }
@@ -922,13 +955,12 @@ impl Room {
                 self.set_pose(Pose::Idle(0.6));
             }
             StepKind::Git { station } => {
-                // Facing the table: still as it reaches for the tome and
-                // sets it down, hands busy (Work) while it writes, still
-                // again as it closes the book and carries it off.
+                // Facing the table. The body stays calm (idle breathing) —
+                // the writing is carried by the drawn arm and quill over the
+                // ledger, not the harness's generic work frames.
                 self.station = station;
                 self.facing = 1.0;
-                let writing = e > 2.0 && e < dur - 1.8;
-                self.set_pose(if writing { Pose::Work(0.22) } else { Pose::Idle(0.5) });
+                self.set_pose(Pose::Idle(0.5));
             }
             StepKind::Look => {
                 self.facing = if e < 0.5 { -1.0 } else if e < 1.0 { 1.0 } else { -1.0 };
@@ -996,44 +1028,46 @@ impl Room {
         (pos, None, book)
     }
 
-    /// The huge git ledger while the hero keeps it, as (sprite, size, offset
-    /// from the hero's centre, tilt). It rises from below the table, opens,
-    /// the hero writes a few lines, then it closes and is carried back down.
-    fn git_tome(&self) -> Option<(&'static str, Vec2, Vec2, f32)> {
+    /// The huge git ledger while the hero keeps it, as (frame of the
+    /// ledger strip, how far it is raised off the desk in points). It lies
+    /// flat on the desktop in front of the hero: set down shut, opened, then
+    /// written in stroke by stroke, a page turned whenever two lines are
+    /// done, and at last shut and lifted away. The strip's arm frames carry
+    /// the quill, so the arm moves with the frame.
+    fn git_tome(&self) -> Option<(usize, f32)> {
         if self.in_transition { return None; }
         let runner = self.runner.as_ref()?;
         let (step, e) = runner.current()?;
         let StepKind::Git { .. } = step.kind else { return None };
         let dur = step.dur.max(0.001);
-        let big = vec2(44.0, 34.0); // the open spread, really large
-        let thick = vec2(34.0, 26.0); // the closed tome
-        let rest = pos2(16.0, 2.0); // where it sits on the table, before the hero
-        let down = pos2(8.0, 24.0); // held low, just clearing the table edge
+        let lift = 10.0; // how far it is raised while carried on or off
         // Timeline over `dur` (default 7.2 s).
         let open_at = 1.2; // tome placed and swung open
         let close_at = dur - 1.8; // writing done, book shut
         let away_at = dur - 1.0; // lifted off the table again
         if e < open_at {
-            // Heave the closed tome up from below, straightening as it rises.
+            // Lower the shut tome onto the desk from a little above it.
             let q = (e / open_at).clamp(0.0, 1.0);
-            let pos = pos2(lerp(down.x, rest.x, q), lerp(down.y, rest.y, q));
-            Some(("tome_closed", thick, pos.to_vec2(), lerp(0.18, 0.0, q)))
+            Some((0, -lift * (1.0 - q)))
         } else if e < close_at {
-            // Open on the table; the hero writes, a fresh line of ink coming
-            // and going, with a faint bob of the quill.
-            let w = e - open_at;
-            let writing = (w / 0.5) as i32 % 2 == 1;
-            let bob = -0.6 * (std::f32::consts::TAU * w / 0.9).sin().abs();
-            let name = if writing { "tome_open_write" } else { "tome_open" };
-            Some((name, big, vec2(rest.x, rest.y + bob), 0.0))
+            // Open: a breath over the fresh spread, six strokes of the quill
+            // (two lines on the right-hand page), then the written leaf is
+            // lifted, stood up over the spine and laid down on the left.
+            const BEATS: [(usize, f32); 11] = [(1, 0.3), (2, 0.22), (3, 0.2), (4, 0.26), (5, 0.22), (6, 0.2), (7, 0.3), (8, 0.11), (9, 0.11), (10, 0.11), (11, 0.14)];
+            let cycle: f32 = BEATS.iter().map(|b| b.1).sum();
+            let mut p = (e - open_at) % cycle;
+            for (frame, beat) in BEATS {
+                if p < beat { return Some((frame, 0.0)); }
+                p -= beat;
+            }
+            Some((1, 0.0))
         } else if e < away_at {
-            // Shut it, resting a moment on the table.
-            Some(("tome_closed", thick, rest.to_vec2(), 0.0))
+            // Shut it, resting a moment on the desk.
+            Some((0, 0.0))
         } else {
-            // Carry it back down below the table edge.
+            // Lift it back up off the desk.
             let q = ((e - away_at) / (dur - away_at)).clamp(0.0, 1.0);
-            let pos = pos2(lerp(rest.x, down.x, q), lerp(rest.y, down.y, q));
-            Some(("tome_closed", thick, pos.to_vec2(), lerp(0.0, 0.18, q)))
+            Some((0, -lift * q))
         }
     }
 
@@ -1198,16 +1232,42 @@ impl Room {
     }
 
     /// Draw the room at `origin` (the cell's top-left corner).
+    /// Where a double room's other half is drawn, from this half's origin:
+    /// beside it, or under it in a column too narrow for two.
+    pub fn annex_offset(&self) -> Vec2 {
+        if self.beside { vec2(ROW_W - 4.0 - 2.0 * SIDE_WALL, 0.0) } else { vec2(0.0, self.size.art_h() * 1.5 - self.size.bottom_wall()) }
+    }
+
+    /// How much of each half's frame the joint hides, (left, right,
+    /// bottom): the walls between them, so the halves read as one hall.
+    fn trims(&self) -> ((f32, f32, f32), (f32, f32, f32)) {
+        if self.beside { ((0.0, SIDE_WALL, 0.0), (SIDE_WALL, 0.0, 0.0)) } else { ((0.0, 0.0, self.size.bottom_wall()), (0.0, 0.0, 0.0)) }
+    }
+
+    /// The whole room: its art, and the band around it (the repo's header,
+    /// the footer). A double room draws both halves' art in one frame.
     pub fn draw(&self, painter: &Painter, origin: Pos2, assets: &Assets, selected: bool) {
-        let at = |p: Pos2| { let q = self.place(p); pos2(origin.x + q.x, origin.y + q.y) };
-        let f = self.drawn_frame().translate(origin.to_vec2());
-        let header = self.header().translate(origin.to_vec2());
-        let cell = Rect::from_min_max(header.min, pos2(f.max.x, f.max.y + FOOTER));
-        let t = self.routine_clock;
-        let style = self.style;
+        let trim = |f: Rect, (l, r, b): (f32, f32, f32)| Rect::from_min_max(pos2(f.min.x + l, f.min.y), pos2(f.max.x - r, f.max.y - b));
+        let (mine, theirs) = if self.annex.is_some() { self.trims() } else { ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)) };
+        let mut art = trim(self.drawn_frame().translate(origin.to_vec2()), mine);
+        let other = origin + self.annex_offset();
+        let annex_art = self.annex.as_ref().map(|a| trim(a.drawn_frame().translate(other.to_vec2()), theirs));
+        if let Some(a) = annex_art { art = art.union(a); }
+        let cell = Rect::from_min_max(pos2(art.min.x, art.min.y - HEADER), pos2(art.max.x, art.max.y + FOOTER));
         // Footer band under the room.
         painter.rect_filled(cell, CornerRadius::same(6), Color32::from_rgb(18, 15, 23));
-        let clipped = painter.with_clip_rect(f);
+        self.draw_art(painter, origin, assets, trim(self.drawn_frame().translate(origin.to_vec2()), mine));
+        if let (Some(annex), Some(clip)) = (&self.annex, annex_art) { annex.draw_art(painter, other, assets, clip); }
+        self.draw_band(painter, origin, art, selected);
+    }
+
+    /// The room's art: backdrop, lights, heroes, props, particles.
+    fn draw_art(&self, painter: &Painter, origin: Pos2, assets: &Assets, clip: Rect) {
+        let at = |p: Pos2| { let q = self.place(p); pos2(origin.x + q.x, origin.y + q.y) };
+        let f = self.drawn_frame().translate(origin.to_vec2());
+        let t = self.routine_clock;
+        let style = self.style;
+        let clipped = painter.with_clip_rect(clip);
         // Backdrop, fading in after a room change.
         let fade = self.swap_at.map(|s| ((self.clock - s) / (0.35 / 1.5)).clamp(0.0, 1.0)).unwrap_or(1.0);
         let tint = with_alpha(Color32::WHITE, fade);
@@ -1266,12 +1326,6 @@ impl Room {
                 let prop = assets.prop(name);
                 draw_sprite(&clipped, prop, pos2(hero_at.x + offset.x, hero_at.y + offset.y), size, false, 0.0, Color32::WHITE);
             }
-            // The git ledger: a huge tome the hero heaves onto the table in
-            // front of it, opens, writes in, then closes and carries off.
-            if let Some((name, size, offset, angle)) = self.git_tome() {
-                let prop = assets.prop(name);
-                draw_sprite(&clipped, prop, pos2(hero_at.x + offset.x, hero_at.y + offset.y), size, false, angle, Color32::WHITE);
-            }
             if !self.in_transition {
                 match style.status {
                     "blocked" => {
@@ -1312,6 +1366,15 @@ impl Room {
         if let Some(front) = assets.room(&format!("{background}_front")) {
             clipped.image(front.tex, f, front.uv, tint);
         }
+        // The git ledger, on the desktop (so over the desk's front layer),
+        // drawn at the hero's scale and laid out around where it stands; the
+        // hero's arm and quill over it, frame for frame.
+        if let Some((frame, raised)) = self.git_tome() {
+            let corner = pos2(hero_at.x - GIT_TOME_HERO.x * 2.0, hero_at.y - GIT_TOME_HERO.y * 2.0 + raised);
+            let size = GIT_TOME_FRAME * 2.0;
+            draw_anchored(&clipped, assets.git_tome(frame), corner, size, Vec2::ZERO, false, 0.0, Color32::WHITE);
+            draw_anchored(&clipped, assets.git_tome_arm(self.harness, frame), corner, size, Vec2::ZERO, false, 0.0, Color32::WHITE);
+        }
         if self.party_visible {
             for mini in self.party.iter().filter(|m| m.front) { self.draw_mini(&clipped, mini, origin, assets, mini_tint); }
         }
@@ -1341,6 +1404,14 @@ impl Room {
         // Particles.
         for p in &self.particles { self.draw_particle(&clipped, p, origin, assets); }
         self.draw_shells(painter, f, assets);
+    }
+
+    /// The band around the art `f` (one half's frame, or both halves'):
+    /// the repo's header, the frame's stroke and the footer.
+    fn draw_band(&self, painter: &Painter, origin: Pos2, f: Rect, selected: bool) {
+        let header = Rect::from_min_max(pos2(f.min.x, f.min.y - HEADER), pos2(f.max.x, f.min.y));
+        let cell = Rect::from_min_max(header.min, pos2(f.max.x, f.max.y + FOOTER));
+        let style = self.band.unwrap_or(self.style);
         // Rounded corners: cover what the square clip let through.
         cover_corners(painter, f, 6.0, BACKGROUND);
         cover_corners(painter, cell, 6.0, BACKGROUND);
@@ -1375,7 +1446,7 @@ impl Room {
         painter.text(pos2(f.min.x + 10.0, f.max.y + 11.0), Align2::LEFT_CENTER, Room::clip(&self.activity, usable_chars), FontId::monospace(11.0), Color32::WHITE);
         // The new state shows at once, while the hero is still walking
         // over to its new room.
-        let shown = self.pending_style.unwrap_or(style);
+        let shown = self.band.unwrap_or(self.pending_style.unwrap_or(style));
         let title = tr(shown.title) + &if self.subagents > 0 && self.subagents != usize::MAX { format!(" +{}", self.subagents) } else { String::new() };
         let title_color = blend(shown.color, Color32::WHITE, 0.45);
         let at = pos2(f.max.x - 10.0, f.max.y + FOOTER - 10.0);
@@ -1468,7 +1539,7 @@ impl Room {
 
     fn draw_mini(&self, painter: &Painter, mini: &Mini, origin: Pos2, assets: &Assets, tint: Color32) {
         let frame = (self.clock / 0.16) as usize % 3;
-        let sprite = assets.hero_frame(self.harness, "work", frame);
+        let sprite = assets.hero_frame(mini.harness, "work", frame);
         let placed = self.place(mini.pos);
         let at = pos2(origin.x + placed.x, origin.y + placed.y);
         draw_sprite(painter, sprite, at, vec2(24.0, 24.0), mini.facing < 0.0, 0.0, tint);
@@ -1794,11 +1865,12 @@ impl Scene {
         self.order.len() + usize::from(self.summon_tile)
     }
 
-    pub fn content_height(&self, width: f32) -> f32 {
-        if self.compact { return self.layout(width).1; }
-        let columns = columns_fitting(width);
-        let lines = (self.slots() + columns - 1) / columns;
-        TOP_PAD + lines as f32 * ROW_H + lines.saturating_sub(1) as f32 * GAP + BOTTOM_PAD
+    #[cfg(test)]
+    fn content_height(&self, width: f32) -> f32 { self.layout(width).1 }
+
+    /// A double room (the guild's hall) takes two places.
+    fn is_double(&self, index: usize) -> bool {
+        self.order.get(index).and_then(|id| self.rooms.get(id)).is_some_and(|r| r.annex.is_some())
     }
 
     /// How tall the rooms are drawn: the menu's size in full screen's
@@ -1815,8 +1887,8 @@ impl Scene {
         if self.compact {
             let x = ((width - ROW_W) / 2.0).max(GAP);
             let mut y = TOP_PAD;
-            for _ in &self.order {
-                let h = self.room_size.cell_h();
+            for index in 0..self.order.len() {
+                let h = self.room_size.cell_h() + if self.is_double(index) { self.room_size.art_h() * 1.5 - self.room_size.bottom_wall() } else { 0.0 };
                 slots.push(Rect::from_min_size(pos2(x, y), vec2(ROW_W, h)));
                 y += h + COLUMN_GAP;
             }
@@ -1827,12 +1899,24 @@ impl Scene {
             }
             return (slots, y - COLUMN_GAP + BOTTOM_PAD);
         }
+        // A flex row: a double room takes two columns where there are two,
+        // else twice the height; it starts a new line rather than split.
         let columns = columns_fitting(width);
         let gap = GAP.max((width - columns as f32 * ROW_W) / (columns + 1) as f32);
+        let (mut column, mut y, mut line_h) = (0, TOP_PAD, 0.0_f32);
         for index in 0..self.slots() {
-            slots.push(Rect::from_min_size(pos2(gap + (index % columns) as f32 * (ROW_W + gap), TOP_PAD + (index / columns) as f32 * (ROW_H + GAP)), vec2(ROW_W, ROW_H)));
+            let double = self.is_double(index);
+            let span = if double && columns >= 2 { 2 } else { 1 };
+            if column + span > columns { y += line_h + GAP; column = 0; line_h = 0.0; }
+            let h = if double && span == 1 { ROW_H + ART.y * 1.5 - RoomSize::Large.bottom_wall() } else { ROW_H };
+            let w = span as f32 * ROW_W + (span - 1) as f32 * gap;
+            slots.push(Rect::from_min_size(pos2(gap + column as f32 * (ROW_W + gap), y), vec2(w, h)));
+            column += span;
+            line_h = line_h.max(h);
+            if column >= columns { y += line_h + GAP; column = 0; line_h = 0.0; }
         }
-        (slots, self.content_height(width))
+        let bottom = if column > 0 { y + line_h } else if slots.is_empty() { y } else { y - GAP };
+        (slots, bottom + BOTTOM_PAD)
     }
 
     /// Lay the rooms out in the given width and draw them inside a scroll
@@ -1901,6 +1985,7 @@ impl Scene {
                     }
                     // Only what shows is drawn; the dragged room is drawn last, over the others.
                     room.size = size;
+                    room.beside = slot.width() > ROW_W + 1.0;
                     if ui.is_rect_visible(rect) && !dragged {
                         room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
                     }
@@ -1925,7 +2010,9 @@ impl Scene {
                             response.terminal = Some(id.clone());
                             ui.close_menu();
                         }
-                        if ui.button(tr("Finalizar agente (/exit)")).clicked() {
+                        let guild_member = id.starts_with(crate::guild_view::ID_PREFIX);
+                        // The hall is the guild itself: its members leave from the studio.
+                        if id != crate::guild_view::HALL_ID && ui.button(tr(if guild_member { "Quitar de la guild" } else { "Finalizar agente (/exit)" })).clicked() {
                             response.finish = Some(id.clone());
                             ui.close_menu();
                         }
@@ -2035,6 +2122,30 @@ mod tests {
         scene.sync(&[agent("a", "idle"), agent("b", "idle")]);
         assert!(scene.dragging.is_none());
         assert_eq!(scene.order, ["a", "b"]);
+    }
+
+    #[test]
+    fn the_guild_hall_takes_two_places() {
+        let mut scene = Scene::new();
+        let mut hall = agent("hall", "working");
+        hall.annex = Some(Box::new(agent("hall:annex", "idle")));
+        scene.sync(&[agent("a", "idle"), hall, agent("b", "idle")]);
+        // Three columns: a, then the hall needs two and fits beside it; b wraps.
+        let (slots, _) = scene.layout(width_for(3));
+        assert!((slots[1].width() - (2.0 * ROW_W + GAP)).abs() < 0.5 && slots[1].min.y == slots[0].min.y, "{slots:?}");
+        assert!(slots[2].min.y > slots[0].min.y);
+        // Two columns: the hall cannot split, so it opens the next line alone.
+        let (slots, _) = scene.layout(width_for(2));
+        assert!(slots[1].min.y > slots[0].min.y && slots[1].min.x == slots[0].min.x);
+        // One column: twice as tall instead.
+        let (slots, height) = scene.layout(width_for(1));
+        assert_eq!(slots[1].width(), ROW_W);
+        assert_eq!(slots[1].height(), ROW_H + ART.y * 1.5 - 12.0);
+        assert!((height - (TOP_PAD + 3.0 * ROW_H + ART.y * 1.5 - 12.0 + 2.0 * GAP + BOTTOM_PAD)).abs() < 0.5);
+        // Full screen's column: the menu's size, doubled art.
+        scene.compact = true;
+        let (slots, _) = scene.layout(ROW_W);
+        assert_eq!(slots[1].height(), scene.room_size.cell_h() + scene.room_size.art_h() * 1.5 - scene.room_size.bottom_wall());
     }
 
     #[test]

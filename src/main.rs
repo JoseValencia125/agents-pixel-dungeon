@@ -1,7 +1,9 @@
 //! Agents Pixel Dungeon: a native pixel-art guild for your live Herdr agents,
-//! for macOS and Linux. Each agent is an animated hero in a dungeon room
+//! for macOS, Linux and Windows. Each agent is an animated hero in a dungeon room
 //! that changes with its real Herdr status, in a small floating widget with
 //! a status item in the menu bar or tray.
+
+#![cfg_attr(all(windows, not(debug_assertions), not(test)), windows_subsystem = "windows")]
 
 mod codex_settings;
 mod alerts;
@@ -112,8 +114,29 @@ fn set_regular_app(regular: bool) {
 #[cfg(not(target_os = "macos"))]
 fn set_regular_app(_regular: bool) {}
 
+#[cfg(windows)]
+fn attach_parent_console() {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 { return; }
+        for which in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let current = GetStdHandle(which);
+            if !current.is_null() && current != INVALID_HANDLE_VALUE { continue; }
+            if let Ok(console) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+                SetStdHandle(which, console.into_raw_handle());
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if args.iter().any(|a| a == "--self-test" || a == "--diagnose") {
+        attach_parent_console();
+    }
     if args.iter().any(|a| a == "--self-test") {
         selftest::run();
         return;
@@ -189,6 +212,9 @@ struct App {
     start_fullscreen: bool,
     /// The size we asked for; anything else is the user resizing.
     expected: Option<Vec2>,
+    /// The place we asked for, until the window reports it: its rect lags a
+    /// frame or more behind.
+    commanded_origin: Option<egui::Pos2>,
     commanded_at: Option<Instant>,
     last_size: Option<Vec2>,
     size_changed_at: Option<f64>,
@@ -299,6 +325,7 @@ impl App {
             first_frame: true,
             start_fullscreen: fullscreen,
             expected: None,
+            commanded_origin: None,
             commanded_at: None,
             last_size: None,
             size_changed_at: None,
@@ -397,8 +424,18 @@ impl App {
     }
 
     fn command_size(&mut self, ctx: &egui::Context, (outer, placed): (Rect, bool), size: Vec2, anchor_left: bool) {
+        // A place just asked for counts before the window reports it, or the
+        // stale rect would move the window back.
+        let outer = match (self.commanded_origin, self.expected) {
+            (Some(origin), Some(expected)) => Rect::from_min_size(origin, expected),
+            _ => outer,
+        };
         let x = if anchor_left { outer.min.x } else { outer.max.x - size.x };
-        if placed { ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x, outer.min.y))); }
+        if placed {
+            let origin = egui::pos2(x, outer.min.y);
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(origin));
+            self.commanded_origin = Some(origin);
+        }
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
         self.expected = Some(size);
         self.commanded_at = Some(Instant::now());
@@ -427,13 +464,14 @@ impl App {
     fn restore_position(&mut self, ctx: &egui::Context) {
         let screen = ctx.input(|i| i.viewport().monitor_size).unwrap_or(vec2(1440.0, 900.0));
         let size = vec2(self.target_width(), self.target_height(screen));
-        let saved = self.prefs.top_right.filter(|(x, y)| *x - 20.0 >= 0.0 && *x - 20.0 <= screen.x && *y >= 0.0 && *y + 20.0 <= screen.y);
-        let (x, y) = match saved {
-            Some((right, top)) => ((right - size.x).clamp(0.0, (screen.x - size.x).max(0.0)), top),
-            None => (screen.x - size.x - MARGIN, SCREEN_TOP + MARGIN),
-        };
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        // Where the screens are is only known on macOS; elsewhere the window's
+        // monitor is taken to start at the origin.
+        let mut screens = screen_areas();
+        if screens.is_empty() { screens.push(Rect::from_min_max(egui::pos2(0.0, SCREEN_TOP), screen.to_pos2())); }
+        let origin = widget_origin(self.prefs.top_right, size, &screens);
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(origin));
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+        self.commanded_origin = Some(origin);
         self.expected = Some(size);
         self.commanded_at = Some(Instant::now());
     }
@@ -453,6 +491,7 @@ impl App {
         let (outer, placed) = Self::window_rect(ctx);
         let size = outer.size();
         let settled = self.commanded_at.map(|t| t.elapsed() > Duration::from_millis(600)).unwrap_or(true);
+        if self.commanded_origin.is_some_and(|origin| settled || (outer.min - origin).length() < 1.0) { self.commanded_origin = None; }
         if let (Some(expected), Some(last)) = (self.expected, self.last_size) {
             let differs = (size.x - expected.x).abs() > 1.0 || (size.y - expected.y).abs() > 1.0;
             let moved = (size.x - last.x).abs() > 0.5 || (size.y - last.y).abs() > 0.5;
@@ -564,6 +603,7 @@ impl App {
     fn place(&mut self, ctx: &egui::Context, rect: Rect) {
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(rect.min));
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(rect.size()));
+        self.commanded_origin = Some(rect.min);
         self.expected = Some(rect.size());
         self.commanded_at = Some(Instant::now());
     }
@@ -712,6 +752,20 @@ impl App {
     /// Ask before typing /exit into an agent's chat.
     fn confirm_finish(&mut self, id: &str) {
         let Some(agent) = self.monitor.agents.iter().find(|a| a.id == id).cloned() else { return };
+        // A guild member has no chat to type /exit in: it leaves the guild.
+        if let Some(member) = id.strip_prefix(guild_view::ID_PREFIX) {
+            let name = self.guild.context(id).map(|c| c.0.name).unwrap_or_else(|| agent.project.clone());
+            let answer = rfd::MessageDialog::new()
+                .set_title(trf("¿Quitar a {} de la guild?", &[&name]))
+                .set_description(tr("Deja de recibir tareas. Si está trabajando, su intento se cancela."))
+                .set_level(rfd::MessageLevel::Warning)
+                .set_buttons(rfd::MessageButtons::OkCancelCustom(tr("Quitar"), tr("Cancelar")))
+                .show();
+            if matches!(&answer, rfd::MessageDialogResult::Ok) || matches!(&answer, rfd::MessageDialogResult::Custom(l) if *l == tr("Quitar")) {
+                self.guild.command("member.remove", serde_json::json!({"memberId": member}));
+            }
+            return;
+        }
         let answer = rfd::MessageDialog::new()
             .set_title(trf("¿Finalizar {}?", &[&agent.project]))
             .set_description(tr("Se escribirá /exit en su chat de Herdr."))
@@ -741,7 +795,8 @@ impl eframe::App for App {
         // HPD_TEST_SELECT=1: open the first room's chat after 1 s (for captures).
         // A value other than 1 names the room to open. HPD_TEST_BOARD=1 opens the quest board.
         if let Ok(which) = std::env::var("HPD_TEST_SELECT") {
-            if now > 1.0 && now < 1.2 && self.monitor.selected.is_none() {
+            // A named room is opened even over the one full screen opens itself.
+            if now > 1.0 && now < 1.2 && (self.monitor.selected.is_none() || (which != "1" && self.monitor.selected.as_deref() != Some(which.as_str()))) {
                 let id = if which == "1" { self.monitor.visible_agents().first().map(|a| a.id.clone()) } else { Some(which) };
                 if let Some(id) = id { self.monitor.select(Some(id)); }
             }
@@ -757,10 +812,12 @@ impl eframe::App for App {
             }
         }
         if std::env::var("HPD_TEST_DIFF").is_ok() && now > 1.0 && now < 1.2 { self.guild.diff_open = true; }
-        // HPD_TEST_SHOT=<file.png>: save what the window shows after 3 s, for
-        // captures when the screen cannot be grabbed (another space is full screen).
+        // HPD_TEST_SHOT=<file.png>: save what the window shows after 3 s (or
+        // HPD_TEST_SHOT_AT seconds), for captures when the screen cannot be
+        // grabbed (another space is full screen).
         if let Ok(path) = std::env::var("HPD_TEST_SHOT") {
-            if now > 3.0 && !self.shot_asked {
+            let at = std::env::var("HPD_TEST_SHOT_AT").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(3.0);
+            if now > at && !self.shot_asked {
                 self.shot_asked = true;
                 ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
             }
@@ -1081,7 +1138,11 @@ impl eframe::App for App {
                         if action.close { self.monitor.set_composing(false); }
                     } else if let Some(chat) = &mut self.chat {
                         if let Some(agent) = self.monitor.agents.iter().find(|a| a.id == chat.agent_id).cloned() {
-                            if agent.id.starts_with(guild_view::ID_PREFIX) {
+                            if agent.id == guild_view::HALL_ID {
+                                let action = guild_view::hall_panel(ui, &mut self.guild, now, fullscreen);
+                                if let Some(path) = action.terminal { self.terminals.open(ctx, &path); }
+                                if action.close { self.monitor.select(None); }
+                            } else if agent.id.starts_with(guild_view::ID_PREFIX) {
                                 let action = guild_view::panel(ui, &mut self.guild, &agent, now, fullscreen);
                                 if let Some(path) = action.terminal { self.terminals.open(ctx, &path); }
                                 if action.close { self.monitor.select(None); }
@@ -1148,7 +1209,15 @@ impl eframe::App for App {
             let action = guild_view::board(ctx, &mut self.guild);
             if action.close { self.show_board = false; }
             if action.studio { self.show_studio = true; }
-            if let Some(id) = action.open { self.monitor.select(Some(id)); needs_fit = true; }
+            if let Some(id) = action.open {
+                // A member's work opens inside the guild's hall.
+                let id = match id.strip_prefix(guild_view::ID_PREFIX) {
+                    Some(member) if id != guild_view::HALL_ID => { self.guild.hall_member = Some(member.to_string()); guild_view::HALL_ID.to_string() }
+                    _ => id,
+                };
+                self.monitor.select(Some(id));
+                needs_fit = true;
+            }
         }
         if self.chat.is_none() { self.guild.watch(None); }
         // Full screen has nothing to drag or resize.
@@ -1232,6 +1301,38 @@ fn layout_height(needed_rows: usize, pref_rows: usize, chrome: f32, user_height:
     let wanted = chrome + shown * ROW_H + (shown - 1.0) * GAP;
     if limit > 100.0 { wanted.min(limit) } else { wanted }
 }
+
+/// Where the widget's top-left corner goes: back where it was (its top-right
+/// corner, `saved`) when that spot is on one of the `screens`, kept inside
+/// that screen; otherwise the first screen's top-right corner. `screens` are
+/// the usable areas in the window's coordinates, the menu-bar screen first.
+fn widget_origin(saved: Option<(f32, f32)>, size: Vec2, screens: &[Rect]) -> egui::Pos2 {
+    let Some(&first) = screens.first() else { return egui::pos2(MARGIN, SCREEN_TOP + MARGIN) };
+    let spot = saved.and_then(|(right, top)| screens.iter().find(|s| s.contains(egui::pos2(right - 20.0, top + 20.0))).map(|s| (*s, right, top)));
+    let (screen, right, top) = spot.unwrap_or((first, first.max.x - MARGIN, first.min.y + MARGIN));
+    let x = (right - size.x).clamp(screen.min.x, (screen.max.x - size.x).max(screen.min.x));
+    egui::pos2(x, top.max(screen.min.y))
+}
+
+/// The screens' usable areas (past the menu bar and the Dock) in the
+/// window's coordinates: from the menu-bar screen's top-left corner, y down.
+/// AppKit counts from its bottom-left corner, y up.
+#[cfg(target_os = "macos")]
+fn screen_areas() -> Vec<Rect> {
+    use objc2_app_kit::NSScreen;
+    use objc2_foundation::MainThreadMarker;
+    let Some(mtm) = MainThreadMarker::new() else { return Vec::new() };
+    let screens = NSScreen::screens(mtm);
+    let Some(main_height) = screens.iter().next().map(|s| s.frame().size.height) else { return Vec::new() };
+    screens.iter().map(|s| {
+        let f = s.visibleFrame();
+        let top = main_height - f.origin.y - f.size.height;
+        Rect::from_min_size(egui::pos2(f.origin.x as f32, top as f32), vec2(f.size.width as f32, f.size.height as f32))
+    }).collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn screen_areas() -> Vec<Rect> { Vec::new() }
 
 /// The chat panel's height: the one wanted, but leaving a row of rooms
 /// above it in a widget `height` tall (`others`: its insets and the HUD),
