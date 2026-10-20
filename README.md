@@ -18,7 +18,7 @@ Each coding agent is a hero in a dungeon room that changes with its real Herdr s
 
 ## Download
 
-Binaries for macOS (`.app`), Linux (x86_64) and Windows (x86_64, a portable `.zip`) are on the [Releases](https://github.com/JoseValencia125/agents-pixel-dungeon/releases) page. The macOS app is ad-hoc signed, not notarized: the first time, right-click it and choose Open. The Windows build is not code-signed, so SmartScreen may ask you to confirm the first run.
+Binaries for macOS (`.app`), Linux (x86_64) and Windows (x86_64, a portable `.zip`) are on the [Releases](https://github.com/JoseValencia125/agents-pixel-dungeon/releases) page. The macOS app is signed with a Developer ID and notarized, so it opens like any other app; it also installs with Homebrew: `brew install --cask josevalencia125/tap/agents-pixel-dungeon`. If a build still shows "Apple could not verify…", allow it under System Settings > Privacy & Security (Open Anyway). The Windows build is not code-signed, so SmartScreen may ask you to confirm the first run.
 
 ## States and rooms
 
