@@ -31,7 +31,16 @@ RESULTS = HOME / "results"
 GUILD = os.environ.get("GUILD_BIN", "/Users/nachovalencia/agents-pixel-dungeon/build/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild")
 PROJECT = "hd-bench"
 MODEL = os.environ.get("BENCH_MODEL", "claude-opus-5-5")
-TASKS = sorted(p.stem for p in (HERE / "tasks").glob("*.md"))
+# The run works from a copy of its prompts, tasks and verifier taken at start:
+# switching branches in the checkout it came from must not change a run in
+# flight (it once deleted verify.sh mid-run).
+KIT = RESULTS / "_kit"
+if (HERE / "prompts").is_dir():
+    for sub in ["prompts", "tasks"]:
+        shutil.rmtree(KIT / sub, ignore_errors=True)
+        shutil.copytree(HERE / sub, KIT / sub)
+    for f in ["verify.sh", "kiro_credits.py"]: shutil.copy(HERE / f, KIT / f)
+TASKS = sorted(p.stem for p in (KIT / "tasks").glob("*.md"))
 ARMS = ["solo", "review", "guild"]
 RUN_TIMEOUT = 90 * 60
 
@@ -44,10 +53,10 @@ def now(): return dt.datetime.now(dt.timezone.utc).isoformat()
 def log(*a): print(f"[{dt.datetime.now():%H:%M:%S}]", *a, flush=True)
 def git(*a, cwd=REPO): return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, check=True).stdout
 def prompt(name, **kw):
-    text = (HERE / "prompts" / f"{name}.md").read_text()
+    text = (KIT / "prompts" / f"{name}.md").read_text()
     for k, v in kw.items(): text = text.replace("{" + k + "}", str(v))
     return text
-def task_text(task): return (HERE / "tasks" / f"{task}.md").read_text().strip()
+def task_text(task): return (KIT / "tasks" / f"{task}.md").read_text().strip()
 def base_sha(): return git("rev-parse", "main").strip()
 
 
@@ -111,7 +120,7 @@ def snapshot_diff(path, out):
 def verify(path, out):
     t0 = time.time()
     try:
-        r = subprocess.run(["sh", str(HERE / "verify.sh")], cwd=path, env=clean_env(), capture_output=True, text=True, timeout=900)
+        r = subprocess.run(["sh", str(KIT / "verify.sh")], cwd=path, env=clean_env(), capture_output=True, text=True, timeout=900)
         text = r.stdout + r.stderr
     except subprocess.TimeoutExpired:
         text = "VERIFY FAILED: timeout"
@@ -120,7 +129,7 @@ def verify(path, out):
 
 
 def kiro_credits(t0, t1):
-    r = subprocess.run([sys.executable, str(HERE / "kiro_credits.py"), t0, t1], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, str(KIT / "kiro_credits.py"), t0, t1, PROJECT], capture_output=True, text=True)
     try: return json.loads(r.stdout)
     except ValueError: return {"kiro_credits": None}
 
@@ -133,7 +142,7 @@ def save(dirpath, arm, meta):
 def run_solo(task, rep):
     d = RESULTS / task / f"r{rep}"; d.mkdir(parents=True, exist_ok=True)
     path = worktree(f"{task}-r{rep}-solo")
-    vs = HERE / "verify.sh"
+    vs = KIT / "verify.sh"
     log("solo", task, rep)
     t0 = now()
     s = claude(path, prompt("solo", TASK=task_text(task), VERIFY=vs), d / "solo.transcript.jsonl", SOLO_TOOLS)
@@ -230,7 +239,7 @@ def report():
     crit = ["correctness", "spec_coverage", "test_quality", "simplicity", "fit_with_codebase", "design_alignment", "ux"]
     rows, per_arm = [], {a: {"n": 0, "ok": 0, "min": 0, "usd": 0, "kiro": 0, "score": 0, "scored": 0, "rank": 0, "wins": 0, "verdicts": 0} for a in ARMS}
     for task in TASKS:
-        for d in sorted((RESULTS / task).glob("r*")) if (RESULTS / task).exists() else []:
+        for d in sorted(x for x in (RESULTS / task).glob("r*") if re.fullmatch(r"r\d+", x.name)) if (RESULTS / task).exists() else []:
             judged = json.loads((d / "judge.json").read_text()) if (d / "judge.json").exists() else []
             for arm in ARMS:
                 f = d / f"{arm}.json"
