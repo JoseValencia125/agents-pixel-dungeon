@@ -54,6 +54,8 @@ pub struct Service {
     running: Mutex<HashMap<String, Running>>,
     /// Experiments whose playtests a thread is running.
     playtesting: Mutex<Vec<String>>,
+    /// The member answering the user right now, if one is.
+    orchestrating: Mutex<Option<String>>,
     pub settings: Settings,
     pub stop: Arc<AtomicBool>,
     log_file: Mutex<Option<std::fs::File>>,
@@ -94,6 +96,7 @@ impl Service {
             subscribers: Mutex::new(vec![]),
             held: Mutex::new(vec![]),
             playtesting: Mutex::new(vec![]),
+            orchestrating: Mutex::new(None),
             running: Mutex::new(HashMap::new()),
             settings,
             stop: Arc::new(AtomicBool::new(false)),
@@ -1935,6 +1938,9 @@ impl Service {
         let harnesses = self.harness_status.lock().unwrap().clone();
         let mut snap = self.store.lock().unwrap().snapshot(SERVICE_VERSION, harnesses)?;
         snap.roles = config::role_catalog();
+        snap.conversation = self.conversation(200)?;
+        snap.orchestrator = crate::orchestrator::pick(&snap.members, &self.available_harnesses()).map(|m| m.id);
+        snap.orchestrator_busy = self.orchestrating.lock().unwrap().is_some();
         Ok(snap)
     }
 
@@ -2031,6 +2037,7 @@ impl Service {
                 self.emit_locked(&store, Event::new("design.exported", "user").with(json!({"projectId": id, "files": files.len(), "ref": ref_name, "sha": sha})));
                 Ok(json!({"files": files, "ref": ref_name, "sha": sha}))
             }
+            "orchestrator.say" => self.orchestrator_say(params),
             "member.add" => self.member_add(params),
             "member.remove" => self.member_remove(p_str(params, "memberId")?),
             "quest.create" => self.quest_create(params),
@@ -2152,6 +2159,103 @@ impl Service {
         store.put_member(&m)?;
         self.emit_locked(&store, Event::new("member.updated", "user").with(json!({"memberId": m.id, "harness": m.harness, "model": m.model_id, "roles": m.roles})));
         Ok(serde_json::to_value(m).unwrap())
+    }
+
+    /// The chat with the orchestrator, from its events.
+    fn conversation(&self, limit: usize) -> Res<Vec<crate::orchestrator::ChatLine>> {
+        let events = self.store.lock().unwrap().events_of_kind("orchestrator.", limit)?;
+        Ok(events.into_iter().filter_map(|ev| {
+            let author = match ev.kind.as_str() { "orchestrator.heard" => "user", "orchestrator.replied" => "orchestrator", _ => return None };
+            Some(crate::orchestrator::ChatLine { author: author.into(), text: ev.payload["text"].as_str().unwrap_or("").into(), quest_id: ev.quest_id.clone(), at: ev.occurred_at })
+        }).collect())
+    }
+
+    /// The user says something to the guild. The orchestrator answers on a
+    /// thread; a plan in its answer becomes a quest that starts at once.
+    fn orchestrator_say(self: &Arc<Service>, params: &Value) -> ApiResult {
+        let text = p_str(params, "text")?.trim().to_string();
+        let (project, member) = {
+            let store = self.store.lock().unwrap();
+            let projects = store.projects()?;
+            let project = match p_opt(params, "projectId") {
+                Some(id) => projects.into_iter().find(|p| p.id == id),
+                None => projects.into_iter().next(),
+            }.ok_or_else(|| ApiError::not_found("the guild has no project yet"))?;
+            let member = crate::orchestrator::pick(&store.members()?, &self.available_harnesses()).ok_or_else(|| ApiError::conflict("no member can orchestrate: none is enabled on an available harness"))?;
+            (project, member)
+        };
+        {
+            let mut busy = self.orchestrating.lock().unwrap();
+            if busy.is_some() { return Err(ApiError::conflict("the orchestrator is still answering")); }
+            *busy = Some(member.id.clone());
+        }
+        let history = self.conversation(40)?;
+        let mut heard = Event::new("orchestrator.heard", "user").with(json!({"text": text, "member": member.name}));
+        heard.project_id = Some(project.id.clone());
+        self.emit(heard);
+        let service = self.clone();
+        let who = member.id.clone();
+        std::thread::Builder::new().name("orchestrator".into()).spawn(move || {
+            let reply = service.orchestrate(&project, &member, &history, &text);
+            *service.orchestrating.lock().unwrap() = None;
+            let (text, quest_id) = match reply {
+                Ok(r) => r,
+                Err(e) => (format!("(no pude responder: {e})"), None),
+            };
+            let mut ev = Event::new("orchestrator.replied", "harness").with(json!({"text": text, "member": member.name}));
+            ev.project_id = Some(project.id.clone());
+            ev.quest_id = quest_id;
+            service.emit(ev);
+        }).map_err(|e| ApiError::internal(e.to_string()))?;
+        Ok(json!({"orchestrator": who}))
+    }
+
+    /// One turn of the orchestrator, outside any worktree: it reads the
+    /// repository but works in a scratch folder of its own.
+    fn orchestrate(self: &Arc<Service>, project: &Project, member: &Member, history: &[crate::orchestrator::ChatLine], message: &str) -> Res<(String, Option<String>)> {
+        let (members, design) = {
+            let store = self.store.lock().unwrap();
+            (store.members()?, store.design(&project.id)?)
+        };
+        let snap = self.snapshot()?;
+        let prompt = crate::orchestrator::compose(project, &members, &snap, design.as_ref(), history, message);
+        let cwd = crate::paths::home().join("orchestrator").join(&project.id);
+        std::fs::create_dir_all(&cwd).map_err(|e| ApiError::internal(e.to_string()))?;
+        let adapter = self.adapter(member.harness.clone())?;
+        let options = SessionOptions { cwd, model_id: member.model_id.clone(), mode: member.mode.clone(), role_prompt: crate::orchestrator::ROLE_PROMPT.into() };
+        let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
+        let handle = adapter.prompt(&session, &new_id(), &prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
+        let started = Instant::now();
+        let mut text = String::new();
+        let outcome = loop {
+            while let Ok(ev) = handle.events.try_recv() { if let HarnessEvent::Text(t) = ev { text.push_str(&t); } }
+            match handle.result.recv_timeout(Duration::from_millis(200)) {
+                Ok(outcome) => break outcome,
+                Err(RecvTimeoutError::Disconnected) => break TurnOutcome::Failed { reason: "the harness ended without a result".into() },
+                Err(RecvTimeoutError::Timeout) if started.elapsed() > self.settings.attempt_timeout => {
+                    let _ = adapter.interrupt(&session);
+                    break TurnOutcome::Failed { reason: "timed out".into() };
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        };
+        while let Ok(ev) = handle.events.try_recv() { if let HarnessEvent::Text(t) = ev { text.push_str(&t); } }
+        let _ = adapter.stop(&session);
+        if let TurnOutcome::Failed { reason } = outcome { return Err(ApiError::new("harness", reason)); }
+        let (reply, plan) = crate::orchestrator::parse(&text);
+        let Some(plan) = plan else { return Ok((reply, None)) };
+        let quest = self.quest_create(&json!({"projectId": project.id, "title": plan.title, "description": plan.description}))?;
+        let quest_id = quest["id"].as_str().unwrap_or_default().to_string();
+        // Task ids are global: the plan's own ids get the quest's suffix.
+        let suffix = &quest_id[quest_id.len().saturating_sub(8)..];
+        let id = |t: &str| format!("{suffix}-{t}");
+        for t in &plan.tasks {
+            let role = crate::orchestrator::role_for(&t.role, &members);
+            let deps: Vec<String> = t.depends_on.iter().filter(|d| plan.tasks.iter().any(|x| &x.id == *d)).map(|d| id(d)).collect();
+            self.task_create(&json!({"questId": quest_id, "id": id(&t.id), "title": t.title, "instructions": t.instructions, "acceptance": t.acceptance, "role": role, "dependsOn": deps}))?;
+        }
+        self.quest_start(&json!({"questId": quest_id}))?;
+        Ok((reply, Some(quest_id)))
     }
 
     /// Remove a member. One with an attempt still going is retired instead
@@ -2845,6 +2949,36 @@ mod tests {
         service.handle("attempt.cancel", &json!({"attemptId": snap.attempts[0].id})).unwrap();
         let snap = wait_for(&service, "cancelled", |s| s.attempts[0].state == AttemptState::Cancelled);
         assert_eq!(snap.tasks.iter().find(|t| t.id == "t1").unwrap().state, TaskState::Blocked);
+    }
+
+    #[test]
+    fn the_orchestrator_answers_and_its_plan_starts_a_quest() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        let mock = Arc::new(MockHarness::new(MockBehaviour::Hang));
+        mock.set_orchestrator_reply("Two steps.\n```json\n{\"title\": \"Poison\", \"tasks\": [{\"id\": \"t1\", \"title\": \"Status\", \"role\": \"implementer\"}, {\"id\": \"t2\", \"title\": \"Test\", \"role\": \"nobody-has-this\", \"dependsOn\": [\"t1\"]}]}\n```\n");
+        service.register(mock);
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "kael", "harness": "mock", "roles": ["planner"]})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        assert_eq!(service.snapshot().unwrap().orchestrator.as_deref(), Some("kael"), "the planner orchestrates");
+        service.handle("orchestrator.say", &json!({"text": "Add poison"})).unwrap();
+        assert!(service.handle("orchestrator.say", &json!({"text": "again"})).is_err(), "one message at a time");
+        let snap = wait_for(&service, "the reply", |s| s.conversation.len() == 2);
+        assert_eq!(snap.conversation[0].author, "user");
+        assert_eq!(snap.conversation[1].text, "Two steps.");
+        let quest_id = snap.conversation[1].quest_id.clone().expect("the plan became a quest");
+        let quest = snap.quests.iter().find(|q| q.id == quest_id).unwrap();
+        assert_eq!(quest.state, QuestState::Running);
+        let tasks: Vec<&Task> = snap.tasks.iter().filter(|t| t.quest_id == quest_id).collect();
+        assert_eq!(tasks.len(), 2);
+        let test = tasks.iter().find(|t| t.title == "Test").unwrap();
+        assert_eq!(test.role, "implementer", "a role nobody holds falls back to one somebody does");
+        assert_eq!(test.depends_on.len(), 1);
+        assert!(!snap.orchestrator_busy);
     }
 
     #[test]

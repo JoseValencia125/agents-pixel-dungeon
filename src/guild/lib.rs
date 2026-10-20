@@ -12,6 +12,7 @@ pub mod experiment;
 pub mod domain;
 pub mod harness;
 pub mod ipc;
+pub mod orchestrator;
 pub mod paths;
 pub mod platform;
 pub mod scheduler;

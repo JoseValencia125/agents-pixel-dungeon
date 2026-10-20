@@ -528,6 +528,14 @@ pub struct Snapshot {
     pub designs: Vec<crate::design::GameDesign>,
     #[serde(default)]
     pub roles: Vec<crate::config::Role>,
+    /// The guild's chat with its orchestrator, oldest first.
+    #[serde(default)]
+    pub conversation: Vec<crate::orchestrator::ChatLine>,
+    /// The member who orchestrates, and whether it is thinking now.
+    #[serde(default)]
+    pub orchestrator: Option<String>,
+    #[serde(default)]
+    pub orchestrator_busy: bool,
 }
 
 /// What `probe` found out about an installed harness.
