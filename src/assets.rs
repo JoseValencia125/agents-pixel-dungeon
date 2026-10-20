@@ -27,7 +27,7 @@ pub struct Assets {
 
 pub const ROOM_FILES: [(&str, &[u8]); 22] = [
     ("room_working", include_bytes!("../Resources/Sprites/rooms/room_working.png")),
-    ("training_hall", include_bytes!("../Resources/Sprites/rooms/training_hall.png")),
+    ("guild_hall", include_bytes!("../Resources/Sprites/rooms/guild_hall.png")),
     ("room_working_front", include_bytes!("../Resources/Sprites/rooms/room_working_front.png")),
     ("room_blocked", include_bytes!("../Resources/Sprites/rooms/room_blocked.png")),
     // The infirmary: the usage limit (drawn by scripts/room_limited.py).
