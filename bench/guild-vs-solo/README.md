@@ -112,6 +112,8 @@ human blind play is pending); Kiro credits are not converted to USD. One run
 (t3 r2 solo) was discarded and repeated because the bench's own files left
 the disk mid-run; the bench now runs from its own worktree.
 
+After the pilot, `prompts/orchestrator.md` asks for an integration task whenever the work is split (the guild's own planner got the same rule). The three guild quests with one ranked 1.5 on average, the three without 2.0, and the seam loss was one without; three each is a hint, not proof, so runs after this change are a new version of the arm.
+
 Next arms worth running: the guild with one member and the orchestrator's
 review, without splitting the task (separates review from division of
 work); and captures of the running game for the judge.
