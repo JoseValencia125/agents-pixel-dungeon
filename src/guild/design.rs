@@ -459,10 +459,23 @@ pub fn prompt_context(d: &LivingGameDesign) -> String {
         if !p.rules.is_empty() { s.push_str(&format!(" — rules: {}", p.rules.join("; "))); }
         s.push('\n');
     }
-    s.push_str("What is marked unknown is not decided: do not invent it; name it as a question in your summary. Before changing a number, say whether the problem is in a part, a loop or the whole experience, and which desired behaviour the change serves.\n");
-    if s.len() > 8000 { s.truncate(8000); s.push_str("…\n"); }
+    // The closing rule always survives: a long design loses its last whole
+    // lines, never the rule, and is never cut inside a character.
+    let budget = PROMPT_BUDGET - UNKNOWN_RULE.len() - "…\n".len();
+    if s.len() > budget {
+        let mut end = budget;
+        while !s.is_char_boundary(end) { end -= 1; }
+        end = s[..end].rfind('\n').map(|i| i + 1).unwrap_or(end);
+        s.truncate(end);
+        s.push_str("…\n");
+    }
+    s.push_str(UNKNOWN_RULE);
     s
 }
+
+/// The most of the design, in bytes, that goes at the end of a prompt.
+const PROMPT_BUDGET: usize = 8000;
+const UNKNOWN_RULE: &str = "What is marked unknown is not decided: do not invent it; name it as a question in your summary. Before changing a number, say whether the problem is in a part, a loop or the whole experience, and which desired behaviour the change serves.\n";
 
 /// Everything the repository copy carries, so a project can be re-added
 /// anywhere with its history intact.
@@ -720,6 +733,24 @@ mod tests {
         export(&dir, &fewer).unwrap();
         assert!(!dir.join("game-design/systems/economy.md").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_long_design_keeps_whole_lines_and_the_closing_rule() {
+        let mut d = template("p", "Juego", "videogame");
+        // Multibyte text everywhere, so a byte cut would land inside a character.
+        for i in 0..60 {
+            d.systems.push(GameSystem { id: format!("s{i}"), name: format!("Sistema {i}"), intent: "Que la decisión pese → energía, agua y señal ".repeat(4), ..Default::default() });
+        }
+        let ctx = prompt_context(&d);
+        assert!(ctx.len() <= PROMPT_BUDGET, "{}", ctx.len());
+        assert!(ctx.ends_with(UNKNOWN_RULE));
+        assert!(ctx.contains("…\n"));
+        let body = ctx.strip_suffix(UNKNOWN_RULE).unwrap().strip_suffix("…\n").unwrap();
+        assert!(body.ends_with('\n'), "the cut fell mid-line");
+        assert!(body.lines().last().unwrap().starts_with("System Sistema "));
+        // A short design is not marked as cut.
+        assert!(!prompt_context(&template("p", "Juego", "videogame")).contains('…'));
     }
 
     #[test]
