@@ -4202,7 +4202,10 @@ mod tests {
         let repo = wordfight_repo(&home);
         // A setup that leaves a mark: every checkout made to play or replay must run it.
         let marks = home.repo_path().with_file_name("setup-marks.txt");
-        let toml = std::fs::read_to_string(repo.join(".guild/guild.toml")).unwrap().replace("name = \"Wordfight\"", &format!("name = \"Wordfight\"\nsetup = [\"sh\", \"-c\", \"pwd >> {}\"]", marks.display()));
+        // Forward slashes, quoted for sh: a Windows path's backslashes are
+        // escapes in a TOML string (and in sh).
+        let marks_sh = marks.display().to_string().trim_start_matches(r"\\?\").replace('\\', "/");
+        let toml = std::fs::read_to_string(repo.join(".guild/guild.toml")).unwrap().replace("name = \"Wordfight\"", &format!("name = \"Wordfight\"\nsetup = [\"sh\", \"-c\", \"pwd >> '{marks_sh}'\"]"));
         std::fs::write(repo.join(".guild/guild.toml"), toml).unwrap();
         workspaces::git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "setup"]).unwrap();
         let service = Service::new(Store::open_in_memory().unwrap(), Settings::default());
