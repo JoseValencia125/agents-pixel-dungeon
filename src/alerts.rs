@@ -30,6 +30,9 @@ pub fn alerts_for(previous: &HashMap<String, Agent>, next: &[Agent]) -> Vec<Agen
         let Some(old) = previous.get(&agent.id) else { continue };
         if old.status == agent.status { continue; }
         if agent.status == "blocked" {
+            // The guild works on its own: a member asking for something
+            // shows in its hall, but does not ring.
+            if agent.id.starts_with(crate::guild_view::ID_PREFIX) { continue; }
             alerts.push(AgentAlert { kind: AlertKind::NeedsHelp, agent: agent.clone(), shell: None });
         } else if agent.status == "done" || (old.status == "working" && agent.status == "idle") {
             alerts.push(AgentAlert { kind: AlertKind::Finished, agent: agent.clone(), shell: None });
