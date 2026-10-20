@@ -6,7 +6,10 @@
 # Without either it says so and exits 0, so a local or ad-hoc build goes on.
 set -euo pipefail
 APP="${1:?usage: notarize.sh \"path/to/App.app\"}"
-if ! codesign -dv "$APP" 2>&1 | grep -q "Authority=Developer ID Application"; then
+# (codesign's output goes through a variable: under pipefail, grep -q closing
+# the pipe early would make a signed app look unsigned.)
+SIGNATURE="$(codesign -dvv "$APP" 2>&1 || true)"
+if ! printf '%s' "$SIGNATURE" | grep -q "Authority=Developer ID Application"; then
   echo "notarize: $APP is not signed with a Developer ID; nothing to notarize"
   exit 0
 fi
