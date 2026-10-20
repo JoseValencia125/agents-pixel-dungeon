@@ -522,10 +522,8 @@ pub fn prompt_context(d: &LivingGameDesign) -> String {
     // lines, never the rule, and is never cut inside a character.
     let budget = PROMPT_BUDGET - UNKNOWN_RULE.len() - "…\n".len();
     if s.len() > budget {
-        let mut end = budget;
-        while !s.is_char_boundary(end) { end -= 1; }
-        end = s[..end].rfind('\n').map(|i| i + 1).unwrap_or(end);
-        s.truncate(end);
+        crate::domain::cut(&mut s, budget);
+        if let Some(i) = s.rfind('\n') { s.truncate(i + 1); }
         s.push_str("…\n");
     }
     s.push_str(UNKNOWN_RULE);

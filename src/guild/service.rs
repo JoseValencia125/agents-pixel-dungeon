@@ -866,12 +866,7 @@ impl Service {
         s.push_str(&format!("\n## Playtest plan\nprofiles: {} · runs per profile: {}\n", e.plan.profiles.join(", "), e.plan.runs_per_profile));
         s.push_str("\n## Playtest metrics\nPer variant and player profile: counts of events, means of numeric fields (as event.field), runs started/completed, and the distribution of choices (`top` is the most taken choice and `top_share` its share: a dominant strategy shows as a high top_share).\n```json\n");
         let mut text = serde_json::to_string_pretty(&metrics).unwrap_or_default();
-        if text.len() > 40_000 {
-            let mut end = 40_000;
-            while !text.is_char_boundary(end) { end -= 1; }
-            text.truncate(end);
-            text.push_str("\n… (truncated)");
-        }
+        if cut(&mut text, 40_000) { text.push_str("\n… (truncated)"); }
         s.push_str(&text);
         s.push_str("\n```\n\nCompare the variants against the hypothesis and the intended experience and answer with the JSON block only. Use the variant ids given above in recommended_variant.\n");
         Ok(s)
