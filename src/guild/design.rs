@@ -65,6 +65,18 @@ pub struct Concept {
     pub competition: String,
 }
 
+/// What the game will not compromise on, falsifiable: a design choice can
+/// be held against it and pass or fail.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Pillar {
+    pub name: String,
+    #[serde(default)]
+    pub statement: String,
+    /// The question a choice must answer yes to, to serve this pillar.
+    #[serde(default)]
+    pub design_test: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Experience {
     /// Who the player is in the fiction, in one sentence.
@@ -155,6 +167,21 @@ pub struct GameSystem {
     /// How it works now, present tense, numbers where numbers are known.
     #[serde(default)]
     pub current: String,
+    /// Every rule with numbers, as a formula with its variables and ranges.
+    #[serde(default)]
+    pub formulas: Vec<String>,
+    /// `name: value (safe range) — what it changes`, one per knob.
+    #[serde(default)]
+    pub tuning: Vec<String>,
+    /// What happens at the limits: zero, the cap, two events at once.
+    #[serde(default)]
+    pub edge_cases: Vec<String>,
+    /// Verifiable criteria the build must meet; never "feels right".
+    #[serde(default)]
+    pub acceptance: Vec<String>,
+    /// Systems this one needs (ids); each should name this one back.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
     /// Player-facing or internal (simulation).
     #[serde(default)]
     pub player_facing: bool,
@@ -205,6 +232,12 @@ pub struct LivingGameDesign {
     pub status: String,
     #[serde(default)]
     pub concept: Concept,
+    /// In priority order: when two conflict, the first wins.
+    #[serde(default)]
+    pub pillars: Vec<Pillar>,
+    /// What the game deliberately is not.
+    #[serde(default)]
+    pub anti_pillars: Vec<String>,
     #[serde(default)]
     pub experience: Experience,
     #[serde(default)]
@@ -411,6 +444,27 @@ pub fn template(project_id: &str, title: &str, name: &str) -> LivingGameDesign {
     d
 }
 
+/// What a system still lacks to be precise enough to build from: a
+/// production system has its current design, its edge cases, verifiable
+/// acceptance criteria and no open unknowns.
+pub fn production_gaps(s: &GameSystem) -> Vec<&'static str> {
+    let mut gaps = vec![];
+    if s.current.trim().is_empty() { gaps.push("the current design"); }
+    if s.edge_cases.is_empty() { gaps.push("edge cases"); }
+    if s.acceptance.is_empty() { gaps.push("acceptance criteria"); }
+    if !s.unknown.is_empty() { gaps.push("no open unknowns"); }
+    gaps
+}
+
+/// Refuses a design that marks a system production before it is.
+pub fn check_production(d: &LivingGameDesign) -> Result<(), String> {
+    for s in d.systems.iter().filter(|s| s.maturity == Maturity::Production) {
+        let gaps = production_gaps(s);
+        if !gaps.is_empty() { return Err(format!("system {} cannot be production without {}", s.name, gaps.join(", "))); }
+    }
+    Ok(())
+}
+
 /// Every section with a maturity, for the chamber's table and the bar.
 pub fn maturities(d: &LivingGameDesign) -> Vec<(String, String, Maturity)> {
     let mut out = vec![
@@ -438,6 +492,11 @@ pub fn prompt_context(d: &LivingGameDesign) -> String {
     s.push_str("\n## Game design (current; whole → loops → parts)\n");
     if !d.concept.statement.trim().is_empty() { s.push_str(&format!("Concept: {}\n", d.concept.statement.trim())); }
     if !d.experience.fantasy.trim().is_empty() { s.push_str(&format!("Fantasy: {}\n", d.experience.fantasy.trim())); }
+    if !d.pillars.is_empty() {
+        let p: Vec<String> = d.pillars.iter().map(|p| if p.design_test.trim().is_empty() { format!("{} ({})", p.name.trim(), p.statement.trim()) } else { format!("{} ({}; test: {})", p.name.trim(), p.statement.trim(), p.design_test.trim()) }).collect();
+        s.push_str(&format!("Pillars, first wins: {}\n", p.join("; ")));
+    }
+    if !d.anti_pillars.is_empty() { s.push_str(&format!("Anti-pillars (the game is not): {}\n", d.anti_pillars.join("; "))); }
     let list = |label: &str, items: &[String]| if items.is_empty() { String::new() } else { format!("{label}: {}\n", items.join("; ")) };
     s.push_str(&list("Selling points", &d.concept.usps));
     s.push_str(&list("The player should feel", &d.experience.player_should_feel));
@@ -474,7 +533,7 @@ pub fn prompt_context(d: &LivingGameDesign) -> String {
 }
 
 /// The most of the design, in bytes, that goes at the end of a prompt.
-const PROMPT_BUDGET: usize = 8000;
+const PROMPT_BUDGET: usize = 12_000;
 const UNKNOWN_RULE: &str = "What is marked unknown is not decided: do not invent it; name it as a question in your summary. Before changing a number, say whether the problem is in a part, a loop or the whole experience, and which desired behaviour the change serves.\n";
 
 /// Everything the repository copy carries, so a project can be re-added
@@ -535,6 +594,13 @@ pub fn export(repo: &Path, b: &DesignBundle) -> std::io::Result<Vec<String>> {
     o.push_str(&section("Genre", &d.concept.genre));
     o.push_str(&section("Target audience", &d.concept.audience));
     o.push_str(&list_section("Unique selling points", &d.concept.usps));
+    o.push_str(&list_section("Pillars (in priority order)", &d.pillars.iter().map(|p| {
+        let mut l = format!("**{}**", p.name.trim());
+        if !p.statement.trim().is_empty() { l.push_str(&format!(": {}", p.statement.trim())); }
+        if !p.design_test.trim().is_empty() { l.push_str(&format!(" _Test: {}_", p.design_test.trim())); }
+        l
+    }).collect::<Vec<_>>()));
+    o.push_str(&list_section("Anti-pillars", &d.anti_pillars));
     o.push_str("## Maturity\n\n| Section | Maturity |\n| --- | --- |\n");
     for (_, name, m) in maturities(d) { o.push_str(&format!("| {name} | {} |\n", m.as_str())); }
     o.push('\n');
@@ -587,6 +653,13 @@ pub fn export(repo: &Path, b: &DesignBundle) -> std::io::Result<Vec<String>> {
         t.push_str(&section("Current design", &s.current));
         t.push_str(&list_section("Known", &s.known));
         t.push_str(&list_section("Unknown (open questions, not guesses)", &s.unknown));
+        t.push_str(&list_section("Formulas", &s.formulas));
+        t.push_str(&list_section("Tuning knobs", &s.tuning));
+        t.push_str(&list_section("Edge cases", &s.edge_cases));
+        t.push_str(&list_section("Acceptance criteria", &s.acceptance));
+        t.push_str(&list_section("Depends on", &s.depends_on.iter().map(|x| format!("[{x}]({}.md)", file_id(x))).collect::<Vec<_>>()));
+        let gaps = production_gaps(s);
+        if s.maturity != Maturity::Production && !gaps.is_empty() { t.push_str(&format!("_Before production it needs {}._\n\n", gaps.join(", "))); }
         t.push_str(&list_section("Loops", &s.loops.iter().map(|l| format!("[{l}](../loops/{}.md)", file_id(l))).collect::<Vec<_>>()));
         t.push_str(&list_section("Objects", &s.parts.iter().map(|p| format!("[{p}](../objects/{}.md)", file_id(p))).collect::<Vec<_>>()));
         t.push_str(&list_section("Implementation", &s.implementation));
@@ -733,6 +806,35 @@ mod tests {
         fewer.design.systems.truncate(1);
         export(&dir, &fewer).unwrap();
         assert!(!dir.join("game-design/systems/economy.md").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_system_reaches_production_only_with_edge_cases_acceptance_and_no_unknowns() {
+        let mut d = template("p", "Juego", "videogame");
+        assert!(check_production(&d).is_ok());
+        d.systems[0].maturity = Maturity::Production;
+        let err = check_production(&d).unwrap_err();
+        assert!(err.contains("edge cases") && err.contains("acceptance criteria") && err.contains("no open unknowns"), "{err}");
+        d.systems[0].edge_cases = vec!["an empty rare pool: rare letters cannot be drawn".into()];
+        d.systems[0].acceptance = vec!["a 3-letter word matching the weakness beats an unmatched 6-letter word".into()];
+        d.systems[0].unknown.clear();
+        assert!(check_production(&d).is_ok());
+        // Pillars reach the agents, first one first.
+        d.pillars = vec![Pillar { name: "Words over reflexes".into(), statement: "you win by choosing, never by speed".into(), design_test: "can a slow player still win?".into() }];
+        d.anti_pillars = vec!["a typing game".into()];
+        let ctx = prompt_context(&d);
+        assert!(ctx.contains("Pillars, first wins: Words over reflexes") && ctx.contains("Anti-pillars (the game is not): a typing game"));
+        // And survive the repository.
+        let dir = std::env::temp_dir().join(format!("design-{}", crate::domain::new_id()));
+        export(&dir, &DesignBundle { design: d.clone(), ..Default::default() }).unwrap();
+        let overview = std::fs::read_to_string(dir.join("game-design/overview.md")).unwrap();
+        assert!(overview.contains("**Words over reflexes**"));
+        let combat = std::fs::read_to_string(dir.join("game-design/systems/combat.md")).unwrap();
+        assert!(combat.contains("## Acceptance criteria") && !combat.contains("Before production"));
+        let progression = std::fs::read_to_string(dir.join("game-design/systems/progression.md")).unwrap();
+        assert!(progression.contains("Before production it needs"));
+        assert_eq!(import(&dir, "p").unwrap().design, d);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

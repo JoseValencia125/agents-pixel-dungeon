@@ -1592,6 +1592,10 @@ impl Service {
         let project_id = p_str(params, "projectId")?;
         let sys: crate::design::GameSystem = serde_json::from_value(params.get("system").cloned().ok_or_else(|| ApiError::invalid("missing system"))?).map_err(|e| ApiError::invalid(format!("system: {e}")))?;
         if sys.id.trim().is_empty() || sys.name.trim().is_empty() { return Err(ApiError::invalid("a system needs an id and a name")); }
+        if sys.maturity == crate::design::Maturity::Production {
+            let gaps = crate::design::production_gaps(&sys);
+            if !gaps.is_empty() { return Err(ApiError::invalid(format!("system {} cannot be production without {}", sys.name, gaps.join(", ")))); }
+        }
         let store = self.store.lock().unwrap();
         let mut d = store.design(project_id)?.ok_or_else(|| ApiError::not_found("the project has no design yet"))?;
         match d.systems.iter_mut().find(|s| s.id == sys.id) { Some(existing) => *existing = sys.clone(), None => d.systems.push(sys.clone()) }
@@ -2770,6 +2774,7 @@ impl Service {
         d.updated_at = now();
         for (i, l) in d.loops.iter_mut().enumerate() { if l.id.trim().is_empty() { l.id = format!("loop-{}", i + 1); } }
         for (i, p) in d.parts.iter_mut().enumerate() { if p.id.trim().is_empty() { p.id = format!("part-{}", i + 1); } }
+        crate::design::check_production(&d).map_err(ApiError::invalid)?;
         store.put_design(&d)?;
         self.emit_locked(&store, Event::new("design.updated", "user").with(json!({"projectId": id, "version": d.version, "loops": d.loops.len(), "parts": d.parts.len()})));
         Ok(serde_json::to_value(d).unwrap())
