@@ -70,6 +70,20 @@ pub fn provision(project: &Project, quest_id: &str, task_id: &str, attempt_id: &
     })
 }
 
+/// Bring an earlier candidate's changes into a fresh worktree, uncommitted,
+/// on top of its base (which may have moved on since: other tasks were
+/// integrated), so a retry goes on from it. Git merges in three ways; on a
+/// conflict the worktree is put back as it was and false is returned.
+pub fn carry(workspace: &Workspace, candidate: &Candidate) -> bool {
+    let path = Path::new(&workspace.path);
+    let range = format!("{}..{}", candidate.base_sha, candidate.head_sha);
+    if git(path, &["cherry-pick", "--no-commit", &range]).is_ok() { return true; }
+    let _ = git(path, &["cherry-pick", "--abort"]);
+    let _ = git(path, &["reset", "--hard", &workspace.base_sha]);
+    let _ = git(path, &["clean", "-fdq"]);
+    false
+}
+
 /// Run the project's setup command in the worktree, returning its output.
 pub fn setup(workspace: &Workspace, argv: &[String], timeout_seconds: u64) -> GitResult<String> {
     if argv.is_empty() { return Ok(String::new()); }
