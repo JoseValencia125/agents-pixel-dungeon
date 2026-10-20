@@ -1809,9 +1809,15 @@ impl Service {
             .spawn(move || {
                 let outcome = service.resume(&attempt_id, &native_id);
                 service.running.lock().unwrap().remove(&attempt_id);
-                if let Err(e) = outcome {
+                // Shutting down closes the session under a resume in flight:
+                // the attempt stays as it is for the next start, as in finish_attempt.
+                if let (Err(e), true) = (&outcome, service.stop.load(Ordering::Relaxed)) {
+                    service.log(&format!("attempt {attempt_id}: resume interrupted by the shutdown ({e}); left for the next start"));
+                } else if let Err(e) = outcome {
                     service.log(&format!("attempt {attempt_id}: resume failed: {e}"));
-                    let task = service.store.lock().unwrap().attempt(&attempt_id).ok().flatten().and_then(|a| service.store.lock().unwrap().task(&a.task_id).ok().flatten());
+                    // One lock for both reads: a second lock inside the first one's
+                    // statement would wait on itself forever.
+                    let task = { let store = service.store.lock().unwrap(); store.attempt(&attempt_id).ok().flatten().and_then(|a| store.task(&a.task_id).ok().flatten()) };
                     let _ = service.move_attempt(&attempt_id, AttemptState::Lost, Some(format!("the service restarted and the session could not be reopened: {e}")));
                     if let Some(t) = task { let _ = service.after_runner_dropped(&t, "lost"); }
                 }
