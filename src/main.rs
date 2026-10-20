@@ -752,6 +752,20 @@ impl App {
     /// Ask before typing /exit into an agent's chat.
     fn confirm_finish(&mut self, id: &str) {
         let Some(agent) = self.monitor.agents.iter().find(|a| a.id == id).cloned() else { return };
+        // A guild member has no chat to type /exit in: it leaves the guild.
+        if let Some(member) = id.strip_prefix(guild_view::ID_PREFIX) {
+            let name = self.guild.context(id).map(|c| c.0.name).unwrap_or_else(|| agent.project.clone());
+            let answer = rfd::MessageDialog::new()
+                .set_title(trf("¿Quitar a {} de la guild?", &[&name]))
+                .set_description(tr("Deja de recibir tareas. Si está trabajando, su intento se cancela."))
+                .set_level(rfd::MessageLevel::Warning)
+                .set_buttons(rfd::MessageButtons::OkCancelCustom(tr("Quitar"), tr("Cancelar")))
+                .show();
+            if matches!(&answer, rfd::MessageDialogResult::Ok) || matches!(&answer, rfd::MessageDialogResult::Custom(l) if *l == tr("Quitar")) {
+                self.guild.command("member.remove", serde_json::json!({"memberId": member}));
+            }
+            return;
+        }
         let answer = rfd::MessageDialog::new()
             .set_title(trf("¿Finalizar {}?", &[&agent.project]))
             .set_description(tr("Se escribirá /exit en su chat de Herdr."))
@@ -781,7 +795,8 @@ impl eframe::App for App {
         // HPD_TEST_SELECT=1: open the first room's chat after 1 s (for captures).
         // A value other than 1 names the room to open. HPD_TEST_BOARD=1 opens the quest board.
         if let Ok(which) = std::env::var("HPD_TEST_SELECT") {
-            if now > 1.0 && now < 1.2 && self.monitor.selected.is_none() {
+            // A named room is opened even over the one full screen opens itself.
+            if now > 1.0 && now < 1.2 && (self.monitor.selected.is_none() || (which != "1" && self.monitor.selected.as_deref() != Some(which.as_str()))) {
                 let id = if which == "1" { self.monitor.visible_agents().first().map(|a| a.id.clone()) } else { Some(which) };
                 if let Some(id) = id { self.monitor.select(Some(id)); }
             }
@@ -1123,7 +1138,11 @@ impl eframe::App for App {
                         if action.close { self.monitor.set_composing(false); }
                     } else if let Some(chat) = &mut self.chat {
                         if let Some(agent) = self.monitor.agents.iter().find(|a| a.id == chat.agent_id).cloned() {
-                            if agent.id.starts_with(guild_view::ID_PREFIX) {
+                            if agent.id == guild_view::HALL_ID {
+                                let action = guild_view::hall_panel(ui, &mut self.guild, now, fullscreen);
+                                if let Some(path) = action.terminal { self.terminals.open(ctx, &path); }
+                                if action.close { self.monitor.select(None); }
+                            } else if agent.id.starts_with(guild_view::ID_PREFIX) {
                                 let action = guild_view::panel(ui, &mut self.guild, &agent, now, fullscreen);
                                 if let Some(path) = action.terminal { self.terminals.open(ctx, &path); }
                                 if action.close { self.monitor.select(None); }
@@ -1190,7 +1209,15 @@ impl eframe::App for App {
             let action = guild_view::board(ctx, &mut self.guild);
             if action.close { self.show_board = false; }
             if action.studio { self.show_studio = true; }
-            if let Some(id) = action.open { self.monitor.select(Some(id)); needs_fit = true; }
+            if let Some(id) = action.open {
+                // A member's work opens inside the guild's hall.
+                let id = match id.strip_prefix(guild_view::ID_PREFIX) {
+                    Some(member) if id != guild_view::HALL_ID => { self.guild.hall_member = Some(member.to_string()); guild_view::HALL_ID.to_string() }
+                    _ => id,
+                };
+                self.monitor.select(Some(id));
+                needs_fit = true;
+            }
         }
         if self.chat.is_none() { self.guild.watch(None); }
         // Full screen has nothing to drag or resize.

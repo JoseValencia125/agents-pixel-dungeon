@@ -54,6 +54,8 @@ pub struct Service {
     running: Mutex<HashMap<String, Running>>,
     /// Experiments whose playtests a thread is running.
     playtesting: Mutex<Vec<String>>,
+    /// The member answering the user right now, if one is.
+    orchestrating: Mutex<Option<String>>,
     pub settings: Settings,
     pub stop: Arc<AtomicBool>,
     log_file: Mutex<Option<std::fs::File>>,
@@ -94,6 +96,7 @@ impl Service {
             subscribers: Mutex::new(vec![]),
             held: Mutex::new(vec![]),
             playtesting: Mutex::new(vec![]),
+            orchestrating: Mutex::new(None),
             running: Mutex::new(HashMap::new()),
             settings,
             stop: Arc::new(AtomicBool::new(false)),
@@ -1486,7 +1489,20 @@ impl Service {
         };
         self.move_attempt(attempt_id, AttemptState::Provisioning, None)?;
         let base = workspaces::ensure_integration_branch(&project, &quest).map_err(ApiError::internal)?;
+        // A retry learns why the earlier attempts were turned down and, when
+        // the last one left a candidate (and this is not a race), goes on
+        // from it: asked to fix one line, it fixes that line.
+        let earlier: Vec<Attempt> = {
+            let store = self.store.lock().unwrap();
+            let mut v: Vec<Attempt> = store.attempts_of_task(&task.id)?.into_iter().filter(|a| a.id != attempt.id && a.kind == AttemptKind::Work && a.failure.is_some()).collect();
+            v.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            v
+        };
+        let feedback: Vec<String> = earlier.iter().rev().take(3).rev().filter_map(|a| a.failure.clone()).collect();
+        let resume_from = if attempt.kind == AttemptKind::Work && task.candidates <= 1 { earlier.last().and_then(|a| a.candidate.clone()) } else { None };
         let workspace = workspaces::provision(&project, &quest.id, &task.id, attempt_id, &base).map_err(ApiError::internal)?;
+        // On the current base, with the last candidate's changes carried over.
+        let continued = resume_from.as_ref().is_some_and(|c| workspaces::carry(&workspace, c));
         {
             let store = self.store.lock().unwrap();
             store.put_workspace(&workspace)?;
@@ -1513,7 +1529,7 @@ impl Service {
         let prompt = match attempt.kind {
             AttemptKind::Judge => self.compose_judge_prompt(&role_prompt, &task, design.as_ref())?,
             AttemptKind::Analysis => self.compose_analysis_prompt(&role_prompt, &task, design.as_ref())?,
-            AttemptKind::Work => compose_prompt(&role_prompt, &task, &workspace, design.as_ref()),
+            AttemptKind::Work => compose_prompt(&role_prompt, &task, &workspace, design.as_ref(), &feedback, continued),
         };
         self.run_turn(attempt_id, &attempt, &member, &adapter, session, &prompt)
     }
@@ -1935,6 +1951,9 @@ impl Service {
         let harnesses = self.harness_status.lock().unwrap().clone();
         let mut snap = self.store.lock().unwrap().snapshot(SERVICE_VERSION, harnesses)?;
         snap.roles = config::role_catalog();
+        snap.conversation = self.conversation(200)?;
+        snap.orchestrator = crate::orchestrator::pick(&snap.members, &self.available_harnesses()).map(|m| m.id);
+        snap.orchestrator_busy = self.orchestrating.lock().unwrap().is_some();
         Ok(snap)
     }
 
@@ -2031,12 +2050,9 @@ impl Service {
                 self.emit_locked(&store, Event::new("design.exported", "user").with(json!({"projectId": id, "files": files.len(), "ref": ref_name, "sha": sha})));
                 Ok(json!({"files": files, "ref": ref_name, "sha": sha}))
             }
+            "orchestrator.say" => self.orchestrator_say(params),
             "member.add" => self.member_add(params),
-            "member.remove" => {
-                let id = p_str(params, "memberId")?;
-                self.store.lock().unwrap().delete_member(id)?;
-                Ok(json!({"removed": id}))
-            }
+            "member.remove" => self.member_remove(p_str(params, "memberId")?),
             "quest.create" => self.quest_create(params),
             "task.create" => self.task_create(params),
             "quest.start" => self.quest_start(params),
@@ -2156,6 +2172,128 @@ impl Service {
         store.put_member(&m)?;
         self.emit_locked(&store, Event::new("member.updated", "user").with(json!({"memberId": m.id, "harness": m.harness, "model": m.model_id, "roles": m.roles})));
         Ok(serde_json::to_value(m).unwrap())
+    }
+
+    /// The chat with the orchestrator, from its events.
+    fn conversation(&self, limit: usize) -> Res<Vec<crate::orchestrator::ChatLine>> {
+        let events = self.store.lock().unwrap().events_of_kind("orchestrator.", limit)?;
+        Ok(events.into_iter().filter_map(|ev| {
+            let author = match ev.kind.as_str() { "orchestrator.heard" => "user", "orchestrator.replied" => "orchestrator", _ => return None };
+            Some(crate::orchestrator::ChatLine { author: author.into(), text: ev.payload["text"].as_str().unwrap_or("").into(), quest_id: ev.quest_id.clone(), at: ev.occurred_at })
+        }).collect())
+    }
+
+    /// The user says something to the guild. The orchestrator answers on a
+    /// thread; a plan in its answer becomes a quest that starts at once.
+    fn orchestrator_say(self: &Arc<Service>, params: &Value) -> ApiResult {
+        let text = p_str(params, "text")?.trim().to_string();
+        let (project, member) = {
+            let store = self.store.lock().unwrap();
+            let projects = store.projects()?;
+            let project = match p_opt(params, "projectId") {
+                Some(id) => projects.into_iter().find(|p| p.id == id),
+                None => projects.into_iter().next(),
+            }.ok_or_else(|| ApiError::not_found("the guild has no project yet"))?;
+            let member = crate::orchestrator::pick(&store.members()?, &self.available_harnesses()).ok_or_else(|| ApiError::conflict("no member can orchestrate: none is enabled on an available harness"))?;
+            (project, member)
+        };
+        {
+            let mut busy = self.orchestrating.lock().unwrap();
+            if busy.is_some() { return Err(ApiError::conflict("the orchestrator is still answering")); }
+            *busy = Some(member.id.clone());
+        }
+        let history = self.conversation(40)?;
+        let mut heard = Event::new("orchestrator.heard", "user").with(json!({"text": text, "member": member.name}));
+        heard.project_id = Some(project.id.clone());
+        self.emit(heard);
+        let service = self.clone();
+        let who = member.id.clone();
+        std::thread::Builder::new().name("orchestrator".into()).spawn(move || {
+            let reply = service.orchestrate(&project, &member, &history, &text);
+            *service.orchestrating.lock().unwrap() = None;
+            let (text, quest_id) = match reply {
+                Ok(r) => r,
+                Err(e) => (format!("(no pude responder: {e})"), None),
+            };
+            let mut ev = Event::new("orchestrator.replied", "harness").with(json!({"text": text, "member": member.name}));
+            ev.project_id = Some(project.id.clone());
+            ev.quest_id = quest_id;
+            service.emit(ev);
+        }).map_err(|e| ApiError::internal(e.to_string()))?;
+        Ok(json!({"orchestrator": who}))
+    }
+
+    /// One turn of the orchestrator, outside any worktree: it reads the
+    /// repository but works in a scratch folder of its own.
+    fn orchestrate(self: &Arc<Service>, project: &Project, member: &Member, history: &[crate::orchestrator::ChatLine], message: &str) -> Res<(String, Option<String>)> {
+        let (members, design) = {
+            let store = self.store.lock().unwrap();
+            (store.members()?, store.design(&project.id)?)
+        };
+        let snap = self.snapshot()?;
+        let prompt = crate::orchestrator::compose(project, &members, &snap, design.as_ref(), history, message);
+        let cwd = crate::paths::home().join("orchestrator").join(&project.id);
+        std::fs::create_dir_all(&cwd).map_err(|e| ApiError::internal(e.to_string()))?;
+        let adapter = self.adapter(member.harness.clone())?;
+        let options = SessionOptions { cwd, model_id: member.model_id.clone(), mode: member.mode.clone(), role_prompt: crate::orchestrator::ROLE_PROMPT.into() };
+        let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
+        let handle = adapter.prompt(&session, &new_id(), &prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
+        let started = Instant::now();
+        let mut text = String::new();
+        let outcome = loop {
+            while let Ok(ev) = handle.events.try_recv() { if let HarnessEvent::Text(t) = ev { text.push_str(&t); } }
+            match handle.result.recv_timeout(Duration::from_millis(200)) {
+                Ok(outcome) => break outcome,
+                Err(RecvTimeoutError::Disconnected) => break TurnOutcome::Failed { reason: "the harness ended without a result".into() },
+                Err(RecvTimeoutError::Timeout) if started.elapsed() > self.settings.attempt_timeout => {
+                    let _ = adapter.interrupt(&session);
+                    break TurnOutcome::Failed { reason: "timed out".into() };
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        };
+        while let Ok(ev) = handle.events.try_recv() { if let HarnessEvent::Text(t) = ev { text.push_str(&t); } }
+        let _ = adapter.stop(&session);
+        if let TurnOutcome::Failed { reason } = outcome { return Err(ApiError::new("harness", reason)); }
+        let (reply, plan) = crate::orchestrator::parse(&text);
+        let Some(plan) = plan else { return Ok((reply, None)) };
+        let quest = self.quest_create(&json!({"projectId": project.id, "title": plan.title, "description": plan.description}))?;
+        let quest_id = quest["id"].as_str().unwrap_or_default().to_string();
+        // Task ids are global: the plan's own ids get the quest's suffix.
+        let suffix = &quest_id[quest_id.len().saturating_sub(8)..];
+        let id = |t: &str| format!("{suffix}-{t}");
+        for t in &plan.tasks {
+            let role = crate::orchestrator::role_for(&t.role, &members);
+            let deps: Vec<String> = t.depends_on.iter().filter(|d| plan.tasks.iter().any(|x| &x.id == *d)).map(|d| id(d)).collect();
+            self.task_create(&json!({"questId": quest_id, "id": id(&t.id), "title": t.title, "instructions": t.instructions, "acceptance": t.acceptance, "role": role, "dependsOn": deps}))?;
+        }
+        self.quest_start(&json!({"questId": quest_id}))?;
+        Ok((reply, Some(quest_id)))
+    }
+
+    /// Remove a member. One with an attempt still going is retired instead
+    /// (disabled, its attempts cancelled): the attempt's record and its
+    /// review still need the member, and a later remove deletes it.
+    fn member_remove(&self, id: &str) -> ApiResult {
+        let active: Vec<String> = {
+            let store = self.store.lock().unwrap();
+            store.member(id)?.ok_or_else(|| ApiError::not_found(format!("member {id}")))?;
+            store.active_attempts()?.into_iter().filter(|a| a.member_id == id).map(|a| a.id).collect()
+        };
+        if active.is_empty() {
+            let store = self.store.lock().unwrap();
+            store.delete_member(id)?;
+            self.emit_locked(&store, Event::new("member.removed", "user").with(json!({"memberId": id})));
+            return Ok(json!({"removed": id}));
+        }
+        for attempt in &active { let _ = self.attempt_cancel(attempt); }
+        let store = self.store.lock().unwrap();
+        if let Some(mut m) = store.member(id)? {
+            m.enabled = false;
+            store.put_member(&m)?;
+        }
+        self.emit_locked(&store, Event::new("member.updated", "user").with(json!({"memberId": id, "enabled": false})));
+        Ok(json!({"retired": id, "cancelling": active}))
     }
 
     fn design_template(&self, params: &Value) -> ApiResult {
@@ -2619,7 +2757,7 @@ fn parse_strategy(params: &Value) -> Res<ExecutionStrategy> {
     })
 }
 
-fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>) -> String {
+fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>, feedback: &[String], continued: bool) -> String {
     let mut s = String::new();
     s.push_str(role_prompt.trim());
     s.push_str("\n\n# Task: ");
@@ -2636,6 +2774,15 @@ fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design:
         "\n## Rules\n- Your working directory is a dedicated git worktree on branch `{}`. Work only inside it.\n- Do not commit, push or switch branches; the guild commits your work when you finish.\n- Do not ask whether to proceed: do the work, then reply with a short summary of what changed, how you verified it, and anything left undone.\n",
         workspace.branch
     ));
+    if !feedback.is_empty() {
+        s.push_str("\n## Earlier attempts were turned down\n");
+        for f in feedback { s.push_str(&format!("- {}\n", f.trim())); }
+        if continued {
+            s.push_str("Your worktree already holds the last candidate. Keep what was not objected to and make exactly the changes asked for above.\n");
+        } else {
+            s.push_str("Avoid what was objected to above.\n");
+        }
+    }
     if let Some(d) = design { s.push_str(&crate::design::prompt_context(d)); }
     s
 }
@@ -2827,6 +2974,136 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_candidate_is_retried_from_where_it_was_with_the_reason() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        let mock = Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "a.txt".into(), content: "first\n".into() }));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Two files", "maxAttempts": 3})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "first candidate", |s| s.tasks[0].state == TaskState::Verifying);
+        let first = snap.attempts[0].candidate.clone().unwrap();
+        mock.set_behaviour(MockBehaviour::Succeed { file: "b.txt".into(), content: "fix\n".into() });
+        service.handle("task.reject", &json!({"taskId": "t1", "reason": "also add b.txt, keep a.txt"})).unwrap();
+        let snap = wait_for(&service, "second candidate", |s| s.attempts.len() == 2 && s.attempts.iter().any(|a| a.state == AttemptState::Submitted));
+        let prompt = mock.prompts().last().cloned().unwrap();
+        assert!(prompt.contains("also add b.txt, keep a.txt") && prompt.contains("already holds the last candidate"), "{prompt}");
+        let second = snap.attempts.iter().find(|a| a.state == AttemptState::Submitted).unwrap().candidate.clone().unwrap();
+        // It went on from the first candidate, and is still measured against the quest's base.
+        assert_eq!(second.base_sha, first.base_sha);
+        assert_eq!(second.files_changed, 2, "a.txt from the first candidate plus b.txt");
+    }
+
+    #[test]
+    fn a_retry_carries_its_candidate_onto_work_integrated_meanwhile() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        let mock = Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "logic.txt".into(), content: "v1\n".into() }));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "orin", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "logic", "title": "Logic", "memberId": "orin", "maxAttempts": 3})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "logic's first candidate", |s| s.tasks.iter().any(|t| t.id == "logic" && t.state == TaskState::Verifying));
+        // The UI is done and integrated while logic waits for review.
+        mock.set_behaviour(MockBehaviour::Succeed { file: "ui.txt".into(), content: "ui\n".into() });
+        // Orin's candidate waiting for review keeps Orin busy: Lira does the UI.
+        service.handle("member.add", &json!({"id": "lira", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "ui", "title": "UI", "memberId": "lira"})).unwrap();
+        wait_for(&service, "ui's candidate", |s| s.tasks.iter().any(|t| t.id == "ui" && t.state == TaskState::Verifying));
+        service.handle("task.accept", &json!({"taskId": "ui", "integrate": true})).unwrap();
+        wait_for(&service, "ui integrated", |s| s.tasks.iter().any(|t| t.id == "ui" && t.state == TaskState::Completed));
+        mock.set_behaviour(MockBehaviour::Succeed { file: "logic.txt".into(), content: "v2\n".into() });
+        service.handle("task.reject", &json!({"taskId": "logic", "reason": "write v2"})).unwrap();
+        let snap = wait_for(&service, "logic's retry", |s| s.attempts.iter().filter(|a| a.task_id == "logic").count() == 2 && s.tasks.iter().any(|t| t.id == "logic" && t.state == TaskState::Verifying));
+        let retry = snap.attempts.iter().filter(|a| a.task_id == "logic").max_by(|a, b| a.created_at.cmp(&b.created_at)).unwrap();
+        let diff = service.handle("artifact.read", &json!({"artifactId": retry.candidate.as_ref().unwrap().diff_artifact_id.clone().unwrap()})).unwrap()["text"].as_str().unwrap().to_string();
+        assert!(diff.contains("logic.txt") && !diff.contains("ui.txt"), "the retry's diff is its own change only, nothing of the UI reverted:\n{diff}");
+        assert!(mock.prompts().last().unwrap().contains("already holds the last candidate"));
+    }
+
+    #[test]
+    fn claude_orchestrates_through_mcp_from_quest_to_integration() {
+        let (_home, service, _) = setup(MockBehaviour::Succeed { file: "poison.txt".into(), content: "tick\n".into() });
+        let call = |m: &str, p: Value| service.handle(m, &p).map_err(|e| e.message);
+        let tool = |name: &str, args: Value| {
+            let r = crate::mcp::handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}), &call, &std::thread::sleep).unwrap();
+            (r["result"]["content"][0]["text"].as_str().unwrap_or("").to_string(), r["result"]["isError"] == true)
+        };
+        let (text, failed) = tool("guild_start_quest", json!({"title": "Poison", "tasks": [{"id": "t1", "title": "Poison tick", "instructions": "Write poison.txt", "acceptance": ["poison.txt exists"]}]}));
+        assert!(!failed, "{text}");
+        let quest_id = service.snapshot().unwrap().quests.iter().find(|q| q.title == "Poison").unwrap().id.clone();
+        let (text, _) = tool("guild_wait", json!({"questId": quest_id, "timeoutSeconds": 30}));
+        assert!(text.starts_with("something needs you") && text.contains("candidate ready"), "{text}");
+        let task_id = format!("{}-t1", &quest_id[quest_id.len() - 8..]);
+        let (diff, failed) = tool("guild_diff", json!({"taskId": task_id}));
+        assert!(!failed && diff.contains("poison.txt"), "{diff}");
+        let (text, failed) = tool("guild_decide", json!({"taskId": task_id, "decision": "accept"}));
+        assert!(!failed, "{text}");
+        let snap = wait_for(&service, "integrated", |s| s.tasks.iter().any(|t| t.id == task_id && t.state == TaskState::Completed));
+        assert_eq!(snap.quests.iter().find(|q| q.id == quest_id).unwrap().state, QuestState::Completed);
+        let (text, _) = tool("guild_status", json!({"questId": quest_id}));
+        assert!(text.contains("1/1 done") && text.contains("guild/quest/"), "{text}");
+    }
+
+    #[test]
+    fn the_orchestrator_answers_and_its_plan_starts_a_quest() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        let mock = Arc::new(MockHarness::new(MockBehaviour::Hang));
+        mock.set_orchestrator_reply("Two steps.\n```json\n{\"title\": \"Poison\", \"tasks\": [{\"id\": \"t1\", \"title\": \"Status\", \"role\": \"implementer\"}, {\"id\": \"t2\", \"title\": \"Test\", \"role\": \"nobody-has-this\", \"dependsOn\": [\"t1\"]}]}\n```\n");
+        service.register(mock);
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "kael", "harness": "mock", "roles": ["planner"]})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        assert_eq!(service.snapshot().unwrap().orchestrator.as_deref(), Some("kael"), "the planner orchestrates");
+        service.handle("orchestrator.say", &json!({"text": "Add poison"})).unwrap();
+        assert!(service.handle("orchestrator.say", &json!({"text": "again"})).is_err(), "one message at a time");
+        let snap = wait_for(&service, "the reply", |s| s.conversation.len() == 2);
+        assert_eq!(snap.conversation[0].author, "user");
+        assert_eq!(snap.conversation[1].text, "Two steps.");
+        let quest_id = snap.conversation[1].quest_id.clone().expect("the plan became a quest");
+        let quest = snap.quests.iter().find(|q| q.id == quest_id).unwrap();
+        assert_eq!(quest.state, QuestState::Running);
+        let tasks: Vec<&Task> = snap.tasks.iter().filter(|t| t.quest_id == quest_id).collect();
+        assert_eq!(tasks.len(), 2);
+        let test = tasks.iter().find(|t| t.title == "Test").unwrap();
+        assert_eq!(test.role, "implementer", "a role nobody holds falls back to one somebody does");
+        assert_eq!(test.depends_on.len(), 1);
+        assert!(!snap.orchestrator_busy);
+    }
+
+    #[test]
+    fn removing_a_busy_member_retires_it_and_a_free_one_goes() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Hang);
+        service.handle("member.add", &json!({"id": "bo", "harness": "mock", "roles": ["reviewer"]})).unwrap();
+        service.handle("member.remove", &json!({"memberId": "bo"})).unwrap();
+        assert!(service.snapshot().unwrap().members.iter().all(|m| m.id != "bo"), "a free member is deleted");
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Hangs"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "running", |s| s.attempts.first().map(|a| a.state == AttemptState::Running).unwrap_or(false));
+        let r = service.handle("member.remove", &json!({"memberId": "aria"})).unwrap();
+        assert_eq!(r["retired"], "aria");
+        let snap = wait_for(&service, "cancelled", |s| s.attempts[0].state == AttemptState::Cancelled);
+        assert!(!snap.members.iter().find(|m| m.id == "aria").unwrap().enabled, "kept for its attempt, but out of the dungeon");
+        service.handle("member.remove", &json!({"memberId": "aria"})).unwrap();
+        assert!(service.snapshot().unwrap().members.is_empty());
+    }
+
+    #[test]
     fn interrupting_keeps_the_worktree_as_the_candidate() {
         let (_home, service, quest_id) = setup(MockBehaviour::Hang);
         service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Hangs"})).unwrap();
@@ -2907,7 +3184,7 @@ mod tests {
         let design: crate::design::GameDesign = serde_json::from_value(saved).unwrap();
         let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now() };
         let ws = Workspace { id: "w".into(), attempt_id: "a".into(), project_id: design.project_id.clone(), path: "/tmp/w".into(), branch: "guild/x".into(), base_sha: "0".into(), state: WorkspaceState::Ready, created_at: now(), updated_at: now() };
-        let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design));
+        let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design), &[], false);
         assert!(prompt.contains("Avoid: a dominant strategy; always choosing the longest word; obvious decisions; grinding"));
         assert!(prompt.contains("Loop \"Economy\": earn → spend ↺"));
         assert!(prompt.contains("part, a loop or the whole"));

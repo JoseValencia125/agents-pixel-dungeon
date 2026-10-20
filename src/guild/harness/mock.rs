@@ -30,6 +30,7 @@ struct MockState {
     sessions: Vec<(String, PathBuf, Option<String>)>,
     pending: Vec<(String, String, std::sync::mpsc::Sender<bool>)>,
     interrupted: Vec<String>,
+    prompts: Vec<String>,
     resumed: Vec<String>,
 }
 
@@ -39,6 +40,7 @@ pub struct MockHarness {
     judge_reply: Mutex<Option<String>>,
     /// What the mock answers when the prompt is an analyst's (it lists metrics).
     analysis_reply: Mutex<Option<String>>,
+    orchestrator_reply: Mutex<Option<String>>,
     /// Milliseconds the turn takes, so rooms show working for a moment.
     pub delay_ms: u64,
     state: Arc<Mutex<MockState>>,
@@ -46,13 +48,16 @@ pub struct MockHarness {
 
 impl MockHarness {
     pub fn new(behaviour: MockBehaviour) -> MockHarness {
-        MockHarness { behaviour: Mutex::new(behaviour), judge_reply: Mutex::new(None), analysis_reply: Mutex::new(None), delay_ms: 50, state: Arc::default() }
+        MockHarness { behaviour: Mutex::new(behaviour), judge_reply: Mutex::new(None), analysis_reply: Mutex::new(None), orchestrator_reply: Mutex::new(None), delay_ms: 50, state: Arc::default() }
     }
     pub fn set_behaviour(&self, b: MockBehaviour) { *self.behaviour.lock().unwrap() = b; }
     /// Answer judge prompts with this text (a JSON block naming a winner).
     pub fn set_judge_reply(&self, text: impl Into<String>) { *self.judge_reply.lock().unwrap() = Some(text.into()); }
     pub fn set_analysis_reply(&self, text: impl Into<String>) { *self.analysis_reply.lock().unwrap() = Some(text.into()); }
+    pub fn set_orchestrator_reply(&self, text: impl Into<String>) { *self.orchestrator_reply.lock().unwrap() = Some(text.into()); }
     /// Session ids that were reopened through `resume_session`.
+    /// Every prompt sent, in order.
+    pub fn prompts(&self) -> Vec<String> { self.state.lock().unwrap().prompts.clone() }
     pub fn resumed(&self) -> Vec<String> { self.state.lock().unwrap().resumed.clone() }
 }
 
@@ -101,9 +106,13 @@ impl HarnessAdapter for MockHarness {
     }
 
     fn prompt(&self, session: &SessionRef, request_id: &str, text: &str) -> HarnessResult<TurnHandle> {
+        self.state.lock().unwrap().prompts.push(text.to_string());
         let mut behaviour = self.behaviour.lock().unwrap().clone();
         if text.contains("## Candidates") {
             if let Some(reply) = self.judge_reply.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(reply); }
+        }
+        if text.contains("## Guild conversation") {
+            if let Some(reply) = self.orchestrator_reply.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(reply); }
         }
         if text.contains("## Playtest metrics") {
             if let Some(reply) = self.analysis_reply.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(reply); }
