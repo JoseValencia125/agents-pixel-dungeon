@@ -752,6 +752,20 @@ impl App {
     /// Ask before typing /exit into an agent's chat.
     fn confirm_finish(&mut self, id: &str) {
         let Some(agent) = self.monitor.agents.iter().find(|a| a.id == id).cloned() else { return };
+        // The guild's hall closes the whole guild, which the guild window reopens.
+        if id == guild_view::HALL_ID {
+            let answer = rfd::MessageDialog::new()
+                .set_title(trf("¿Cerrar la guild {}?", &[&agent.project]))
+                .set_description(tr("Sus misiones se pausan, el trabajo en curso se cancela y la sala se va del dungeon. No se borra nada: la reabres desde la ventana de la guild."))
+                .set_level(rfd::MessageLevel::Warning)
+                .set_buttons(rfd::MessageButtons::OkCancelCustom(tr("Cerrar"), tr("Cancelar")))
+                .show();
+            if matches!(&answer, rfd::MessageDialogResult::Ok) || matches!(&answer, rfd::MessageDialogResult::Custom(l) if *l == tr("Cerrar")) {
+                self.guild.command("guild.close", serde_json::json!({}));
+                self.monitor.select(None);
+            }
+            return;
+        }
         // A guild member has no chat to type /exit in: it leaves the guild.
         if let Some(member) = id.strip_prefix(guild_view::ID_PREFIX) {
             let name = self.guild.context(id).map(|c| c.0.name).unwrap_or_else(|| agent.project.clone());

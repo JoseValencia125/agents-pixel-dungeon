@@ -2167,8 +2167,9 @@ impl Scene {
                             ui.close_menu();
                         }
                         let guild_member = id.starts_with(crate::guild_view::ID_PREFIX);
-                        // The hall is the guild itself: its members leave from the studio.
-                        if id != crate::guild_view::HALL_ID && ui.button(tr(if guild_member { "Quitar de la guild" } else { "Finalizar agente (/exit)" })).clicked() {
+                        // The hall is the guild itself: it closes as a whole.
+                        let label = if id == crate::guild_view::HALL_ID { "Cerrar la guild" } else if guild_member { "Quitar de la guild" } else { "Finalizar agente (/exit)" };
+                        if ui.button(tr(label)).clicked() {
                             response.finish = Some(id.clone());
                             ui.close_menu();
                         }

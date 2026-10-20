@@ -295,6 +295,13 @@ fn guild_tab(ui: &mut Ui, studio: &mut Studio, snap: &Snapshot, founding: bool, 
     }
     let project = snap.projects.iter().find(|p| p.id == studio.project_id);
     if let Some(p) = project { ui.label(mono(&p.repo_path, 10.0).color(FAINT)); }
+    // A closed guild: its members are all off until it is reopened.
+    if !snap.members.is_empty() && snap.members.iter().all(|m| !m.enabled) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(mono(&tr("La guild está cerrada."), 10.5).color(FAINT));
+            if small(ui, &tr("Reabrir la guild")) { commands.push(("guild.reopen", json!({}))); }
+        });
+    }
     ui.label(mono(&tr("Miembros"), 10.5).strong());
     let mut remove: Option<String> = None;
     for m in &snap.members {
