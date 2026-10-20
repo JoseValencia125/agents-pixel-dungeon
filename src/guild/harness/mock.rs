@@ -153,7 +153,8 @@ impl HarnessAdapter for MockHarness {
                         state.lock().unwrap().pending.push((session_id.clone(), "perm-1".into(), tx));
                         let _ = ev_tx.send(HarnessEvent::PermissionRequested {
                             request_id: "perm-1".into(),
-                            title: format!("Write {file}"),
+                            // Not routine, so the guild's policy leaves it to the user.
+                            title: format!("mock-install {file}"),
                             detail: "The mock wants to write a file.".into(),
                             options: vec![
                                 PermissionOption { id: "allow".into(), name: "Allow".into(), kind: "allow_once".into() },

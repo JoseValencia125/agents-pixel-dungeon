@@ -1743,6 +1743,14 @@ impl Service {
                 let _ = self.update_attempt(attempt_id, |a| a.pending_permission = Some(request.clone()));
                 let _ = self.move_attempt(attempt_id, AttemptState::WaitingInput, None);
                 self.emit(Event::new("permission.requested", "harness").about_attempt(attempt).with(json!({"requestId": request_id, "title": title, "detail": detail, "options": options})));
+                // Routine work in the worktree is answered at once; only the unusual waits.
+                let verdict = crate::policy::decide(&title);
+                if let Some(option) = crate::policy::option_for(&verdict, &title, &options) {
+                    let by = if verdict == crate::policy::Verdict::Allow { "policy" } else { "policy-refused" };
+                    if let Err(e) = self.permission_respond(&json!({"attemptId": attempt_id, "requestId": request_id, "optionId": option, "by": by})) {
+                        self.log(&format!("attempt {attempt_id}: the policy could not answer {title:?}: {}", e.message));
+                    }
+                }
             }
             HarnessEvent::Raw(_) => {}
         }
@@ -2586,7 +2594,8 @@ impl Service {
             a.updated_at = now();
             store.put_attempt(&a)?;
             let _ = self.move_attempt_locked(&store, attempt_id, AttemptState::Running, None);
-            self.emit_locked(&store, Event::new("permission.resolved", "user").about_attempt(&a).with(json!({"requestId": request_id, "optionId": option})));
+            let by = p_opt(params, "by").unwrap_or_else(|| "user".into());
+            self.emit_locked(&store, Event::new("permission.resolved", if by.starts_with("policy") { "policy" } else { "user" }).about_attempt(&a).with(json!({"requestId": request_id, "optionId": option, "by": by})));
             Ok(())
         })?;
         Ok(json!({"responded": request_id}))

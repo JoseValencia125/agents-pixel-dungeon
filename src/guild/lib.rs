@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod orchestrator;
 pub mod paths;
 pub mod platform;
+pub mod policy;
 pub mod scheduler;
 pub mod service;
 pub mod store;
