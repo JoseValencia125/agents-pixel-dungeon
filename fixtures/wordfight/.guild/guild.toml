@@ -12,6 +12,12 @@ timeout_seconds = 120
 [play]
 argv = ["python3", "wordfight.py", "profile=human", "seed={seed}"]
 
+# How an AI player plays it: the game speaks the agent protocol on its
+# stdio (an observation line out, an {"action": id} line in, per round).
+[ai_play]
+argv = ["python3", "wordfight.py", "profile=agent", "seed={seed}"]
+timeout_seconds = 60
+
 [[verifiers]]
 id = "balance"
 argv = ["python3", "-c", "import json; b=json.load(open('balance.json')); assert 0.5 <= b['length_multiplier'] <= 3 and 0.5 <= b['semantic_multiplier'] <= 3"]

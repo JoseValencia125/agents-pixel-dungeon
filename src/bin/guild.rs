@@ -55,6 +55,14 @@ USAGE
   guild observations <project>       what humans noticed, and the questions it raised
   guild observation promote <project> <OBS-id> [--question T] [--system ID]
   guild signals <project> [--experiment E] [--variant V] [--kind human|synthetic]
+  guild ai-play <project> <member> [--persona player|novice|optimizer|explorer|exploit_hunter|<free text>]
+                [--seed N] [--turns N] [--experiment E --variant V] [--ref REF] [--detach]
+                                     a member plays the build through the game's agent protocol ([ai_play])
+  guild ai-stop <playtest>           stop an AI player between moves
+  guild findings <project>           what the exploit hunter broke, with its replay and status
+  guild finding verify <project> <F-id> [--ref REF]   replay its moves on its build (or REF): reproduced, fixed…
+  guild finding promote <project> <F-id> [--question T] [--system ID]
+  guild finding set <project> <F-id> <unverified|reproduced|not_reproduced|fixed|wont_fix>
   guild records [--project ID] [--task ID]   one row per finished attempt: strategy, member, harness, model, duration, size, verifiers, judge score, winner
   guild start <quest>  |  guild pause <quest>  |  guild resume <quest>  |  guild cancel-quest <quest>
 
@@ -154,7 +162,7 @@ fn parse(args: &[String]) -> Args<'_> {
     Args { positional, flags }
 }
 
-fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground") }
+fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground" | "detach") }
 
 impl Args<'_> {
     fn flag(&self, name: &str) -> Option<&str> { self.flags.iter().rev().find(|(k, _)| *k == name).and_then(|(_, v)| *v) }
@@ -500,6 +508,60 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             if a.pos(0, "subcommand")? != "promote" { return Err(USAGE.into()); }
             let r = call(&ensure_running()?, "observation.promote", json!({"projectId": a.pos(1, "project")?, "observationId": a.pos(2, "observation")?, "question": a.flag("question"), "systemId": a.flag("system")}))?;
             println!("{} → {} · {}", r["observation"]["id"].as_str().unwrap_or(""), r["question"]["id"].as_str().unwrap_or(""), r["question"]["question"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        "ai-play" => {
+            let socket = ensure_running()?;
+            let seed = a.flag("seed").map(|s| s.parse::<u64>().map_err(|_| "--seed takes a number".to_string())).transpose()?;
+            let turns = a.flag("turns").map(|s| s.parse::<u64>().map_err(|_| "--turns takes a number".to_string())).transpose()?;
+            let pt = call(&socket, "ai.play", json!({"projectId": a.pos(0, "project")?, "memberId": a.pos(1, "member")?, "persona": a.flag("persona"), "seed": seed, "maxTurns": turns, "experimentId": a.flag("experiment"), "variantId": a.flag("variant"), "ref": a.flag("ref")}))?;
+            let id = pt["id"].as_str().unwrap_or("").to_string();
+            println!("{} plays {} as {} (seed {}, playtest {id})", pt["player"].as_str().unwrap_or("?"), pt["build_sha"].as_str().map(|s| &s[..s.len().min(8)]).unwrap_or("?"), pt["profile"].as_str().unwrap_or(""), pt["seed"]);
+            if a.has("detach") { return Ok(()); }
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let snap = call(&socket, "guild.snapshot", json!({}))?;
+                let Some(p) = snap["playtests"].as_array().into_iter().flatten().find(|p| p["id"] == id.as_str()) else { continue };
+                if p["status"] == "running" { continue; }
+                println!("{} · {} events · {} moves{}", p["status"].as_str().unwrap_or(""), p["event_count"], p["metrics"]["ai"]["turns"], p["failure"].as_str().map(|f| format!(" · {f}")).unwrap_or_default());
+                if let Some(r) = p["metrics"]["runs"].as_object() { println!("runs: {} completed of {}", r.get("completed").cloned().unwrap_or_default(), r.get("started").cloned().unwrap_or_default()); }
+                if let Some(t) = p["observations"].as_str().filter(|t| !t.is_empty()) { println!("it says: {t}"); }
+                for f in snap["findings"].as_array().into_iter().flatten().filter(|f| f["playtest_id"] == id.as_str()) {
+                    println!("{} [{}] {} · round {} · replay: seed {} moves {}", f["id"].as_str().unwrap_or(""), f["severity"].as_str().unwrap_or(""), f["title"].as_str().unwrap_or(""), f["round"], f["seed"], f["actions"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")).unwrap_or_default());
+                }
+                return Ok(());
+            }
+        }
+        "ai-stop" => {
+            let r = call(&ensure_running()?, "ai.stop", json!({"playtestId": a.pos(0, "playtest")?}))?;
+            println!("{}", if r["stopping"] == true { "stopping after the current move" } else { "it is not playing" });
+            Ok(())
+        }
+        "findings" => {
+            let snap = call(&ensure_running()?, "guild.snapshot", json!({}))?;
+            let project = a.pos(0, "project")?;
+            for f in snap["findings"].as_array().into_iter().flatten().filter(|f| f["project_id"] == project) {
+                println!("{} [{} · {}] {}{}", f["id"].as_str().unwrap_or(""), f["severity"].as_str().unwrap_or(""), f["status"].as_str().unwrap_or(""), f["title"].as_str().unwrap_or(""), f["question_id"].as_str().map(|q| format!(" → {q}")).unwrap_or_default());
+                if let Some(i) = f["impact"].as_str().filter(|i| !i.is_empty()) { println!("    impact: {i}"); }
+                println!("    replay: build {} seed {} moves {}", f["build_sha"].as_str().map(|s| &s[..s.len().min(8)]).unwrap_or("?"), f["seed"], f["actions"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")).unwrap_or_default());
+                if let Some(v) = f["verification"].as_str() { println!("    {v}"); }
+            }
+            Ok(())
+        }
+        "finding" => {
+            let socket = ensure_running()?;
+            let (project, finding) = (a.pos(1, "project")?, a.pos(2, "finding")?);
+            let f = match a.pos(0, "subcommand")? {
+                "verify" => call(&socket, "finding.verify", json!({"projectId": project, "findingId": finding, "ref": a.flag("ref")}))?,
+                "promote" => {
+                    let r = call(&socket, "finding.promote", json!({"projectId": project, "findingId": finding, "question": a.flag("question"), "systemId": a.flag("system")}))?;
+                    println!("{} → {} · {}", finding, r["question"]["id"].as_str().unwrap_or(""), r["question"]["question"].as_str().unwrap_or(""));
+                    return Ok(());
+                }
+                "set" => call(&socket, "finding.set", json!({"projectId": project, "findingId": finding, "status": a.pos(3, "status")?}))?,
+                _ => return Err(USAGE.into()),
+            };
+            println!("{} · {}{}", f["id"].as_str().unwrap_or(""), f["status"].as_str().unwrap_or(""), f["verification"].as_str().map(|v| format!("\n{v}")).unwrap_or_default());
             Ok(())
         }
         "signals" => {

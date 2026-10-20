@@ -1038,6 +1038,9 @@ fn demo_playtests(t: &str) -> Vec<guild::experiment::Playtest> {
     for (i, (v, profile, kind)) in [("control", "greedy", PlaytestKind::Simulation), ("a", "greedy", PlaytestKind::Simulation), ("b", "explorer", PlaytestKind::Simulation), ("control", "human", PlaytestKind::Human), ("b", "human", PlaytestKind::Human)].iter().enumerate() {
         out.push(Playtest { id: format!("pt{i}"), project_id: "verbrawl".into(), experiment_id: Some("e1".into()), variant_id: Some(v.to_string()), kind: *kind, profile: profile.to_string(), status: "finished".into(), event_count: 40, created_at: t.into(), ..Default::default() });
     }
+    out.push(Playtest { id: "pt-ai1".into(), project_id: "verbrawl".into(), kind: PlaytestKind::AiPlayer, profile: "ai:player".into(), seed: Some(12), status: "finished".into(), player: Some("Orin".into()), build_sha: Some("490acd6f00".into()), event_count: 46,
+        metrics: json!({"runs": {"started": 1, "completed": 1}, "ai": {"turns": 6, "fallbacks": 0, "findings": 0}}), observations: tr("Las palabras largas ganaban siempre; solo dudé cuando me quedaban pocas letras raras."), created_at: t.into(), ..Default::default() });
+    out.push(Playtest { id: "pt-ai2".into(), project_id: "verbrawl".into(), kind: PlaytestKind::AiPlayer, profile: "ai:exploit_hunter".into(), seed: Some(7), status: "running".into(), player: Some("Lira".into()), build_sha: Some("490acd6f00".into()), created_at: t.into(), ..Default::default() });
     out.push(Playtest { id: "pt-live".into(), project_id: "verbrawl".into(), kind: PlaytestKind::Human, profile: "human".into(), status: "running".into(), player: Some("nacho".into()), build_sha: Some("490acd6f00".into()), design_version: Some(1), created_at: t.into(), ..Default::default() });
     out
 }
@@ -1048,6 +1051,14 @@ fn demo_observations(t: &str) -> Vec<guild::experiment::Observation> {
         Observation { id: "OBS-001".into(), project_id: "verbrawl".into(), kind: "great_moment".into(), text: tr("Ganar con «ice» sobre un enemigo de hielo se sintió genial"), playtest_id: Some("pt3".into()), run_id: Some("human-12".into()), round: Some(3), created_at: t.into(), ..Default::default() },
         Observation { id: "OBS-002".into(), project_id: "verbrawl".into(), kind: "frustrating".into(), text: tr("Siempre termino eligiendo la palabra más larga"), playtest_id: Some("pt3".into()), run_id: Some("human-12".into()), round: Some(5), question_id: Some("Q-001".into()), created_at: t.into(), ..Default::default() },
         Observation { id: "OBS-003".into(), project_id: "verbrawl".into(), kind: "confusing".into(), text: tr("No entiendo por qué esta palabra hizo tanto daño"), playtest_id: Some("pt-live".into()), run_id: Some("human-31".into()), round: Some(2), created_at: t.into(), ..Default::default() },
+    ]
+}
+
+fn demo_findings(t: &str) -> Vec<guild::aiplay::Finding> {
+    use guild::aiplay::Finding;
+    vec![
+        Finding { id: "F-001".into(), project_id: "verbrawl".into(), title: tr("La palabra más larga siempre gana"), impact: tr("elegir palabra deja de importar"), severity: "high".into(), playtest_id: Some("pt-ai2".into()), member_id: Some("lira".into()), build_sha: Some("490acd6f00".into()), seed: Some(7), actions: vec!["3".into(), "1".into(), "5".into()], event_index: 14, round: Some(3), status: "reproduced".into(), verification: Some("Replayed 3 moves with seed 7 on 490acd6f: the first 14 events match.".into()), created_at: t.into(), ..Default::default() },
+        Finding { id: "F-002".into(), project_id: "verbrawl".into(), title: tr("Las letras raras se recargan gratis cada ronda"), impact: tr("gastar letras raras no cuesta nada"), severity: "medium".into(), playtest_id: Some("pt-ai2".into()), member_id: Some("lira".into()), build_sha: Some("490acd6f00".into()), seed: Some(7), actions: vec!["3".into(), "1".into(), "5".into(), "2".into(), "2".into()], event_index: 22, round: Some(5), status: "unverified".into(), created_at: t.into(), ..Default::default() },
     ]
 }
 
@@ -1102,7 +1113,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         schema_version: SCHEMA_VERSION,
         last_seq: 0,
         service_version: "demo".into(),
-        projects: vec![Project { id: "verbrawl".into(), name: "Verbrawl".into(), repo_path: "~/demo/verbrawl".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=human".into(), "seed={seed}".into()], timeout_seconds: 300 }), created_at: t.clone() }],
+        projects: vec![Project { id: "verbrawl".into(), name: "Verbrawl".into(), repo_path: "~/demo/verbrawl".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=human".into(), "seed={seed}".into()], timeout_seconds: 300 }), ai_play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=agent".into(), "seed={seed}".into()], timeout_seconds: 300 }), created_at: t.clone() }],
         decisions: vec![],
         hypotheses: demo_hypotheses(&t),
         questions: vec![guild::design::DesignQuestion { id: "Q-001".into(), project_id: "verbrawl".into(), question: tr("¿Las palabras largas son demasiado dominantes?"), context: "OBS-002".into(), system_id: Some("combat".into()), status: "open".into(), raised_by: "playtest".into(), source: Some("OBS-002".into()), hypothesis_ids: vec!["h1".into()], experiment_ids: vec!["e1".into()], decision_id: None, answer: String::new(), created_at: t.clone(), resolved_at: None }],
@@ -1110,6 +1121,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         experiments: demo_experiments(&t),
         playtests: demo_playtests(&t),
         observations: demo_observations(&t),
+        findings: demo_findings(&t),
         designs: vec![guild::design::template("verbrawl", "Verbrawl", "videogame")],
         roles: guild::config::role_catalog(),
         quests: vec![Quest { id: "q1".into(), project_id: "verbrawl".into(), title: tr("Efectos de estado"), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some("490acd6".into()), plan_version: 1, created_at: t.clone(), updated_at: t.clone() }],

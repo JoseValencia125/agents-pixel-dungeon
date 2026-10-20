@@ -421,6 +421,8 @@ mod tests {
         let play_needles = [
             tr("▶ Jugar la build actual"), tr("En juego"), tr("Gran momento"), tr("Terminar sesión"), trf("Observaciones ({})", &[&3]),
             "→ Q-001".into(), tr("→ Pregunta"), tr("Observado vs deseado"),
+            tr("Jugadores IA"), tr("▶ Que juegue"), tr("jugando…"), tr("Detener"), trf("{} jugadas", &[&6]), tr("ganó"),
+            trf("Hallazgos ({})", &[&2]), tr("La palabra más larga siempre gana"), tr("reproducido"), tr("sin verificar"), trf("semilla {} · {} jugadas", &[&7, &3]), tr("↻ Reproducir"),
         ];
         for needle in &play_needles {
             assert!(play.contains(needle.as_str()), "play lacks {needle:?}:\n{play}");

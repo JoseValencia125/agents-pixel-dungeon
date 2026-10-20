@@ -21,6 +21,8 @@ pub struct GuildFile {
     pub playtest: Option<PlaytestSection>,
     #[serde(default)]
     pub play: Option<PlaytestSection>,
+    #[serde(default)]
+    pub ai_play: Option<PlaytestSection>,
 }
 
 #[derive(Debug, Deserialize)]
