@@ -422,6 +422,9 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         // Sounds and chat
         ("↑↓ y Enter eligen · esc cancela", ["↑↓ and Enter choose · esc cancels", "↑↓ et Enter choisissent · échap annule", "↑↓ e Enter scelgono · esc annulla", "↑↓ e Enter escolhem · esc cancela"]),
         ("↑↓ y Enter eligen · o responde a {}…", ["↑↓ and Enter choose · or reply to {}…", "↑↓ et Enter choisissent · ou réponds à {}…", "↑↓ e Enter scelgono · o rispondi a {}…", "↑↓ e Enter escolhem · ou responda a {}…"]),
+        ("Quitar de la guild", ["Remove from the guild", "Retirer de la guilde", "Rimuovi dalla gilda", "Remover da guilda"]),
+        ("¿Quitar a {} de la guild?", ["Remove {} from the guild?", "Retirer {} de la guilde ?", "Rimuovere {} dalla gilda?", "Remover {} da guilda?"]),
+        ("Deja de recibir tareas. Si está trabajando, su intento se cancela.", ["They stop getting tasks. If they are working, their attempt is cancelled.", "Ne reçoit plus de tâches. S’il travaille, sa tentative est annulée.", "Non riceve più compiti. Se sta lavorando, il suo tentativo viene annullato.", "Deixa de receber tarefas. Se estiver trabalhando, a tentativa é cancelada."]),
         ("Finalizar agente (/exit)", ["End agent (/exit)", "Terminer l’agent (/exit)", "Termina l’agente (/exit)", "Encerrar agente (/exit)"]),
         ("¿Finalizar {}?", ["End {}?", "Terminer {} ?", "Terminare {}?", "Encerrar {}?"]),
         ("Se escribirá /exit en su chat de Herdr.", ["/exit will be typed into its chat in Herdr.", "/exit sera tapé dans son chat dans Herdr.", "/exit verrà scritto nella sua chat in Herdr.", "/exit será digitado no chat dele no Herdr."]),

@@ -752,6 +752,20 @@ impl App {
     /// Ask before typing /exit into an agent's chat.
     fn confirm_finish(&mut self, id: &str) {
         let Some(agent) = self.monitor.agents.iter().find(|a| a.id == id).cloned() else { return };
+        // A guild member has no chat to type /exit in: it leaves the guild.
+        if let Some(member) = id.strip_prefix(guild_view::ID_PREFIX) {
+            let name = self.guild.context(id).map(|c| c.0.name).unwrap_or_else(|| agent.project.clone());
+            let answer = rfd::MessageDialog::new()
+                .set_title(trf("¿Quitar a {} de la guild?", &[&name]))
+                .set_description(tr("Deja de recibir tareas. Si está trabajando, su intento se cancela."))
+                .set_level(rfd::MessageLevel::Warning)
+                .set_buttons(rfd::MessageButtons::OkCancelCustom(tr("Quitar"), tr("Cancelar")))
+                .show();
+            if matches!(&answer, rfd::MessageDialogResult::Ok) || matches!(&answer, rfd::MessageDialogResult::Custom(l) if *l == tr("Quitar")) {
+                self.guild.command("member.remove", serde_json::json!({"memberId": member}));
+            }
+            return;
+        }
         let answer = rfd::MessageDialog::new()
             .set_title(trf("¿Finalizar {}?", &[&agent.project]))
             .set_description(tr("Se escribirá /exit en su chat de Herdr."))

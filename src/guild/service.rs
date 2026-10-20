@@ -2032,11 +2032,7 @@ impl Service {
                 Ok(json!({"files": files, "ref": ref_name, "sha": sha}))
             }
             "member.add" => self.member_add(params),
-            "member.remove" => {
-                let id = p_str(params, "memberId")?;
-                self.store.lock().unwrap().delete_member(id)?;
-                Ok(json!({"removed": id}))
-            }
+            "member.remove" => self.member_remove(p_str(params, "memberId")?),
             "quest.create" => self.quest_create(params),
             "task.create" => self.task_create(params),
             "quest.start" => self.quest_start(params),
@@ -2156,6 +2152,31 @@ impl Service {
         store.put_member(&m)?;
         self.emit_locked(&store, Event::new("member.updated", "user").with(json!({"memberId": m.id, "harness": m.harness, "model": m.model_id, "roles": m.roles})));
         Ok(serde_json::to_value(m).unwrap())
+    }
+
+    /// Remove a member. One with an attempt still going is retired instead
+    /// (disabled, its attempts cancelled): the attempt's record and its
+    /// review still need the member, and a later remove deletes it.
+    fn member_remove(&self, id: &str) -> ApiResult {
+        let active: Vec<String> = {
+            let store = self.store.lock().unwrap();
+            store.member(id)?.ok_or_else(|| ApiError::not_found(format!("member {id}")))?;
+            store.active_attempts()?.into_iter().filter(|a| a.member_id == id).map(|a| a.id).collect()
+        };
+        if active.is_empty() {
+            let store = self.store.lock().unwrap();
+            store.delete_member(id)?;
+            self.emit_locked(&store, Event::new("member.removed", "user").with(json!({"memberId": id})));
+            return Ok(json!({"removed": id}));
+        }
+        for attempt in &active { let _ = self.attempt_cancel(attempt); }
+        let store = self.store.lock().unwrap();
+        if let Some(mut m) = store.member(id)? {
+            m.enabled = false;
+            store.put_member(&m)?;
+        }
+        self.emit_locked(&store, Event::new("member.updated", "user").with(json!({"memberId": id, "enabled": false})));
+        Ok(json!({"retired": id, "cancelling": active}))
     }
 
     fn design_template(&self, params: &Value) -> ApiResult {
@@ -2824,6 +2845,23 @@ mod tests {
         service.handle("attempt.cancel", &json!({"attemptId": snap.attempts[0].id})).unwrap();
         let snap = wait_for(&service, "cancelled", |s| s.attempts[0].state == AttemptState::Cancelled);
         assert_eq!(snap.tasks.iter().find(|t| t.id == "t1").unwrap().state, TaskState::Blocked);
+    }
+
+    #[test]
+    fn removing_a_busy_member_retires_it_and_a_free_one_goes() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Hang);
+        service.handle("member.add", &json!({"id": "bo", "harness": "mock", "roles": ["reviewer"]})).unwrap();
+        service.handle("member.remove", &json!({"memberId": "bo"})).unwrap();
+        assert!(service.snapshot().unwrap().members.iter().all(|m| m.id != "bo"), "a free member is deleted");
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Hangs"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "running", |s| s.attempts.first().map(|a| a.state == AttemptState::Running).unwrap_or(false));
+        let r = service.handle("member.remove", &json!({"memberId": "aria"})).unwrap();
+        assert_eq!(r["retired"], "aria");
+        let snap = wait_for(&service, "cancelled", |s| s.attempts[0].state == AttemptState::Cancelled);
+        assert!(!snap.members.iter().find(|m| m.id == "aria").unwrap().enabled, "kept for its attempt, but out of the dungeon");
+        service.handle("member.remove", &json!({"memberId": "aria"})).unwrap();
+        assert!(service.snapshot().unwrap().members.is_empty());
     }
 
     #[test]
