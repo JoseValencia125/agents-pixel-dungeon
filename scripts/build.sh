@@ -23,7 +23,19 @@ if [ "$(uname)" = "Darwin" ]; then
   cp "$PROJECT_DIR/Resources/Licenses/"* "$APP_DIR/Contents/Resources/Licenses/"
   cp "$PROJECT_DIR/LICENSE" "$APP_DIR/Contents/Resources/Licenses/APP-MIT.txt"
   cp "$PROJECT_DIR/NOTICE.md" "$APP_DIR/Contents/Resources/Licenses/NOTICE.md"
-  codesign --force --deep --sign - "$APP_DIR"
+  # Sign with a "Developer ID Application" certificate when one is in the
+  # keychain (or CODESIGN_IDENTITY names one), with the hardened runtime
+  # notarization requires; ad-hoc otherwise, for local builds. Nested
+  # binaries first, then the bundle. scripts/notarize.sh staples afterwards.
+  IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"' || true)}"
+  if [ -n "$IDENTITY" ]; then
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP_DIR/Contents/MacOS/agents-pixel-dungeon-guild"
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP_DIR"
+    echo "Signed with: $IDENTITY"
+  else
+    codesign --force --deep --sign - "$APP_DIR"
+    echo "Signed ad-hoc (no Developer ID Application certificate in the keychain)"
+  fi
   echo "Built: $APP_DIR"
 else
   cp "$BIN" "$PROJECT_DIR/build/agents-pixel-dungeon"
