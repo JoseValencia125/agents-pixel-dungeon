@@ -42,6 +42,8 @@ USAGE
   guild questions <project>          open and resolved questions, with their decisions
   guild decision new <project> --decision TEXT [--why TEXT] [--question Q-id]... [--system ID]... [--evidence TEXT]... [--rejected TEXT]...
   guild design <project> system set <id> --name N [--maturity undefined|concept|hypothesis|prototyping|validated|production|revised] [--intent TEXT] [--current TEXT] [--known TEXT]... [--unknown TEXT]...
+                                     [--formula TEXT]... [--knob TEXT]... [--edge TEXT]... [--accept TEXT]... [--depends ID]...
+                                     production needs the current design, edge cases, acceptance criteria and no unknowns
   guild hypothesis new <project> --problem TEXT --hypothesis TEXT [--level whole|loop|part] [--evidence TEXT] [--question Q-id]
                                      [--expected TEXT] [--change TEXT] [--measure TEXT]... [--system NAME]...
   guild experiment new <project> <hypothesis> [--title T] --variant id[:name][:key=value,...]... [--instructions TEXT]
@@ -312,6 +314,9 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                     if let Some(t) = a.flag("current") { system["current"] = json!(t); }
                     if !a.all("known").is_empty() { system["known"] = json!(a.all("known")); }
                     if !a.all("unknown").is_empty() { system["unknown"] = json!(a.all("unknown")); }
+                    for (flag, key) in [("formula", "formulas"), ("knob", "tuning"), ("edge", "edge_cases"), ("accept", "acceptance"), ("depends", "depends_on")] {
+                        if !a.all(flag).is_empty() { system[key] = json!(a.all(flag)); }
+                    }
                     let r = call(&ensure_running()?, "design.system.set", json!({"projectId": project, "system": system}))?;
                     println!("design v{} · {} systems", r["version"], r["systems"].as_array().map(Vec::len).unwrap_or(0));
                 }

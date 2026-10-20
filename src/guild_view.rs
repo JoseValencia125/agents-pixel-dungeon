@@ -1012,7 +1012,7 @@ fn demo_experiments(t: &str) -> Vec<guild::experiment::Experiment> {
     vec![Experiment { id: "e1".into(), project_id: "verbrawl".into(), hypothesis_id: "h1".into(), title: tr("Bono semántico"), status: ExperimentStatus::Decided, quest_id: None,
         variants: vec![variant("control", "control", 1.35, 1.2), variant("a", "semantic 1.6", 1.35, 1.6), variant("b", "flat length", 1.0, 1.6)],
         plan: PlaytestPlan { profiles: vec!["greedy".into(), "explorer".into()], runs_per_profile: 2, seeds: vec![] }, analysis_task_id: None,
-        result: Some(ExperimentResult { verdict: "supports".into(), evidence: vec![tr("explorer completa más runs en a y b"), tr("en b la palabra más larga deja de ganar siempre")], unexpected: vec![tr("greedy pierde la mitad de sus runs en b")], recommended_variant: Some("a".into()), recommended_next: tr("probar semantic 1.8 con length 1.2"), confidence: Some(0.6), analyst_attempt_id: None, metrics, created_at: t.into() }),
+        result: Some(ExperimentResult { verdict: "supports".into(), inputs: vec![], evidence: vec![tr("explorer completa más runs en a y b"), tr("en b la palabra más larga deja de ganar siempre")], unexpected: vec![tr("greedy pierde la mitad de sus runs en b")], recommended_variant: Some("a".into()), recommended_next: tr("probar semantic 1.8 con length 1.2"), confidence: Some(0.6), analyst_attempt_id: None, metrics, created_at: t.into() }),
         decision: None, failure: None, created_at: t.into(), updated_at: t.into() }]
 }
 
@@ -1085,7 +1085,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
     ], asked_at: t.clone() });
     let mut a4 = attempt("a4", "t4", "lira", HarnessId::named("claude"), "claude-opus-5.5", AttemptState::Submitted);
     a4.candidate = Some(Candidate { base_sha: "490acd6".into(), head_sha: "dcdbee6".into(), tree_sha: "e3b0c44".into(), files_changed: 3, insertions: 48, deletions: 6, diff_artifact_id: Some("art-demo".into()) });
-    a4.verifier_results = vec![VerifierResult { id: "unit".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1840, log_artifact_id: None, tail: "12 passed".into() }];
+    a4.verifier_results = vec![VerifierResult { id: "unit".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1840, log_artifact_id: None, tail: "12 passed".into(), evidence: vec![] }];
     a4.summary = tr("Fixtures y pruebas del contrato listos");
     if tick % 2 == 1 {
         // The user answered the demo's permission: Orin works again.

@@ -382,6 +382,10 @@ pub struct VerifierResult {
     pub log_artifact_id: Option<String>,
     /// The last lines of its output, for the inspector.
     pub tail: String,
+    /// Images the verifier left in `GUILD_EVIDENCE` (captures of the running
+    /// game), kept as artifacts: absolute paths, for whoever reviews.
+    #[serde(default)]
+    pub evidence: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

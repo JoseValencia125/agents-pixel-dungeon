@@ -8,7 +8,7 @@
 use crate::guild_studio::{area, cycle, field, mono, primary, small, FAINT, INK, PAPER_DARK, RUST};
 use crate::l10n::{tr, trf};
 use egui::{vec2, Color32, CornerRadius, Frame, Margin, Stroke, Ui};
-use guild::design::{Concept, DesignQuestion, Experience, GameLoop, GameSystem, LivingGameDesign, Maturity, Part, Style};
+use guild::design::{Concept, DesignQuestion, Experience, GameLoop, GameSystem, LivingGameDesign, Maturity, Part, Pillar, Style};
 use guild::domain::Snapshot;
 use serde_json::{json, Value};
 
@@ -35,6 +35,11 @@ pub struct SystemDraft {
     pub decisions: Vec<String>,
     pub experiments: Vec<String>,
     pub assets: Vec<String>,
+    pub formulas: String,
+    pub tuning: String,
+    pub edge_cases: String,
+    pub acceptance: String,
+    pub depends_on: String,
 }
 
 #[derive(Clone, Default)]
@@ -45,6 +50,9 @@ pub struct Draft {
     pub genre: String,
     pub audience: String,
     pub usps: String,
+    /// One per line: `name | statement | design test`.
+    pub pillars: String,
+    pub anti_pillars: String,
     pub world_fiction: String,
     pub monetization: String,
     pub platform_scope: String,
@@ -77,13 +85,15 @@ impl Draft {
         Draft {
             title: d.title.clone(), status: d.status.clone(),
             statement: d.concept.statement.clone(), genre: d.concept.genre.clone(), audience: d.concept.audience.clone(), usps: d.concept.usps.join("\n"),
+            pillars: d.pillars.iter().map(|p| [p.name.trim(), p.statement.trim(), p.design_test.trim()].join(" | ").trim_end_matches([' ', '|']).to_string()).collect::<Vec<_>>().join("\n"),
+            anti_pillars: d.anti_pillars.join("\n"),
             world_fiction: d.concept.world_fiction.clone(), monetization: d.concept.monetization.clone(), platform_scope: d.concept.platform_scope.clone(), competition: d.concept.competition.clone(),
             fantasy: d.experience.fantasy.clone(), pov: d.experience.pov.clone(), feel: d.experience.player_should_feel.join("\n"), behaviors: d.experience.desired_behaviors.join("\n"),
             avoid: d.experience.avoid.join("\n"), key_moments: d.experience.key_moments.join("\n"), engagement: d.experience.engagement.clone(),
             visual: d.style.visual.clone(), audio: d.style.audio.clone(), references: d.style.references.join("\n"),
             objectives: d.objectives.clone(), interactivity: d.interactivity.clone(),
             loops: d.loops.iter().map(|l| LoopDraft { id: l.id.clone(), name: l.name.clone(), steps: l.steps.join("\n"), inputs: l.inputs.join("\n"), outputs: l.outputs.join("\n"), feedback: l.feedback.clone(), failure: l.failure.clone() }).collect(),
-            systems: d.systems.iter().map(|s| SystemDraft { id: s.id.clone(), name: s.name.clone(), maturity: s.maturity, intent: s.intent.clone(), known: s.known.join("\n"), unknown: s.unknown.join("\n"), current: s.current.clone(), player_facing: s.player_facing, implementation: s.implementation.join("\n"), loops: s.loops.join(", "), parts: s.parts.join(", "), questions: s.questions.clone(), decisions: s.decisions.clone(), experiments: s.experiments.clone(), assets: s.assets.clone() }).collect(),
+            systems: d.systems.iter().map(|s| SystemDraft { id: s.id.clone(), name: s.name.clone(), maturity: s.maturity, intent: s.intent.clone(), known: s.known.join("\n"), unknown: s.unknown.join("\n"), current: s.current.clone(), player_facing: s.player_facing, implementation: s.implementation.join("\n"), loops: s.loops.join(", "), parts: s.parts.join(", "), questions: s.questions.clone(), decisions: s.decisions.clone(), experiments: s.experiments.clone(), assets: s.assets.clone(), formulas: s.formulas.join("\n"), tuning: s.tuning.join("\n"), edge_cases: s.edge_cases.join("\n"), acceptance: s.acceptance.join("\n"), depends_on: s.depends_on.join(", ") }).collect(),
             parts: d.parts.iter().map(|p| PartDraft { id: p.id.clone(), name: p.name.clone(), attributes: p.attributes.join("\n"), rules: p.rules.join("\n") }).collect(),
             concept_maturity: d.concept_maturity, experience_maturity: d.experience_maturity, loops_maturity: d.loops_maturity,
             sections: d.sections.clone(),
@@ -97,11 +107,16 @@ impl Draft {
             title: self.title.trim().into(),
             status: self.status.trim().into(),
             concept: Concept { statement: self.statement.trim().into(), genre: self.genre.trim().into(), audience: self.audience.trim().into(), usps: lines(&self.usps), world_fiction: self.world_fiction.trim().into(), monetization: self.monetization.trim().into(), platform_scope: self.platform_scope.trim().into(), competition: self.competition.trim().into() },
+            pillars: lines(&self.pillars).into_iter().map(|l| {
+                let mut f = l.splitn(3, '|').map(|x| x.trim().to_string());
+                Pillar { name: f.next().unwrap_or_default(), statement: f.next().unwrap_or_default(), design_test: f.next().unwrap_or_default() }
+            }).collect(),
+            anti_pillars: lines(&self.anti_pillars),
             experience: Experience { fantasy: self.fantasy.trim().into(), pov: self.pov.trim().into(), player_should_feel: lines(&self.feel), desired_behaviors: lines(&self.behaviors), avoid: lines(&self.avoid), key_moments: lines(&self.key_moments), engagement: self.engagement.trim().into() },
             style: Style { visual: self.visual.trim().into(), audio: self.audio.trim().into(), references: lines(&self.references) },
             loops: self.loops.iter().filter(|l| !l.name.trim().is_empty() || !l.steps.trim().is_empty()).map(|l| GameLoop { id: l.id.clone(), name: l.name.trim().into(), steps: lines(&l.steps), inputs: lines(&l.inputs), outputs: lines(&l.outputs), feedback: l.feedback.trim().into(), failure: l.failure.trim().into(), notes: String::new() }).collect(),
             objectives: self.objectives.trim().into(),
-            systems: self.systems.iter().filter(|s| !s.name.trim().is_empty()).map(|s| GameSystem { id: if s.id.trim().is_empty() { slug(&s.name) } else { s.id.clone() }, name: s.name.trim().into(), maturity: s.maturity, intent: s.intent.trim().into(), known: lines(&s.known), unknown: lines(&s.unknown), current: s.current.trim().into(), player_facing: s.player_facing, loops: csv(&s.loops), parts: csv(&s.parts), implementation: lines(&s.implementation), assets: s.assets.clone(), questions: s.questions.clone(), decisions: s.decisions.clone(), experiments: s.experiments.clone() }).collect(),
+            systems: self.systems.iter().filter(|s| !s.name.trim().is_empty()).map(|s| GameSystem { id: if s.id.trim().is_empty() { slug(&s.name) } else { s.id.clone() }, name: s.name.trim().into(), maturity: s.maturity, intent: s.intent.trim().into(), known: lines(&s.known), unknown: lines(&s.unknown), current: s.current.trim().into(), player_facing: s.player_facing, loops: csv(&s.loops), parts: csv(&s.parts), implementation: lines(&s.implementation), assets: s.assets.clone(), questions: s.questions.clone(), decisions: s.decisions.clone(), experiments: s.experiments.clone(), formulas: lines(&s.formulas), tuning: lines(&s.tuning), edge_cases: lines(&s.edge_cases), acceptance: lines(&s.acceptance), depends_on: csv(&s.depends_on) }).collect(),
             interactivity: self.interactivity.trim().into(),
             parts: self.parts.iter().filter(|p| !p.name.trim().is_empty()).map(|p| Part { id: p.id.clone(), name: p.name.trim().into(), attributes: lines(&p.attributes), rules: lines(&p.rules), notes: String::new() }).collect(),
             sections: self.sections.clone(),
@@ -110,6 +125,11 @@ impl Draft {
             updated_at: String::new(),
         }
     }
+}
+
+/// The Spanish source text of a production gap, for `tr`.
+fn gap_es(gap: &str) -> &'static str {
+    match gap { "the current design" => "el diseño actual", "edge cases" => "casos borde", "acceptance criteria" => "criterios de aceptación", _ => "ninguna incógnita abierta" }
 }
 
 fn slug(s: &str) -> String { s.trim().to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect() }
@@ -229,6 +249,8 @@ pub fn concept_tab(ui: &mut Ui, draft: &mut Draft, dirty: &mut bool) {
     *dirty |= field(ui, &tr("Género"), &mut draft.genre, f32::INFINITY);
     *dirty |= area(ui, &tr("Audiencia: motivaciones, edad, clasificación"), &mut draft.audience, 2);
     *dirty |= area(ui, &tr("Puntos de venta únicos (uno por línea): por qué destaca entre todos los demás"), &mut draft.usps, 3);
+    *dirty |= area(ui, &tr("Pilares, del más importante al menos (uno por línea: nombre | afirmación | prueba de diseño)"), &mut draft.pillars, 3);
+    *dirty |= area(ui, &tr("Anti-pilares: lo que el juego no es (uno por línea)"), &mut draft.anti_pillars, 2);
     *dirty |= area(ui, &tr("Ficción del mundo, como la ve el jugador"), &mut draft.world_fiction, 2);
     *dirty |= area(ui, &tr("Monetización"), &mut draft.monetization, 1);
     *dirty |= area(ui, &tr("Plataforma, tecnología y alcance: equipo, tiempo, riesgos"), &mut draft.platform_scope, 2);
@@ -320,7 +342,25 @@ pub fn systems_tab(ui: &mut Ui, draft: &mut Draft, state: &mut ChamberState, sna
                 *dirty |= area(ui, &tr("Sabido (uno por línea)"), &mut s.known, 3);
                 *dirty |= area(ui, &tr("Desconocido (uno por línea): cada uno debería ser una pregunta"), &mut s.unknown, 3);
             }
+            if ui.available_width() > 420.0 {
+                ui.columns(2, |cols| {
+                    *dirty |= area(&mut cols[0], &tr("Fórmulas, con variables y rangos (una por línea)"), &mut s.formulas, 2);
+                    *dirty |= area(&mut cols[1], &tr("Perillas: nombre: valor (rango seguro) — qué cambia"), &mut s.tuning, 2);
+                });
+                ui.columns(2, |cols| {
+                    *dirty |= area(&mut cols[0], &tr("Casos borde: el cero, el tope, dos eventos a la vez"), &mut s.edge_cases, 2);
+                    *dirty |= area(&mut cols[1], &tr("Criterios de aceptación verificables (nunca «se siente bien»)"), &mut s.acceptance, 2);
+                });
+            } else {
+                *dirty |= area(ui, &tr("Fórmulas, con variables y rangos (una por línea)"), &mut s.formulas, 2);
+                *dirty |= area(ui, &tr("Perillas: nombre: valor (rango seguro) — qué cambia"), &mut s.tuning, 2);
+                *dirty |= area(ui, &tr("Casos borde: el cero, el tope, dos eventos a la vez"), &mut s.edge_cases, 2);
+                *dirty |= area(ui, &tr("Criterios de aceptación verificables (nunca «se siente bien»)"), &mut s.acceptance, 2);
+            }
+            let gaps = guild::design::production_gaps(&GameSystem { current: s.current.clone(), unknown: lines(&s.unknown), edge_cases: lines(&s.edge_cases), acceptance: lines(&s.acceptance), ..Default::default() });
+            if !gaps.is_empty() { ui.label(mono(&trf("Para producción le falta: {}", &[&gaps.iter().map(|g| tr(gap_es(g))).collect::<Vec<_>>().join(", ")]), 10.0).color(FAINT)); }
             ui.horizontal_wrapped(|ui| {
+                *dirty |= field(ui, &tr("Depende de"), &mut s.depends_on, 140.0);
                 *dirty |= ui.checkbox(&mut s.player_facing, mono(&tr("el jugador lo toca"), 10.0)).changed();
                 *dirty |= field(ui, &tr("Loops"), &mut s.loops, 120.0);
                 *dirty |= field(ui, &tr("Objetos"), &mut s.parts, 120.0);
@@ -696,7 +736,7 @@ fn findings_list(ui: &mut Ui, snap: &Snapshot, project_id: &str, commands: &mut 
 
 fn hypothesis_label(h: guild::experiment::HypothesisStatus) -> String {
     use guild::experiment::HypothesisStatus::*;
-    tr(match h { Proposed => "propuesta", Experimenting => "en experimento", Supported => "respaldada", Rejected => "rechazada", Inconclusive => "no concluyente" })
+    tr(match h { Proposed => "propuesta", Experimenting => "en experimento", Supported => "respaldada", Rejected => "rechazada", Inconclusive => "no concluyente", NotAssessed => "sin evaluar" })
 }
 
 fn experiment_label(e: guild::experiment::ExperimentStatus) -> String {
@@ -903,4 +943,26 @@ fn decision_card(ui: &mut Ui, state: &mut ChamberState, snap: &Snapshot, project
 #[allow(dead_code)]
 fn chip(ui: &mut Ui, text: &str) {
     Frame::new().stroke(Stroke::new(1.0_f32, RUST)).corner_radius(CornerRadius::same(3)).inner_margin(Margin::symmetric(4, 1)).show(ui, |ui| { ui.label(mono(text, 9.5)); });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saving_from_the_chamber_keeps_pillars_and_the_precise_fields_of_a_system() {
+        let mut d = guild::design::template("p", "Juego", "videogame");
+        d.pillars = vec![Pillar { name: "Words over reflexes".into(), statement: "you win by choosing".into(), design_test: "can a slow player win?".into() }, Pillar { name: "Short runs".into(), ..Default::default() }];
+        d.anti_pillars = vec!["a typing game".into()];
+        let s = &mut d.systems[0];
+        s.formulas = vec!["power = sum(letter power) × length_multiplier^(len−3)".into()];
+        s.tuning = vec!["length_multiplier: 1.2 (1.0–1.5) — how much length pays".into()];
+        s.edge_cases = vec!["an empty rare pool".into()];
+        s.acceptance = vec!["a matched 3-letter word beats an unmatched 6-letter word".into()];
+        s.depends_on = vec!["economy".into(), "progression".into()];
+        let back = Draft::from_design(&d).to_design("p");
+        assert_eq!(back.pillars, d.pillars);
+        assert_eq!(back.anti_pillars, d.anti_pillars);
+        assert_eq!(back.systems[0], d.systems[0]);
+    }
 }

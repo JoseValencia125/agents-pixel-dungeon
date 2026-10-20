@@ -866,7 +866,12 @@ impl Service {
         s.push_str(&format!("\n## Playtest plan\nprofiles: {} · runs per profile: {}\n", e.plan.profiles.join(", "), e.plan.runs_per_profile));
         s.push_str("\n## Playtest metrics\nPer variant and player profile: counts of events, means of numeric fields (as event.field), runs started/completed, and the distribution of choices (`top` is the most taken choice and `top_share` its share: a dominant strategy shows as a high top_share).\n```json\n");
         let mut text = serde_json::to_string_pretty(&metrics).unwrap_or_default();
-        if text.len() > 40_000 { text.truncate(40_000); text.push_str("\n… (truncated)"); }
+        if text.len() > 40_000 {
+            let mut end = 40_000;
+            while !text.is_char_boundary(end) { end -= 1; }
+            text.truncate(end);
+            text.push_str("\n… (truncated)");
+        }
         s.push_str(&text);
         s.push_str("\n```\n\nCompare the variants against the hypothesis and the intended experience and answer with the JSON block only. Use the variant ids given above in recommended_variant.\n");
         Ok(s)
@@ -914,7 +919,7 @@ impl Service {
             e.updated_at = now();
             store.put_experiment(&e)?;
             if let Some(mut h) = store.hypothesis(&e.hypothesis_id)? {
-                h.status = match result.verdict.as_str() { "supports" => HypothesisStatus::Supported, "rejects" => HypothesisStatus::Rejected, _ => HypothesisStatus::Inconclusive };
+                h.status = match result.verdict.as_str() { "supports" => HypothesisStatus::Supported, "rejects" => HypothesisStatus::Rejected, "not_assessed" => HypothesisStatus::NotAssessed, _ => HypothesisStatus::Inconclusive };
                 h.updated_at = now();
                 store.put_hypothesis(&h)?;
             }
@@ -1587,6 +1592,10 @@ impl Service {
         let project_id = p_str(params, "projectId")?;
         let sys: crate::design::GameSystem = serde_json::from_value(params.get("system").cloned().ok_or_else(|| ApiError::invalid("missing system"))?).map_err(|e| ApiError::invalid(format!("system: {e}")))?;
         if sys.id.trim().is_empty() || sys.name.trim().is_empty() { return Err(ApiError::invalid("a system needs an id and a name")); }
+        if sys.maturity == crate::design::Maturity::Production {
+            let gaps = crate::design::production_gaps(&sys);
+            if !gaps.is_empty() { return Err(ApiError::invalid(format!("system {} cannot be production without {}", sys.name, gaps.join(", ")))); }
+        }
         let store = self.store.lock().unwrap();
         let mut d = store.design(project_id)?.ok_or_else(|| ApiError::not_found("the project has no design yet"))?;
         match d.systems.iter_mut().find(|s| s.id == sys.id) { Some(existing) => *existing = sys.clone(), None => d.systems.push(sys.clone()) }
@@ -1682,6 +1691,11 @@ impl Service {
             let c = a.candidate.as_ref();
             let verifiers: Vec<String> = a.verifier_results.iter().map(|v| format!("{} {}", v.id, v.status)).collect();
             s.push_str(&format!("\n### Candidate {label}\nfiles changed: {} · +{} −{} · verifiers: {}\n", c.map(|c| c.files_changed).unwrap_or(0), c.map(|c| c.insertions).unwrap_or(0), c.map(|c| c.deletions).unwrap_or(0), if verifiers.is_empty() { "none".to_string() } else { verifiers.join(", ") }));
+            let evidence: Vec<&String> = a.verifier_results.iter().flat_map(|v| v.evidence.iter()).collect();
+            if !evidence.is_empty() {
+                s.push_str("captures of the running game (open them; what the player sees is judged from these, not from the diff):\n");
+                for e in evidence { s.push_str(&format!("- {e}\n")); }
+            }
             let mut d: String = diff.chars().take(14_000).collect();
             if diff.chars().count() > 14_000 { d.push_str("\n… (diff truncated)"); }
             s.push_str("```diff\n");
@@ -2217,18 +2231,41 @@ impl Service {
         for v in &project.verifiers {
             self.emit(Event::new("verifier.started", "verifier").about_attempt(attempt).with(json!({"verifierId": v.id, "argv": v.argv})));
             let started = Instant::now();
-            let (status, code, output) = match workspaces::run_with_timeout(Path::new(&workspace.path), &v.argv, v.timeout_seconds) {
+            // A fresh folder for what the verifier wants seen, not only read:
+            // captures of the running game. Images left there become evidence.
+            let evidence_dir = crate::paths::artifacts_dir().join(attempt_id).join(format!("evidence-{}-{}", v.id, new_id()));
+            let _ = std::fs::create_dir_all(&evidence_dir);
+            let env = vec![("GUILD_EVIDENCE".to_string(), evidence_dir.display().to_string())];
+            let (status, code, output) = match workspaces::run_with_timeout_env(Path::new(&workspace.path), &v.argv, v.timeout_seconds, &env) {
                 Ok((0, out)) => ("passed", Some(0), out),
                 Ok((code, out)) => ("failed", Some(code), out),
                 Err(e) => ("error", None, e),
             };
             let artifact = self.write_artifact(Some(attempt_id), &format!("verifier-{}", v.id), output.as_bytes()).ok();
             let tail: String = output.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-            let result = VerifierResult { id: v.id.clone(), required: v.required, status: status.into(), exit_code: code, duration_ms: started.elapsed().as_millis() as u64, log_artifact_id: artifact.map(|a| a.id), tail };
+            let evidence = self.keep_evidence(attempt_id, &evidence_dir);
+            let result = VerifierResult { id: v.id.clone(), required: v.required, status: status.into(), exit_code: code, duration_ms: started.elapsed().as_millis() as u64, log_artifact_id: artifact.map(|a| a.id), tail, evidence };
             self.emit(Event::new("verifier.finished", "verifier").about_attempt(attempt).with(json!({"verifierId": v.id, "status": status, "exitCode": code, "durationMs": result.duration_ms, "logArtifactId": result.log_artifact_id})));
             results.push(result);
         }
         results
+    }
+
+    /// The images a verifier left in its evidence folder, registered as
+    /// artifacts where they are (sorted by name); the folder goes when empty.
+    fn keep_evidence(&self, attempt_id: &str, dir: &Path) -> Vec<String> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir).map(|r| r.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        files.retain(|p| p.is_file() && p.extension().and_then(|e| e.to_str()).map(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp")).unwrap_or(false));
+        files.sort();
+        let mut kept = vec![];
+        for path in files {
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("evidence").to_string();
+            let artifact = Artifact { id: new_id(), attempt_id: Some(attempt_id.into()), kind: format!("evidence:{name}"), path: path.display().to_string(), sha256: format!("{:x}", sha2::Sha256::digest(&bytes)), size_bytes: bytes.len() as u64, created_at: now() };
+            if self.store.lock().unwrap().put_artifact(&artifact).is_ok() { kept.push(artifact.path); }
+        }
+        if kept.is_empty() { let _ = std::fs::remove_dir_all(dir); }
+        kept
     }
 
     /// After a restart: attempts the store thinks are active have no
@@ -2737,6 +2774,7 @@ impl Service {
         d.updated_at = now();
         for (i, l) in d.loops.iter_mut().enumerate() { if l.id.trim().is_empty() { l.id = format!("loop-{}", i + 1); } }
         for (i, p) in d.parts.iter_mut().enumerate() { if p.id.trim().is_empty() { p.id = format!("part-{}", i + 1); } }
+        crate::design::check_production(&d).map_err(ApiError::invalid)?;
         store.put_design(&d)?;
         self.emit_locked(&store, Event::new("design.updated", "user").with(json!({"projectId": id, "version": d.version, "loops": d.loops.len(), "parts": d.parts.len()})));
         Ok(serde_json::to_value(d).unwrap())
@@ -3351,6 +3389,36 @@ mod tests {
     }
 
     #[test]
+    fn captures_a_verifier_leaves_become_evidence_for_the_judge_and_the_orchestrator() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        // The verifier captures "the running game" into the folder the guild hands it.
+        let capture = "import os; open(os.path.join(os.environ['GUILD_EVIDENCE'], 'menu.png'), 'wb').write(b'png'); open(os.path.join(os.environ['GUILD_EVIDENCE'], 'notes.txt'), 'w').write('not an image')";
+        std::fs::create_dir_all(repo.join(".guild")).unwrap();
+        std::fs::write(repo.join(".guild/guild.toml"), format!("[[verifiers]]\nid = \"captures\"\nargv = [\"{PYTHON}\", \"-c\", \"{capture}\"]\nrequired = false\n")).unwrap();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), cancel_timeout: Duration::from_millis(500), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        service.register(Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "hello.txt".into(), content: "hi\n".into() })));
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"], "model": "mock-fast"})).unwrap();
+        let quest = service.handle("quest.create", &json!({"projectId": "p", "title": "Menu"})).unwrap();
+        service.handle("task.create", &json!({"questId": quest["id"], "id": "t1", "title": "Draw the menu"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest["id"]})).unwrap();
+        let snap = wait_for(&service, "verified", |s| s.attempts.first().map(|a| !a.verifier_results.is_empty()).unwrap_or(false));
+        let v = &snap.attempts[0].verifier_results[0];
+        assert_eq!(v.status, "passed", "{}", v.tail);
+        // Only the image is evidence, it is kept on disk, and the store knows it.
+        assert_eq!(v.evidence.len(), 1, "{:?}", v.evidence);
+        assert!(v.evidence[0].ends_with("menu.png") && Path::new(&v.evidence[0]).exists());
+        let kinds: Vec<String> = service.store.lock().unwrap().artifacts_of_attempt(&snap.attempts[0].id).unwrap().into_iter().map(|a| a.kind).collect();
+        assert!(kinds.contains(&"evidence:menu.png".to_string()), "{kinds:?}");
+        // A verifier that leaves nothing leaves no empty folder behind.
+        let dirs: Vec<_> = std::fs::read_dir(crate::paths::artifacts_dir().join(&snap.attempts[0].id)).unwrap().flatten().filter(|e| e.path().is_dir()).collect();
+        assert_eq!(dirs.len(), 1);
+    }
+
+    #[test]
     fn a_failed_turn_retries_once_then_fails_the_task() {
         let (_home, service, quest_id) = setup(MockBehaviour::Fail("boom".into()));
         service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Doomed", "maxAttempts": 2})).unwrap();
@@ -3762,7 +3830,7 @@ mod tests {
             id: id.clone(), task_id: task.id.clone(), task_version: task.version, quest_id: quest.id.clone(), project_id: project.id.clone(), member_id: member.into(),
             harness: HarnessId::named("mock"), model_requested: Some("mock-fast".into()), model_effective: Some("mock-fast".into()), kind: AttemptKind::Work, state, workspace_id: Some(ws.id.clone()),
             session_id, generation, candidate, summary: String::new(), action: None, pending_permission: None, failure: None,
-            verifier_results: if verified { vec![VerifierResult { id: "v".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1, log_artifact_id: None, tail: String::new() }] } else { vec![] },
+            verifier_results: if verified { vec![VerifierResult { id: "v".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1, log_artifact_id: None, tail: String::new(), evidence: vec![] }] } else { vec![] },
             turns: 1, resumed: 0, started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
         };
         store.put_attempt(&attempt).unwrap();
