@@ -486,6 +486,20 @@ pub struct Room {
     pub beside: bool,
     /// The state the band shows when it is not the hero's room.
     band: Option<RoomStyle>,
+    /// A training hall (the guild): its crew, walking between stations.
+    training: bool,
+    crew: Vec<Trainee>,
+}
+
+/// One of a training hall's crew, in the hall's art pixels.
+struct Trainee {
+    name: String,
+    harness: &'static str,
+    status: String,
+    action: String,
+    pos: Pos2,
+    target: Pos2,
+    facing: f32,
 }
 
 impl Room {
@@ -537,6 +551,8 @@ impl Room {
             annex: None,
             beside: false,
             band: None,
+            training: false,
+            crew: vec![],
         };
         room.update(agent, false);
         room
@@ -619,6 +635,11 @@ impl Room {
             self.subagent_actions = agent.subagent_actions.clone();
             self.subagent_harnesses = agent.subagent_harnesses.clone();
             self.set_party();
+        }
+        self.training = !agent.crew.is_empty();
+        if self.training {
+            self.band = Some(style_for(&agent.status));
+            self.set_crew(&agent.crew);
         }
         match (&agent.annex, &mut self.annex) {
             (Some(other), Some(annex)) => annex.update(other, animated),
@@ -890,6 +911,11 @@ impl Room {
     pub fn advance(&mut self, dt: f32) {
         if dt <= 0.0 { return; }
         if let Some(annex) = &mut self.annex { annex.size = self.size; annex.advance(dt); }
+        for t in &mut self.crew {
+            let d = t.target - t.pos;
+            let dist = d.length();
+            if dist > 0.3 { let step = (34.0 * dt).min(dist); t.pos += d / dist * step; if d.x.abs() > 0.5 { t.facing = d.x.signum(); } } else { t.pos = t.target; }
+        }
         self.clock += dt;
         self.frame_clock += dt;
         if !self.in_transition { self.routine_clock += dt; }
@@ -1247,6 +1273,7 @@ impl Room {
     /// The whole room: its art, and the band around it (the repo's header,
     /// the footer). A double room draws both halves' art in one frame.
     pub fn draw(&self, painter: &Painter, origin: Pos2, assets: &Assets, selected: bool) {
+        if self.training { return self.draw_training(painter, origin, assets, selected); }
         let trim = |f: Rect, (l, r, b): (f32, f32, f32)| Rect::from_min_max(pos2(f.min.x + l, f.min.y), pos2(f.max.x - r, f.max.y - b));
         let (mine, theirs) = if self.annex.is_some() { self.trims() } else { ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)) };
         let mut art = trim(self.drawn_frame().translate(origin.to_vec2()), mine);
@@ -1258,6 +1285,114 @@ impl Room {
         painter.rect_filled(cell, CornerRadius::same(6), Color32::from_rgb(18, 15, 23));
         self.draw_art(painter, origin, assets, trim(self.drawn_frame().translate(origin.to_vec2()), mine));
         if let (Some(annex), Some(clip)) = (&self.annex, annex_art) { annex.draw_art(painter, other, assets, clip); }
+        self.draw_band(painter, origin, art, selected);
+    }
+
+    /// Where a training hall's stations are, in its art (272 × 100 px), by
+    /// what a member does: the dummies on the mat for working, the scroll
+    /// shelf for reading, the desks for planning and typing, the potion
+    /// table for checks, the bench when free, the quest board when it asks
+    /// for something, the trophy when it is done, the door before it starts.
+    fn stations(status: &str, action: &str) -> &'static [(f32, f32, f32)] {
+        match (status, action) {
+            ("blocked", _) => &[(128.0, 34.0, 1.0), (146.0, 34.0, -1.0), (110.0, 34.0, 1.0)],
+            ("done", _) => &[(82.0, 80.0, -1.0), (56.0, 76.0, 1.0)],
+            ("limited", _) | ("idle", _) => &[(26.0, 75.0, 1.0), (38.0, 75.0, 1.0), (50.0, 75.0, -1.0)],
+            ("unknown", _) => &[(136.0, 88.0, 1.0), (124.0, 88.0, 1.0)],
+            (_, "read") => &[(220.0, 31.0, 1.0), (232.0, 31.0, -1.0)],
+            (_, "plan") | (_, "type") => &[(218.0, 52.0, 1.0), (246.0, 52.0, -1.0)],
+            (_, "brew") | (_, "gems") => &[(226.0, 58.0, 1.0), (242.0, 58.0, -1.0)],
+            _ => &[(104.0, 56.0, 1.0), (172.0, 56.0, -1.0), (134.0, 56.0, -1.0), (142.0, 56.0, 1.0)],
+        }
+    }
+
+    /// Send each member of the crew to a free spot of its station; one
+    /// joining comes in by the door.
+    fn set_crew(&mut self, crew: &[crate::herdr::CrewMember]) {
+        let mut taken: HashMap<(String, String), usize> = HashMap::new();
+        let mut next: Vec<Trainee> = vec![];
+        for m in crew {
+            let action = m.action.clone().unwrap_or_default();
+            let spots = Room::stations(&m.status, &action);
+            let key = (m.status.clone(), action.clone());
+            let k = *taken.get(&key).unwrap_or(&0);
+            taken.insert(key, k + 1);
+            let (x, y, facing) = spots[k % spots.len()];
+            let nudge = (k / spots.len()) as f32 * 7.0;
+            let target = pos2(x + nudge, y);
+            let mut t = match self.crew.iter().position(|t| t.name == m.name) {
+                Some(i) => self.crew.remove(i),
+                None => Trainee { name: m.name.clone(), harness: harness_for(&m.harness), status: String::new(), action: String::new(), pos: pos2(136.0, 92.0), target, facing },
+            };
+            t.harness = harness_for(&m.harness);
+            t.status = m.status.clone();
+            t.action = action;
+            if t.target != target { t.target = target; }
+            if (t.pos - t.target).length() < 0.5 { t.facing = facing; }
+            next.push(t);
+        }
+        self.crew = next;
+    }
+
+    /// The training hall's art rect in the cell, and how its art pixels land
+    /// there: the whole art beside (two columns), or its halves one over the
+    /// other in a narrow column, the upper half without its bottom wall.
+    fn training_layout(&self, origin: Pos2) -> (Rect, f32, bool) {
+        let min = pos2(origin.x + 2.0, origin.y + 4.0 + HEADER);
+        if self.beside { return (Rect::from_min_size(min, vec2(2.0 * (ROW_W - 4.0) - 2.0 * SIDE_WALL, self.size.art_h() * 1.5)), 1.5, true); }
+        let h = self.size.art_h() * 3.0 - self.size.bottom_wall();
+        (Rect::from_min_size(min, vec2(ROW_W - 4.0, h)), h / 192.0, false)
+    }
+
+    fn training_point(art: Rect, scale: f32, beside: bool, p: Pos2) -> Pos2 {
+        if beside { return pos2(art.min.x + p.x * scale, art.min.y + p.y * scale); }
+        let margin = (art.width() - 136.0 * scale) / 2.0;
+        if p.x < 136.0 { pos2(art.min.x + margin + p.x * scale, art.min.y + p.y * scale) } else { pos2(art.min.x + margin + (p.x - 136.0) * scale, art.min.y + (92.0 + p.y) * scale) }
+    }
+
+    fn draw_training(&self, painter: &Painter, origin: Pos2, assets: &Assets, selected: bool) {
+        let (art, scale, beside) = self.training_layout(origin);
+        let cell = Rect::from_min_max(pos2(art.min.x, art.min.y - HEADER), pos2(art.max.x, art.max.y + FOOTER));
+        painter.rect_filled(cell, CornerRadius::same(6), Color32::from_rgb(18, 15, 23));
+        let clipped = painter.with_clip_rect(art);
+        if let Some(room) = assets.room("training_hall") {
+            if beside {
+                clipped.image(room.tex, art, room.uv, Color32::WHITE);
+            } else {
+                // Stone at the sides of the narrower halves, then the halves.
+                clipped.rect_filled(art, CornerRadius::ZERO, Color32::from_rgb(90, 105, 136));
+                let margin = (art.width() - 136.0 * scale) / 2.0;
+                let top = Rect::from_min_size(pos2(art.min.x + margin, art.min.y), vec2(136.0 * scale, 92.0 * scale));
+                let bottom = Rect::from_min_size(pos2(art.min.x + margin, top.max.y), vec2(136.0 * scale, 100.0 * scale));
+                clipped.image(room.tex, top, Rect::from_min_max(pos2(0.0, 0.0), pos2(0.5, 0.92)), Color32::WHITE);
+                clipped.image(room.tex, bottom, Rect::from_min_max(pos2(0.5, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+        }
+        let at = |p: Pos2| Room::training_point(art, scale, beside, p);
+        let size = HERO * scale / 1.5;
+        let t = self.clock;
+        // Back to front, so the lower ones stand in front.
+        let mut order: Vec<&Trainee> = self.crew.iter().collect();
+        order.sort_by(|a, b| a.pos.y.total_cmp(&b.pos.y));
+        // The leader on the dais, over the crew behind it.
+        let lead_at = at(pos2(32.0, 36.0));
+        let busy = self.crew.iter().any(|c| c.status == "working");
+        let lead_frame = if busy { assets.hero_frame(self.harness, "work", (t / 0.18) as usize) } else { assets.hero_frame(self.harness, "idle", (t / 0.5) as usize) };
+        draw_sprite(&clipped, lead_frame, lead_at, vec2(size, size), false, 0.0, Color32::WHITE);
+        for c in order {
+            let p = at(c.pos);
+            let walking = (c.target - c.pos).length() > 0.3;
+            let frame = if walking { assets.hero_frame(c.harness, "idle", (t / 0.14) as usize) } else if c.status == "working" { assets.hero_frame(c.harness, "work", (t / 0.16) as usize) } else { assets.hero_frame(c.harness, "idle", (t / 0.5) as usize) };
+            let s = size * 0.85;
+            draw_sprite(&clipped, frame, p, vec2(s, s), c.facing < 0.0, 0.0, Color32::WHITE);
+            if !walking {
+                match c.status.as_str() {
+                    "blocked" => { let bob = (t * 6.0).sin() * 1.5; draw_sprite(&clipped, assets.prop("alert"), pos2(p.x, p.y - s / 2.0 - 9.0 + bob), vec2(6.0, 11.0) * scale / 1.5 * 1.2, false, 0.0, Color32::WHITE); }
+                    "done" => draw_sprite(&clipped, assets.prop("tick"), pos2(p.x, p.y - s / 2.0 - 8.0), vec2(11.0, 12.0) * scale / 1.5, false, 0.0, Color32::WHITE),
+                    _ => {}
+                }
+            }
+        }
         self.draw_band(painter, origin, art, selected);
     }
 
@@ -1870,7 +2005,7 @@ impl Scene {
 
     /// A double room (the guild's hall) takes two places.
     fn is_double(&self, index: usize) -> bool {
-        self.order.get(index).and_then(|id| self.rooms.get(id)).is_some_and(|r| r.annex.is_some())
+        self.order.get(index).and_then(|id| self.rooms.get(id)).is_some_and(|r| r.annex.is_some() || r.training)
     }
 
     /// How tall the rooms are drawn: the menu's size in full screen's
@@ -2146,6 +2281,26 @@ mod tests {
         scene.compact = true;
         let (slots, _) = scene.layout(ROW_W);
         assert_eq!(slots[1].height(), scene.room_size.cell_h() + scene.room_size.art_h() * 1.5 - scene.room_size.bottom_wall());
+    }
+
+    #[test]
+    fn the_training_hall_sends_its_crew_to_their_stations() {
+        let mut scene = Scene::new();
+        let mut hall = agent("guild:hall", "blocked");
+        let member = |name: &str, status: &str, action: Option<&str>| crate::herdr::CrewMember { name: name.into(), harness: "kiro".into(), status: status.into(), action: action.map(str::to_string) };
+        hall.crew = vec![member("Orin", "blocked", None), member("Aria", "working", Some("read")), member("Kael", "idle", None)];
+        scene.sync(&[agent("a", "idle"), hall.clone()]);
+        assert!(scene.is_double(1), "the hall takes two places");
+        let room = scene.rooms.get("guild:hall").unwrap();
+        let at = |name: &str| room.crew.iter().find(|c| c.name == name).unwrap().target;
+        assert_eq!(at("Orin"), pos2(128.0, 34.0), "asking: at the quest board");
+        assert_eq!(at("Aria"), pos2(220.0, 31.0), "reading: at the scroll shelf");
+        assert_eq!(at("Kael"), pos2(26.0, 75.0), "free: on the bench");
+        // A change of state walks it over; nobody new pops in mid-room.
+        hall.crew[2].status = "done".into();
+        scene.sync(&[agent("a", "idle"), hall]);
+        let room = scene.rooms.get("guild:hall").unwrap();
+        assert_eq!(room.crew.iter().find(|c| c.name == "Kael").unwrap().target, pos2(82.0, 80.0));
     }
 
     #[test]

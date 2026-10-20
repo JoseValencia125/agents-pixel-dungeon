@@ -132,6 +132,10 @@ pub fn run() {
     let both = alerts_for(&previous, &[agent("a", "x", "done", "p", "", "~"), agent("b", "y", "blocked", "p", "", "~")]);
     assert_eq!(both.iter().map(|a| a.kind).collect::<Vec<_>>(), vec![AlertKind::NeedsHelp, AlertKind::Finished]);
     assert_eq!(both.iter().map(|a| a.agent.id.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+    // The guild's hall asking for something does not ring; finishing still does.
+    previous.insert("guild:hall".to_string(), agent("guild:hall", "kiro", "working", "p", "", "~"));
+    assert!(alerts_for(&previous, &[agent("guild:hall", "kiro", "blocked", "p", "", "~")]).is_empty(), "The guild rang for a permission");
+    assert_eq!(alerts_for(&previous, &[agent("guild:hall", "kiro", "done", "p", "", "~")]).len(), 1);
     assert!(jingle(&[(440.0, 0.1)], SAMPLE_RATE, 0.12).len() > 1000, "Jingle did not render");
     let screen = "✻ Worked for 17s · done 12:00 AM\n※ recap: Estamos mejorando el dungeon y ya sale un cuadro\n  nueva: subir tus commits de main en un PR\n────────\n❯ la 1, con PR borrador\n────────\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents";
     assert!(meaningful_lines(screen).is_empty(), "Chrome left in terminal tail: {:?}", meaningful_lines(screen));

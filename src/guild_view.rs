@@ -428,27 +428,11 @@ fn hall_agent(snap: &Snapshot) -> Option<Agent> {
         trf("Habla con {}", &[&lead.name])
     };
     let status = if snap.orchestrator_busy { "working" } else { most_pressing(rooms.iter().map(|(_, a)| a.status.as_str())) };
-    let mut hall = Agent::new(HALL_ID, lead.harness.as_str(), status, &name, &activity, &cwd);
-    hall.hero_status = Some(if snap.orchestrator_busy { "working".into() } else { mine.as_ref().map(|a| a.status.clone()).unwrap_or_else(|| "idle".into()) });
-    // The orchestrator plans at the desk while it answers, else it does its own task.
-    hall.action = if snap.orchestrator_busy { Some("plan".into()) } else { mine.and_then(|a| a.action) };
-    let action_of = |a: &Agent| a.action.clone().unwrap_or_else(|| if a.status == "working" { "type".into() } else { "idle".into() });
-    // The other half: the first member leads it, the next four stand in
-    // it; whoever is left joins the orchestrator's half.
-    if let Some(((first, first_agent), rest)) = crew.split_first().map(|(f, r)| ((f.0, &f.1), r)) {
-        let (beside, more) = rest.split_at(rest.len().min(4));
-        let mut annex = first_agent.clone();
-        annex.id = format!("{HALL_ID}:annex");
-        annex.name = first.harness.as_str().into();
-        annex.subagents = beside.len();
-        annex.subagent_actions = beside.iter().map(|(_, a)| action_of(a)).collect();
-        annex.subagent_harnesses = beside.iter().map(|(m, _)| m.harness.as_str().to_string()).collect();
-        hall.annex = Some(Box::new(annex));
-        let more = &more[..more.len().min(4)];
-        hall.subagent_actions = more.iter().map(|(_, a)| action_of(a)).collect();
-        hall.subagent_harnesses = more.iter().map(|(m, _)| m.harness.as_str().to_string()).collect();
-    }
-    hall.subagents = hall.subagent_actions.len();
+    // A training hall: Claude leads from the dais (it orchestrates), and
+    // every member walks to the station of what it does.
+    let mut hall = Agent::new(HALL_ID, "claude", status, &name, &activity, &cwd);
+    let _ = (&mine, &crew);
+    hall.crew = rooms.iter().map(|(m, a)| crate::herdr::CrewMember { name: m.name.clone(), harness: m.harness.as_str().to_string(), status: a.status.clone(), action: a.action.clone() }).collect();
     Some(hall)
 }
 
