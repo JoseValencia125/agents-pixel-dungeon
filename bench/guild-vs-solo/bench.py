@@ -158,8 +158,13 @@ def run_solo(task, rep):
     save(d, "review", {"arm": "review", "task": task, "rep": rep, "base": base_sha(), "started": t0, "minutes": round(secs / 60, 1),
                        "cost_usd": round(s["cost_usd"] + rv["cost_usd"] + fx["cost_usd"], 2), "kiro_credits": 0,
                        "turns": (s["turns"] or 0) + (rv["turns"] or 0) + (fx["turns"] or 0),
-                       "review_points": 0 if review == "SIN CAMBIOS" else len(re.findall(r"^\s*(?:\d+[.)]|[-*])\s", review, re.M)),
+                       "review_points": review_points(review),
                        "verify_ok": v["ok"], "verify_last": v["last"], "diff": size, "summary": fx["result"], "human_interventions": 0})
+
+
+def review_points(review):
+    """The reviewer's numbered points; nested bullets explain a point, they are not points."""
+    return 0 if review.strip() == "SIN CAMBIOS" else len(re.findall(r"^\s{0,3}(?:\*\*)?\d+[.)]", review, re.M))
 
 
 def guild_quest_after(t0):
@@ -223,7 +228,7 @@ def judge(task, rep):
 
 def report():
     crit = ["correctness", "spec_coverage", "test_quality", "simplicity", "fit_with_codebase", "design_alignment", "ux"]
-    rows, per_arm = [], {a: {"n": 0, "ok": 0, "min": 0, "usd": 0, "kiro": 0, "score": 0, "scored": 0, "rank": 0, "wins": 0} for a in ARMS}
+    rows, per_arm = [], {a: {"n": 0, "ok": 0, "min": 0, "usd": 0, "kiro": 0, "score": 0, "scored": 0, "rank": 0, "wins": 0, "verdicts": 0} for a in ARMS}
     for task in TASKS:
         for d in sorted((RESULTS / task).glob("r*")) if (RESULTS / task).exists() else []:
             judged = json.loads((d / "judge.json").read_text()) if (d / "judge.json").exists() else []
@@ -242,18 +247,18 @@ def report():
                 rank = sum(ranks) / len(ranks) if ranks else None
                 rows.append((task, d.name, arm, m["verify_ok"], m["minutes"], m["cost_usd"], m.get("kiro_credits"), m["diff"]["files"], m["diff"]["added"], m["diff"]["removed"], score, rank))
                 a = per_arm[arm]; a["n"] += 1; a["ok"] += m["verify_ok"]; a["min"] += m["minutes"]; a["usd"] += m["cost_usd"]; a["kiro"] += m.get("kiro_credits") or 0
-                if score is not None: a["score"] += score; a["rank"] += rank; a["scored"] += 1; a["wins"] += sum(r == 1 for r in ranks)
+                if score is not None: a["score"] += score; a["rank"] += rank; a["scored"] += 1; a["wins"] += sum(r == 1 for r in ranks); a["verdicts"] += len(ranks)
     fmt = lambda x, p=1: "—" if x is None else (f"{x:.{p}f}" if isinstance(x, float) else str(x))
     print("| Tarea | Rép. | Brazo | Verifica | Min | USD | Kiro | Archivos | +/− | Puntaje juez (0–5) | Puesto medio |")
     print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for r in rows:
         print(f"| {r[0]} | {r[1]} | {r[2]} | {'sí' if r[3] else 'no'} | {fmt(r[4])} | {fmt(r[5], 2)} | {fmt(r[6])} | {r[7]} | +{r[8]} −{r[9]} | {fmt(r[10], 2)} | {fmt(r[11], 2)} |")
-    print("\n| Brazo | Corridas | Verifica | Min medio | USD medio | Kiro medio | Puntaje medio | Puesto medio | 1.er puesto |")
+    print("\n| Brazo | Corridas | Verifica | Min medio | USD medio | Kiro medio | Puntaje medio | Puesto medio | 1.er puesto (veredictos) |")
     print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for arm, a in per_arm.items():
         if not a["n"]: continue
         n, s = a["n"], a["scored"]
-        print(f"| {arm} | {n} | {a['ok']}/{n} | {a['min'] / n:.1f} | {a['usd'] / n:.2f} | {a['kiro'] / n:.1f} | {fmt(a['score'] / s if s else None, 2)} | {fmt(a['rank'] / s if s else None, 2)} | {a['wins']}/{s * 1 if s else 0} |")
+        print(f"| {arm} | {n} | {a['ok']}/{n} | {a['min'] / n:.1f} | {a['usd'] / n:.2f} | {a['kiro'] / n:.1f} | {fmt(a['score'] / s if s else None, 2)} | {fmt(a['rank'] / s if s else None, 2)} | {a['wins']}/{a['verdicts']} |")
 
 
 def main():
