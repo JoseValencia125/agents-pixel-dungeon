@@ -4,6 +4,8 @@ Build on macOS or Linux with `./scripts/build.sh`, or on Windows with `.\scripts
 
 Use `--demo` for screenshots so no private project names or terminal titles appear. Verify the native window, search, state filter, selection, menu-bar reopening, reduced motion and reconnection where relevant.
 
+Agents write in Spanish, French and other languages: cut text with `guild::domain::cut`, never `String::truncate` or `&s[..n]` on a byte count, which panic inside a character. When a test or verifier guards something, break that thing once and watch the check fail before trusting it.
+
 Keep monitoring read-only and truthful to Herdr states. Never insert synthetic agents into live mode.
 
 Preserve upstream MIT notices and o_lobster attribution. New assets need provenance and license records in Resources/Licenses. Update the asset manifest when adding/modifying PNGs. Do not label CC BY artwork as MIT.
