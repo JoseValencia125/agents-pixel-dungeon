@@ -1012,7 +1012,7 @@ fn demo_experiments(t: &str) -> Vec<guild::experiment::Experiment> {
     vec![Experiment { id: "e1".into(), project_id: "verbrawl".into(), hypothesis_id: "h1".into(), title: tr("Bono semántico"), status: ExperimentStatus::Decided, quest_id: None,
         variants: vec![variant("control", "control", 1.35, 1.2), variant("a", "semantic 1.6", 1.35, 1.6), variant("b", "flat length", 1.0, 1.6)],
         plan: PlaytestPlan { profiles: vec!["greedy".into(), "explorer".into()], runs_per_profile: 2, seeds: vec![] }, analysis_task_id: None,
-        result: Some(ExperimentResult { verdict: "supports".into(), evidence: vec![tr("explorer completa más runs en a y b"), tr("en b la palabra más larga deja de ganar siempre")], unexpected: vec![tr("greedy pierde la mitad de sus runs en b")], recommended_variant: Some("a".into()), recommended_next: tr("probar semantic 1.8 con length 1.2"), confidence: Some(0.6), analyst_attempt_id: None, metrics, created_at: t.into() }),
+        result: Some(ExperimentResult { verdict: "supports".into(), inputs: vec![], evidence: vec![tr("explorer completa más runs en a y b"), tr("en b la palabra más larga deja de ganar siempre")], unexpected: vec![tr("greedy pierde la mitad de sus runs en b")], recommended_variant: Some("a".into()), recommended_next: tr("probar semantic 1.8 con length 1.2"), confidence: Some(0.6), analyst_attempt_id: None, metrics, created_at: t.into() }),
         decision: None, failure: None, created_at: t.into(), updated_at: t.into() }]
 }
 

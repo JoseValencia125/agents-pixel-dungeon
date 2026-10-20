@@ -696,7 +696,7 @@ fn findings_list(ui: &mut Ui, snap: &Snapshot, project_id: &str, commands: &mut 
 
 fn hypothesis_label(h: guild::experiment::HypothesisStatus) -> String {
     use guild::experiment::HypothesisStatus::*;
-    tr(match h { Proposed => "propuesta", Experimenting => "en experimento", Supported => "respaldada", Rejected => "rechazada", Inconclusive => "no concluyente" })
+    tr(match h { Proposed => "propuesta", Experimenting => "en experimento", Supported => "respaldada", Rejected => "rechazada", Inconclusive => "no concluyente", NotAssessed => "sin evaluar" })
 }
 
 fn experiment_label(e: guild::experiment::ExperimentStatus) -> String {

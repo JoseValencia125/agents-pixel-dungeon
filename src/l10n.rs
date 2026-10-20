@@ -136,6 +136,7 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("respaldada", ["supported", "soutenue", "sostenuta", "sustentada"]),
         ("rechazada", ["rejected", "rejetée", "respinta", "rejeitada"]),
         ("no concluyente", ["inconclusive", "non concluante", "non conclusiva", "inconclusiva"]),
+        ("sin evaluar", ["not assessed", "non évaluée", "non valutata", "não avaliada"]),
         ("construyendo variantes", ["building variants", "construction des variantes", "costruzione varianti", "construindo variantes"]),
         ("jugando", ["playtesting", "en test de jeu", "in prova", "jogando"]),
         ("analizando", ["analysing", "analyse", "analisi", "analisando"]),

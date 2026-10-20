@@ -16,7 +16,11 @@ pub enum DesignLevel { Whole, #[default] Loop, Part }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum HypothesisStatus { #[default] Proposed, Experimenting, Supported, Rejected, Inconclusive }
+/// NotAssessed: the experiment ran but did not measure what the
+/// hypothesis needs, so it says nothing either way (absence of evidence is
+/// not evidence of absence); Inconclusive: it measured, and the evidence
+/// does not settle it.
+pub enum HypothesisStatus { #[default] Proposed, Experimenting, Supported, Rejected, Inconclusive, NotAssessed }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct Hypothesis {
@@ -92,8 +96,12 @@ impl Default for PlaytestPlan {
 /// What the analyst concluded, against the hypothesis.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ExperimentResult {
-    /// supports, rejects or inconclusive
+    /// supports, rejects, inconclusive or not_assessed
     pub verdict: String,
+    /// Each measurement the verdict depends on, as the analyst found it in
+    /// the metrics: `<measurement>: found` or `<measurement>: absent`.
+    #[serde(default)]
+    pub inputs: Vec<String>,
     #[serde(default)]
     pub evidence: Vec<String>,
     #[serde(default)]
@@ -457,6 +465,9 @@ pub fn aggregate(metrics: &[Value]) -> Value {
     serde_json::json!({"playtests": metrics.len(), "events": events, "runs": runs, "fields": fields, "choices": {"distinct": choices.len(), "total": total, "top": top, "top_share": top_share}})
 }
 
+/// What an analyst may conclude.
+pub const VERDICTS: [&str; 4] = ["supports", "rejects", "inconclusive", "not_assessed"];
+
 /// The analyst's answer: a fenced JSON block (or a bare object) with a verdict.
 pub fn parse_analysis(text: &str) -> Result<ExperimentResult, String> {
     let mut blocks: Vec<&str> = vec![];
@@ -475,12 +486,13 @@ pub fn parse_analysis(text: &str) -> Result<ExperimentResult, String> {
     for b in blocks.iter().rev() {
         if let Ok(v) = serde_json::from_str::<Value>(b) {
             if let Some(verdict) = v.get("verdict").and_then(Value::as_str) {
-                let verdict = verdict.trim().to_lowercase();
-                if !["supports", "rejects", "inconclusive"].contains(&verdict.as_str()) { return Err(format!("unknown verdict {verdict:?}")); }
+                let verdict = verdict.trim().to_lowercase().replace([' ', '-'], "_");
+                if !VERDICTS.contains(&verdict.as_str()) { return Err(format!("unknown verdict {verdict:?}")); }
                 let list = |k: &str| v.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
                 return Ok(ExperimentResult {
                     verdict,
                     evidence: list("evidence"),
+                    inputs: list("inputs"),
                     unexpected: list("unexpected"),
                     recommended_variant: v.get("recommended_variant").and_then(Value::as_str).map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty() && s != "none"),
                     recommended_next: v.get("recommended_next").and_then(Value::as_str).unwrap_or("").into(),
@@ -555,6 +567,10 @@ mod tests {
         assert_eq!(r.recommended_variant.as_deref(), Some("b"));
         assert_eq!(r.evidence.len(), 1);
         assert!(parse_analysis("{\"verdict\": \"maybe\"}").is_err());
+        // An experiment that did not measure what the hypothesis needs says so.
+        let n = parse_analysis("{\"verdict\": \"Not assessed\", \"inputs\": [\"choices.top_share: found\", \"session.minutes: absent\"]}").unwrap();
+        assert_eq!(n.verdict, "not_assessed");
+        assert_eq!(n.inputs, vec!["choices.top_share: found".to_string(), "session.minutes: absent".to_string()]);
         assert!(parse_analysis("nothing").is_err());
     }
 }

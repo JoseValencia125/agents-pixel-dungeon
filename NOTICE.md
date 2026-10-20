@@ -12,6 +12,8 @@ The app is written in Rust and links MIT/Apache-2.0 crates (egui/eframe, tray-ic
 
 ## Inspiration
 
+Some of the guild's review discipline follows [Claude Code Game Studios](https://github.com/donchitos/claude-code-game-studios) by Donchitos (MIT): the analyst's `not_assessed` verdict (absence of evidence is not evidence of absence), findings marked verified or unverified, the adversarial reviewer, cross-system scenario walks for the systems designer and the exploit hunter, and seeing a regression test fail before trusting it. The wording here is the guild's own; no files of that project are included.
+
 The integrated terminal uses [egui_term](https://github.com/Harzu/egui_term) (MIT), backed by alacritty_terminal (Apache-2.0).
 
 Inspired by [Claude Dungeon / claude-pixel-agent-web](https://github.com/thousandsky2024/claude-pixel-agent-web) by thousandsky2024, which first pictured coding agents as dungeon heroes. No code or artwork from that project is included.

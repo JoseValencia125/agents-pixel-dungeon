@@ -638,6 +638,7 @@ pub fn export(repo: &Path, b: &DesignBundle) -> std::io::Result<Vec<String>> {
         for v in &e.variants { t.push_str(&format!("- {} ({}): {}\n", v.id, v.name, serde_json::to_string(&v.params).unwrap_or_default())); }
         if let Some(r) = &e.result {
             t.push_str(&format!("\n## Result\n\nVerdict: **{}** · confidence {:?} · recommended variant {:?}\n\n", r.verdict, r.confidence, r.recommended_variant));
+            t.push_str(&list_section("Inputs", &r.inputs));
             t.push_str(&list_section("Evidence", &r.evidence));
             t.push_str(&list_section("Unexpected", &r.unexpected));
             t.push_str(&section("Recommended next", &r.recommended_next));
