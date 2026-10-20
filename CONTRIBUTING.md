@@ -29,4 +29,6 @@ The macOS build is signed and notarized when the repository has these secrets (`
 | `MACOS_CERTIFICATE_PASSWORD` | The password given when exporting it. |
 | `NOTARY_KEY_ID`, `NOTARY_ISSUER_ID`, `NOTARY_KEY_P8` | An App Store Connect API key (Users and Access > Integrations > Team Keys, role Developer): its Key ID, the Issuer ID, and the contents of the `.p8` file. |
 
+The release also bumps the Homebrew cask in [JoseValencia125/homebrew-tap](https://github.com/JoseValencia125/homebrew-tap) (version and sha256) with `TAP_DEPLOY_KEY`, the private half of a deploy key with write access to that repository.
+
 Locally, `scripts/build.sh` signs with the first "Developer ID Application" identity in the keychain (`CODESIGN_IDENTITY` picks another) and ad-hoc otherwise; `scripts/notarize.sh "build/Agents Pixel Dungeon.app"` notarizes with those same variables or with a notarytool keychain profile in `NOTARY_PROFILE` (`xcrun notarytool store-credentials`).

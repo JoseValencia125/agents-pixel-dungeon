@@ -60,6 +60,32 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: build/Agents-Pixel-Dungeon-macOS.zip
+  # The Homebrew tap (JoseValencia125/homebrew-tap) gets this release's
+  # version and checksum, pushed with a deploy key (TAP_DEPLOY_KEY) that
+  # has write access to that repository only.
+  homebrew-tap:
+    needs: macos
+    if: inputs.tag || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: JoseValencia125/homebrew-tap
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: Agents-Pixel-Dungeon-macOS
+      - name: Bump the cask to this release
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          SHA="$(sha256sum Agents-Pixel-Dungeon-macOS.zip | cut -d' ' -f1)"
+          sed -i -E "s/^  version \".*\"/  version \"$VERSION\"/; s/^  sha256 \".*\"/  sha256 \"$SHA\"/" Casks/agents-pixel-dungeon.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "agents-pixel-dungeon $VERSION"
+          git push
   linux:
     runs-on: ubuntu-latest
     steps:
