@@ -2425,6 +2425,8 @@ impl Service {
             "orchestrator.say" => self.orchestrator_say(params),
             "member.add" => self.member_add(params),
             "member.remove" => self.member_remove(p_str(params, "memberId")?),
+            "guild.close" => self.guild_close(),
+            "guild.reopen" => self.guild_reopen(),
             "quest.create" => self.quest_create(params),
             "task.create" => self.task_create(params),
             "quest.start" => self.quest_start(params),
@@ -2642,6 +2644,50 @@ impl Service {
         }
         self.quest_start(&json!({"questId": quest_id}))?;
         Ok((reply, Some(quest_id)))
+    }
+
+    /// Close the guild without losing anything: running quests pause, the
+    /// attempts at work are cancelled (candidates waiting for review stay),
+    /// and the members are disabled, so its hall leaves the dungeon.
+    /// `guild.reopen` brings the members back; the quests resume from the board.
+    fn guild_close(self: &Arc<Service>) -> ApiResult {
+        let (running, active, members) = {
+            let store = self.store.lock().unwrap();
+            let running: Vec<String> = store.quests()?.into_iter().filter(|q| q.state == QuestState::Running).map(|q| q.id).collect();
+            let active: Vec<String> = store.active_attempts()?.into_iter().filter(|a| !matches!(a.state, AttemptState::Submitted | AttemptState::Verifying)).map(|a| a.id).collect();
+            (running, active, store.members()?)
+        };
+        for q in &running { let _ = self.quest_set(&json!({"questId": q}), QuestState::Paused, &[QuestState::Running]); }
+        for a in &active { let _ = self.attempt_cancel(a); }
+        let closed: Vec<String> = members.iter().filter(|m| m.enabled).map(|m| m.id.clone()).collect();
+        let store = self.store.lock().unwrap();
+        self.atomic(&store, || {
+            for mut m in members.iter().filter(|m| m.enabled).cloned() {
+                m.enabled = false;
+                store.put_member(&m)?;
+            }
+            // Who it closed, so reopening does not bring back a member retired earlier.
+            self.emit_locked(&store, Event::new("guild.closed", "user").with(json!({"members": closed, "pausedQuests": running.len(), "cancelledAttempts": active.len()})));
+            Ok(())
+        })?;
+        Ok(json!({"pausedQuests": running, "cancelledAttempts": active}))
+    }
+
+    fn guild_reopen(&self) -> ApiResult {
+        let store = self.store.lock().unwrap();
+        let closed: Vec<String> = store.events_of_kind("guild.closed", 1)?.first()
+            .and_then(|e| e.payload["members"].as_array().cloned()).unwrap_or_default()
+            .iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        let back: Vec<Member> = store.members()?.into_iter().filter(|m| !m.enabled && closed.contains(&m.id)).collect();
+        self.atomic(&store, || {
+            for mut m in back.iter().cloned() {
+                m.enabled = true;
+                store.put_member(&m)?;
+            }
+            self.emit_locked(&store, Event::new("guild.reopened", "user").with(json!({"members": back.len()})));
+            Ok(())
+        })?;
+        Ok(json!({"members": back.len()}))
     }
 
     /// Remove a member. One with an attempt still going is retired instead
@@ -3458,6 +3504,29 @@ mod tests {
         assert_eq!(test.role, "implementer", "a role nobody holds falls back to one somebody does");
         assert_eq!(test.depends_on.len(), 1);
         assert!(!snap.orchestrator_busy);
+    }
+
+    #[test]
+    fn closing_the_guild_pauses_cancels_and_hides_it_until_reopened() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Hang);
+        service.handle("member.add", &json!({"id": "bo", "harness": "mock", "roles": ["reviewer"]})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Hangs"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "running", |s| s.attempts.first().map(|a| a.state == AttemptState::Running).unwrap_or(false));
+        // A member retired earlier stays retired across a close and a reopen.
+        service.handle("member.add", &json!({"id": "old", "harness": "mock", "roles": ["reviewer"]})).unwrap();
+        service.handle("member.update", &json!({"memberId": "old", "enabled": false})).unwrap();
+        service.handle("guild.close", &json!({})).unwrap();
+        let snap = wait_for(&service, "closed", |s| s.attempts[0].state == AttemptState::Cancelled);
+        assert_eq!(snap.quests[0].state, QuestState::Paused);
+        assert!(snap.members.iter().all(|m| !m.enabled), "nobody left in the hall");
+        assert!(snap.orchestrator.is_none());
+        service.handle("guild.reopen", &json!({})).unwrap();
+        let snap = service.snapshot().unwrap();
+        let enabled: Vec<&str> = snap.members.iter().filter(|m| m.enabled).map(|m| m.id.as_str()).collect();
+        assert_eq!(enabled.len(), 2);
+        assert!(enabled.contains(&"aria") && enabled.contains(&"bo") && !enabled.contains(&"old"));
+        assert_eq!(snap.quests[0].state, QuestState::Paused, "quests resume from the board");
     }
 
     #[test]
