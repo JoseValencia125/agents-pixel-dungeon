@@ -12,7 +12,7 @@ The app is written in Rust and links MIT/Apache-2.0 crates (egui/eframe, tray-ic
 
 ## Inspiration
 
-Some of the guild's review discipline follows [Claude Code Game Studios](https://github.com/donchitos/claude-code-game-studios) by Donchitos (MIT): the analyst's `not_assessed` verdict (absence of evidence is not evidence of absence), findings marked verified or unverified, the adversarial reviewer, cross-system scenario walks for the systems designer and the exploit hunter, and seeing a regression test fail before trusting it. The wording here is the guild's own; no files of that project are included.
+Some of the guild's review discipline follows [Claude Code Game Studios](https://github.com/donchitos/claude-code-game-studios) by Donchitos (MIT): the analyst's `not_assessed` verdict (absence of evidence is not evidence of absence), findings marked verified or unverified, the adversarial reviewer, cross-system scenario walks for the systems designer and the exploit hunter, seeing a regression test fail before trusting it, captures of the running game as evidence, and the design's pillars, anti-pillars and per-system formulas, tuning knobs, edge cases and acceptance criteria (from its game-pillars and game-design-document templates). The wording here is the guild's own; no files of that project are included.
 
 The integrated terminal uses [egui_term](https://github.com/Harzu/egui_term) (MIT), backed by alacritty_terminal (Apache-2.0).
 
