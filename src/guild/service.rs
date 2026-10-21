@@ -49,6 +49,8 @@ struct Running {
     /// attempt's time limit does not count: the member was not working.
     waited: Duration,
     waiting_since: Option<Instant>,
+    /// How long it may work: its task's limit, else the guild's.
+    limit: Duration,
 }
 
 impl Running {
@@ -442,14 +444,14 @@ impl Service {
                     workspace_id: None,
                     session_id: None,
                     generation: 1,
-                    candidate: None,
+                    candidate: None, partial: None,
                     summary: String::new(),
                     action: None,
                     pending_permission: None,
                     failure: None,
                     verifier_results: vec![],
                     turns: 0,
-                    resumed: 0, deciding: false, escalation: None,
+                    resumed: 0, deciding: false, escalation: None, worked_seconds: 0, limit_seconds: 0,
                     started_at: Some(now()),
                     finished_at: None,
                     created_at: now(),
@@ -859,7 +861,7 @@ impl Service {
             let attempt = Attempt {
                 id: new_id(), task_id: task.id.clone(), task_version: task.version, quest_id: quest.id.clone(), project_id: quest.project_id.clone(), member_id: member.id.clone(),
                 harness: member.harness.clone(), model_requested: member.model_id.clone(), model_effective: None, kind: AttemptKind::Analysis, state: AttemptState::Queued, workspace_id: None, session_id: None,
-                generation: 0, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 0, resumed: 0, deciding: false, escalation: None,
+                generation: 0, candidate: None, partial: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 0, resumed: 0, deciding: false, escalation: None, worked_seconds: 0, limit_seconds: 0,
                 started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
             };
             self.atomic(&store, || {
@@ -1746,7 +1748,7 @@ impl Service {
             let attempt = Attempt {
                 id: new_id(), task_id: task.id.clone(), task_version: task.version, quest_id: quest.id.clone(), project_id: quest.project_id.clone(), member_id: member.id.clone(),
                 harness: member.harness.clone(), model_requested: member.model_id.clone(), model_effective: None, kind: AttemptKind::Judge, state: AttemptState::Queued, workspace_id: None, session_id: None,
-                generation: 0, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 0, resumed: 0, deciding: false, escalation: None,
+                generation: 0, candidate: None, partial: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 0, resumed: 0, deciding: false, escalation: None, worked_seconds: 0, limit_seconds: 0,
                 started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
             };
             self.atomic(&store, || {
@@ -1889,7 +1891,7 @@ impl Service {
         // Reserve the slot before the thread starts, so the next tick counts it.
         self.running.lock().unwrap().insert(
             attempt_id.clone(),
-            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None },
+            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None, limit: Duration::ZERO },
         );
         let service = self.clone();
         std::thread::Builder::new()
@@ -1912,7 +1914,7 @@ impl Service {
     fn spawn_resumer(self: &Arc<Service>, attempt_id: String, native_id: String) {
         self.running.lock().unwrap().insert(
             attempt_id.clone(),
-            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None },
+            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None, limit: Duration::ZERO },
         );
         let service = self.clone();
         std::thread::Builder::new()
@@ -1961,10 +1963,18 @@ impl Service {
             v
         };
         let feedback: Vec<String> = earlier.iter().rev().take(3).rev().filter_map(|a| a.failure.clone()).collect();
-        let resume_from = if attempt.kind == AttemptKind::Work && task.candidates <= 1 { earlier.last().and_then(|a| a.candidate.clone()) } else { None };
+        // Its candidate, else what it had written when it stopped.
+        let resume_from = if attempt.kind == AttemptKind::Work && task.candidates <= 1 {
+            earlier.last().and_then(|a| a.candidate.clone().map(|c| (c, false)).or_else(|| a.partial.clone().map(|c| (c, true))).map(|(c, partial)| (c, partial, workspaces::branch_name(&quest.id, &task.id, &a.id))))
+        } else { None };
         let workspace = workspaces::provision(&project, &quest.id, &task.id, attempt_id, &base).map_err(ApiError::internal)?;
-        // On the current base, with the last candidate's changes carried over.
-        let continued = resume_from.as_ref().is_some_and(|c| workspaces::carry(&workspace, c));
+        // On the current base, with the last attempt's changes carried over;
+        // when they do not apply, the member is told where they are.
+        let continued = match &resume_from {
+            None => Carried::Nothing,
+            Some((c, partial, branch)) if workspaces::carry(&workspace, c) => if *partial { Carried::Partial } else { let _ = branch; Carried::Candidate },
+            Some((c, _, branch)) => Carried::Left { branch: branch.clone(), head: c.head_sha.clone(), base: c.base_sha.clone() },
+        };
         {
             let store = self.store.lock().unwrap();
             store.put_workspace(&workspace)?;
@@ -2030,6 +2040,9 @@ impl Service {
             self.emit_locked(&store, Event::new("session.started", "harness").about_attempt(attempt).with(json!({"sessionId": session.id, "nativeId": session.native_id, "harness": member.harness})));
         }
         let effective = attempt.model_effective.clone().or(attempt.model_requested.clone());
+        // Its task's own time limit, else the guild's.
+        let limit = self.store.lock().unwrap().task(&attempt.task_id)?.and_then(|t| t.timeout_minutes).map(|m| Duration::from_secs(m as u64 * 60)).unwrap_or(self.settings.attempt_timeout);
+        if let Some(r) = self.running.lock().unwrap().get_mut(attempt_id) { r.limit = limit; }
         let attempt = self.update_attempt(attempt_id, |a| {
             a.session_id = Some(session.id.clone());
             a.model_effective = effective;
@@ -2040,7 +2053,7 @@ impl Service {
         let attempt = &attempt;
         {
             let mut running = self.running.lock().unwrap();
-            let slot = running.entry(attempt_id.to_string()).or_insert(Running { session: session.clone(), harness: member.harness.clone(), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None });
+            let slot = running.entry(attempt_id.to_string()).or_insert(Running { session: session.clone(), harness: member.harness.clone(), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None, limit: Duration::ZERO });
             slot.session = session.clone();
             slot.harness = member.harness.clone();
         }
@@ -2129,13 +2142,13 @@ impl Service {
                 }
             }
             if last_flush.elapsed() > Duration::from_secs(2) { flush(&mut text, self); last_flush = Instant::now(); }
-            let (cancel, interrupt, worked) = {
+            let (cancel, interrupt, worked, limit) = {
                 let running = self.running.lock().unwrap();
-                running.get(attempt_id).map(|r| (r.cancel_requested, r.interrupt_requested, r.working_time())).unwrap_or((true, false, Duration::ZERO))
+                running.get(attempt_id).map(|r| (r.cancel_requested, r.interrupt_requested, r.working_time(), if r.limit.is_zero() { self.settings.attempt_timeout } else { r.limit })).unwrap_or((true, false, Duration::ZERO, self.settings.attempt_timeout))
             };
-            if !timed_out && worked > self.settings.attempt_timeout {
+            if !timed_out && worked > limit {
                 timed_out = true;
-                self.emit(Event::new("attempt.timeout", "guild").about_attempt(attempt).with(json!({"afterSeconds": self.settings.attempt_timeout.as_secs()})));
+                self.emit(Event::new("attempt.timeout", "guild").about_attempt(attempt).with(json!({"afterSeconds": limit.as_secs()})));
             }
             if (cancel || interrupt || timed_out) && interrupted_at.is_none() {
                 let _ = adapter.interrupt(session);
@@ -2302,15 +2315,30 @@ impl Service {
                 self.settle_task(&task.id)
             }
             TurnOutcome::Failed { reason } => {
+                self.keep_partial(&attempt, &task, workspace.as_ref());
                 self.move_attempt(attempt_id, if reason == "timed out" { AttemptState::TimedOut } else { AttemptState::Failed }, Some(reason.clone()))?;
                 if task.candidates > 1 { return self.settle_task(&task.id); }
                 self.after_failed_attempt(&task, &reason)
             }
             TurnOutcome::Cancelled => {
+                self.keep_partial(&attempt, &task, workspace.as_ref());
                 self.move_attempt(attempt_id, AttemptState::Cancelled, Some("cancelled".into()))?;
                 if task.candidates > 1 { return self.settle_task(&task.id); }
                 let _ = self.move_task(&task.id, TaskState::Blocked, Some("attempt cancelled; retry to continue".into()));
                 Ok(())
+            }
+        }
+    }
+
+    /// An attempt that stops before finishing keeps what it had written, as
+    /// a commit on its branch, so the retry goes on from it (F-HD-03).
+    fn keep_partial(&self, attempt: &Attempt, task: &Task, workspace: Option<&Workspace>) {
+        if attempt.kind != AttemptKind::Work { return; }
+        let Some(ws) = workspace.filter(|w| Path::new(&w.path).exists()) else { return };
+        if let Ok(Some(partial)) = workspaces::commit_candidate(ws, &format!("guild partial: {}", task.title)) {
+            let (files, added, removed) = (partial.files_changed, partial.insertions, partial.deletions);
+            if self.update_attempt(&attempt.id, |a| a.partial = Some(partial)).is_ok() {
+                self.emit(Event::new("partial.kept", "guild").about_attempt(attempt).with(json!({"filesChanged": files, "insertions": added, "deletions": removed})));
             }
         }
     }
@@ -2575,6 +2603,13 @@ impl Service {
         snap.orchestrator = crate::orchestrator::pick(&snap.members, &self.available_harnesses()).map(|m| m.id);
         snap.orchestrator_busy = self.orchestrating.lock().unwrap().is_some();
         snap.concurrency = self.concurrency.load(Ordering::Relaxed);
+        // Each running attempt's work so far against its limit, for whoever watches the time.
+        {
+            let running = self.running.lock().unwrap();
+            for a in snap.attempts.iter_mut() {
+                if let Some(r) = running.get(&a.id) { a.worked_seconds = r.working_time().as_secs(); a.limit_seconds = if r.limit.is_zero() { self.settings.attempt_timeout } else { r.limit }.as_secs(); }
+            }
+        }
         Ok(snap)
     }
 
@@ -2694,6 +2729,7 @@ impl Service {
             "task.create" => self.task_create(params),
             "task.update" => self.task_update(params),
             "quest.start" => self.quest_start(params),
+            "quest.sync" => self.quest_sync(params),
             "quest.pause" => self.quest_set(params, QuestState::Paused, &[QuestState::Running]),
             "quest.resume" => self.quest_set(params, QuestState::Running, &[QuestState::Paused, QuestState::Blocked]),
             "quest.cancel" => self.quest_cancel(params),
@@ -3204,6 +3240,7 @@ impl Service {
             max_attempts: (params.get("maxAttempts").and_then(Value::as_u64).unwrap_or(2) as u32).max(strategy.runners()),
             candidates: strategy.runners(),
             auto_integrate: strategy.auto_integrate,
+            timeout_minutes: params.get("timeoutMinutes").and_then(Value::as_u64).filter(|m| *m > 0).map(|m| m as u32),
             strategy,
             winner_attempt_id: None,
             version: 1,
@@ -3239,6 +3276,7 @@ impl Service {
         if let Some(r) = p_opt(params, "role") { task.role = r; }
         if params.get("memberId").is_some() { task.member_id = p_opt(params, "memberId"); }
         if let Some(p) = params.get("priority").and_then(Value::as_i64) { task.priority = p as i32; }
+        if let Some(m) = params.get("timeoutMinutes").and_then(Value::as_u64) { task.timeout_minutes = (m > 0).then_some(m as u32); }
         let deps_changed = params.get("dependsOn").is_some_and(|d| d.is_array()) && p_list(params, "dependsOn") != task.depends_on;
         if deps_changed {
             task.depends_on = p_list(params, "dependsOn");
@@ -3258,6 +3296,28 @@ impl Service {
             Ok(())
         })?;
         Ok(serde_json::to_value(task).unwrap())
+    }
+
+    /// Bring the project's target (or `from`) into a quest's branch, so the
+    /// attempts that start from now on see what changed there — a corrected
+    /// specification, say — instead of having it copied into every task.
+    fn quest_sync(&self, params: &Value) -> ApiResult {
+        let quest_id = p_str(params, "questId")?;
+        let (quest, project) = {
+            let store = self.store.lock().unwrap();
+            let quest = store.quest(quest_id)?.ok_or_else(|| ApiError::not_found(format!("quest {quest_id}")))?;
+            let project = store.project(&quest.project_id)?.ok_or_else(|| ApiError::not_found("project"))?;
+            (quest, project)
+        };
+        let from = p_opt(params, "from").unwrap_or_else(|| project.target_ref.clone());
+        let (old, new, files) = workspaces::sync_quest(&project, &quest, &from).map_err(ApiError::conflict)?;
+        if old != new {
+            let mut ev = Event::new("quest.synced", "user").with(json!({"questId": quest.id, "from": from, "oldSha": old, "newSha": new, "files": files}));
+            ev.project_id = Some(project.id.clone());
+            ev.quest_id = Some(quest.id.clone());
+            self.emit(ev);
+        }
+        Ok(json!({"questId": quest.id, "from": from, "oldSha": old, "newSha": new, "files": files, "changed": old != new}))
     }
 
     fn quest_start(self: &Arc<Service>, params: &Value) -> ApiResult {
@@ -3606,7 +3666,19 @@ fn parse_strategy(params: &Value) -> Res<ExecutionStrategy> {
     })
 }
 
-fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>, feedback: &[String], continued: bool) -> String {
+/// What a retry's worktree starts with from the attempt before it.
+#[derive(Clone, Debug, PartialEq)]
+enum Carried {
+    Nothing,
+    /// The last candidate, turned down.
+    Candidate,
+    /// What the last attempt had written when it stopped.
+    Partial,
+    /// Its work did not apply on the current base: where it is.
+    Left { branch: String, head: String, base: String },
+}
+
+fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>, feedback: &[String], continued: Carried) -> String {
     let mut s = String::new();
     s.push_str(role_prompt.trim());
     s.push_str("\n\n# Task: ");
@@ -3626,10 +3698,11 @@ fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design:
     if !feedback.is_empty() {
         s.push_str("\n## Earlier attempts were turned down\n");
         for f in feedback { s.push_str(&format!("- {}\n", f.trim())); }
-        if continued {
-            s.push_str("Your worktree already holds the last candidate. Keep what was not objected to and make exactly the changes asked for above.\n");
-        } else {
-            s.push_str("Avoid what was objected to above.\n");
+        match &continued {
+            Carried::Candidate => s.push_str("Your worktree already holds the last candidate. Keep what was not objected to and make exactly the changes asked for above.\n"),
+            Carried::Partial => s.push_str("The last attempt stopped before it finished; your worktree already holds what it had written. Go on from it — check what is there first — instead of starting over.\n"),
+            Carried::Left { branch, head, base } => s.push_str(&format!("The last attempt's work did not apply on the current base. It is on branch `{branch}` (commit {head}): see it with `git diff {base} {head}` and `git show {head}:<path>`, and reuse it instead of starting over.\n")),
+            Carried::Nothing => s.push_str("Avoid what was objected to above.\n"),
         }
     }
     if let Some(d) = design { s.push_str(&crate::design::prompt_context(d)); }
@@ -3965,6 +4038,87 @@ mod tests {
     }
 
     #[test]
+    fn a_retry_goes_on_from_what_a_failed_attempt_had_written() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), cancel_timeout: Duration::from_millis(500), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        let mock = Arc::new(MockHarness::new(MockBehaviour::WriteThenFail { file: "core.gd".into(), content: "# 900 lines of core\n".into(), reason: "timed out".into() }));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Core", "maxAttempts": 2})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        // The first attempt stops with its work in the worktree: kept, not lost.
+        let snap = wait_for(&service, "first stopped", |s| s.attempts.iter().any(|a| a.partial.is_some()));
+        let first = snap.attempts.iter().find(|a| a.partial.is_some()).unwrap().clone();
+        assert_eq!(first.partial.as_ref().unwrap().files_changed, 1);
+        // The retry starts from it and is told so.
+        mock.set_behaviour(MockBehaviour::Succeed { file: "tests.gd".into(), content: "# tests\n".into() });
+        let snap = wait_for(&service, "second submitted", |s| s.attempts.iter().any(|a| a.id != first.id && a.state == AttemptState::Submitted));
+        let second = snap.attempts.iter().find(|a| a.id != first.id).unwrap();
+        assert!(mock.prompts().iter().any(|p| p.contains("stopped before it finished")), "the retry knows where it starts");
+        let diff = service.handle("artifact.read", &json!({"artifactId": second.candidate.as_ref().unwrap().diff_artifact_id.clone().unwrap()})).unwrap()["text"].as_str().unwrap().to_string();
+        assert!(diff.contains("core.gd") && diff.contains("tests.gd"), "the candidate has the first attempt's work and its own: {diff}");
+    }
+
+    #[test]
+    fn a_quest_takes_what_changed_in_main_and_a_conflict_leaves_it_as_it_was() {
+        let (home, service, quest_id) = setup(MockBehaviour::Hang);
+        let repo = home.repo_path();
+        let commit = |file: &str, text: &str| {
+            std::fs::write(repo.join(file), text).unwrap();
+            workspaces::git(&repo, &["add", "-A"]).unwrap();
+            workspaces::git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", file]).unwrap();
+        };
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Hangs"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let quest = service.store.lock().unwrap().quest(&quest_id).unwrap().unwrap();
+        // The specification is corrected in main after the quest started (F-HD-06).
+        commit("SPEC.md", "money circulates\n");
+        let r = service.handle("quest.sync", &json!({"questId": quest_id})).unwrap();
+        assert_eq!((r["changed"].as_bool(), r["files"].clone()), (Some(true), json!(["SPEC.md"])));
+        assert!(workspaces::git(&repo, &["show", &format!("{}:SPEC.md", quest.integration_ref)]).unwrap().contains("money circulates"), "the quest's branch has it");
+        assert_eq!(service.handle("quest.sync", &json!({"questId": quest_id})).unwrap()["changed"], false, "nothing new: nothing moves");
+        assert_eq!(workspaces::current_branch(&repo).as_deref(), Some("main"), "the user's checkout never moved");
+        // A conflict aborts, names its files and leaves the branch where it was.
+        let head = workspaces::rev_parse(&repo, &quest.integration_ref).unwrap();
+        workspaces::git(&repo, &["checkout", "-q", "-b", "side", &head]).unwrap();
+        commit("SPEC.md", "money is created by the state\n");
+        let side = workspaces::rev_parse(&repo, "HEAD").unwrap();
+        workspaces::git(&repo, &["update-ref", &quest.integration_ref, &side]).unwrap();
+        workspaces::git(&repo, &["checkout", "-q", "main"]).unwrap();
+        commit("SPEC.md", "money circulates between sectors\n");
+        let err = service.handle("quest.sync", &json!({"questId": quest_id})).unwrap_err();
+        assert!(err.message.contains("conflicts in: SPEC.md"), "{}", err.message);
+        assert_eq!(workspaces::rev_parse(&repo, &quest.integration_ref).unwrap(), side, "untouched");
+    }
+
+    #[test]
+    fn a_task_has_its_own_time_limit_and_the_orchestrator_sees_it_coming() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Hang);
+        // The guild's default is 5 s here; this task may work 1 minute, the other only its default.
+        service.handle("task.create", &json!({"questId": quest_id, "id": "long", "title": "Calibrate", "timeoutMinutes": 1})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "running", |s| s.attempts.first().is_some_and(|a| a.state == AttemptState::Running));
+        std::thread::sleep(Duration::from_secs(6));
+        let a = service.snapshot().unwrap().attempts[0].clone();
+        assert_eq!(a.state, AttemptState::Running, "past the guild's 5 s, within its own minute");
+        assert_eq!(a.limit_seconds, 60);
+        assert!(a.worked_seconds >= 5);
+        // Near the limit, guild_status says so.
+        let mut fake = service.snapshot().unwrap();
+        fake.attempts[0].worked_seconds = 45;
+        let line = crate::mcp::task_line(&fake, &fake.tasks[0]);
+        assert!(line.contains("⚠ worked 0m of its 1m"), "{line}");
+        fake.attempts[0].worked_seconds = 20;
+        assert!(!crate::mcp::task_line(&fake, &fake.tasks[0]).contains("⚠"), "not yet");
+        service.handle("attempt.cancel", &json!({"attemptId": a.id})).unwrap();
+    }
+
+    #[test]
     fn a_permission_parks_the_attempt_until_the_user_answers() {
         let (_home, service, quest_id) = setup(MockBehaviour::AskPermission { file: "x.txt".into(), content: "x".into() });
         service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Ask first"})).unwrap();
@@ -4257,9 +4411,9 @@ mod tests {
         assert_eq!(saved["version"], 2);
         assert_eq!(saved["loops"][2]["id"], "loop-3");
         let design: crate::design::GameDesign = serde_json::from_value(saved).unwrap();
-        let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now() };
+        let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now() };
         let ws = Workspace { id: "w".into(), attempt_id: "a".into(), project_id: design.project_id.clone(), path: "/tmp/w".into(), branch: "guild/x".into(), base_sha: "0".into(), state: WorkspaceState::Ready, created_at: now(), updated_at: now() };
-        let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design), &[], false);
+        let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design), &[], Carried::Nothing);
         assert!(prompt.contains("Avoid: a dominant strategy; always choosing the longest word; obvious decisions; grinding"));
         assert!(prompt.contains("Loop \"Economy\": earn → spend ↺"));
         assert!(prompt.contains("part, a loop or the whole"));
@@ -4408,9 +4562,9 @@ mod tests {
         let attempt = Attempt {
             id: id.clone(), task_id: task.id.clone(), task_version: task.version, quest_id: quest.id.clone(), project_id: project.id.clone(), member_id: member.into(),
             harness: HarnessId::named("mock"), model_requested: Some("mock-fast".into()), model_effective: Some("mock-fast".into()), kind: AttemptKind::Work, state, workspace_id: Some(ws.id.clone()),
-            session_id, generation, candidate, summary: String::new(), action: None, pending_permission: None, failure: None,
+            session_id, generation, candidate, partial: None, summary: String::new(), action: None, pending_permission: None, failure: None,
             verifier_results: if verified { vec![VerifierResult { id: "v".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1, log_artifact_id: None, tail: String::new(), evidence: vec![] }] } else { vec![] },
-            turns: 1, resumed: 0, deciding: false, escalation: None, started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
+            turns: 1, resumed: 0, deciding: false, escalation: None, worked_seconds: 0, limit_seconds: 0, started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
         };
         store.put_attempt(&attempt).unwrap();
         let mut t = task;

@@ -259,6 +259,25 @@ pub fn pane_shell(pane: &str, session: &str) -> Option<u32> {
     Some(pid)
 }
 
+/// Whether an agent Herdr cannot read the state of is still there: its
+/// pane's shell runs something. Herdr keeps naming a pane after the last
+/// agent it saw there (its detection falls back to it), so a Kiro that ended
+/// leaves a "kiro" whose pane is only a shell again — typing /exit into it
+/// reaches zsh. Known states, guild rooms and agents found by their
+/// process are never in doubt.
+pub fn still_running(agent: &Agent, table: &[Process], shell: Option<u32>) -> bool {
+    if agent.status != "unknown" || agent.id.starts_with("guild:") || agent.id.starts_with("pid:") { return true; }
+    let Some(shell) = shell else { return true };
+    table.is_empty() || table.iter().any(|p| p.ppid == shell)
+}
+
+/// Drop the agents whose program has exited, leaving their pane a shell.
+pub fn drop_exited(agents: &mut Vec<Agent>, session: &str) {
+    if !agents.iter().any(|a| a.status == "unknown" && !a.id.starts_with("guild:") && !a.id.starts_with("pid:")) { return; }
+    let table = processes();
+    agents.retain(|a| still_running(a, &table, if a.status == "unknown" { pane_shell(&a.id, session) } else { None }));
+}
+
 /// Add each Claude agent's background shells and how its last ones ended.
 pub fn add_shells(agents: &mut [Agent], session: &str) {
     if !agents.iter().any(|a| crate::herdr::harness_for(&a.name) == "claude") { return; }
@@ -305,3 +324,25 @@ pub fn output_tail(path: &str, count: usize) -> Vec<String> {
     let lines: Vec<String> = tail.lines().map(|l| strip_ansi(l.rsplit('\r').next().unwrap_or(l))).collect();
     lines[lines.len().saturating_sub(count)..].to_vec()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pane_left_with_only_its_shell_has_no_agent_any_more() {
+        let proc = |pid: u32, ppid: u32| Process { pid, ppid, started: 0, command: String::new() };
+        let table = vec![proc(100, 1), proc(101, 100), proc(200, 1)];
+        let kiro = |status: &str| Agent::new("w4N:p1", "kiro", status, "scheduler", "", "~/scheduler");
+        // Herdr still says "kiro", state unknown; the pane's shell (200) runs nothing: it ended.
+        assert!(!still_running(&kiro("unknown"), &table, Some(200)));
+        // Its shell runs something: still there.
+        assert!(still_running(&kiro("unknown"), &table, Some(100)));
+        // A known state, a shell Herdr would not give, a table that could not be read: never dropped.
+        assert!(still_running(&kiro("idle"), &table, Some(200)));
+        assert!(still_running(&kiro("unknown"), &table, None));
+        assert!(still_running(&kiro("unknown"), &[], Some(200)));
+        assert!(still_running(&Agent::new("guild:hall", "claude", "unknown", "g", "", "~"), &table, Some(200)));
+    }
+}
+

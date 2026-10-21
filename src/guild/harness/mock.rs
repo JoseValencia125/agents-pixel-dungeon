@@ -16,6 +16,8 @@ pub enum MockBehaviour {
     AskPermission { file: String, content: String },
     /// Report a failed turn.
     Fail(String),
+    /// Write `file`, then fail the turn: work left in the worktree.
+    WriteThenFail { file: String, content: String, reason: String },
     /// Never answer, so timeouts and cancellation can be exercised.
     Hang,
     /// Say this and finish, writing nothing.
@@ -190,6 +192,11 @@ impl HarnessAdapter for MockHarness {
                     }
                     MockBehaviour::WriteParams { .. } => unreachable!("turned into Succeed above"),
                     MockBehaviour::Fail(reason) => {
+                        std::thread::sleep(Duration::from_millis(delay));
+                        let _ = res_tx.send(TurnOutcome::Failed { reason });
+                    }
+                    MockBehaviour::WriteThenFail { file, content, reason } => {
+                        let _ = std::fs::write(cwd.join(&file), &content);
                         std::thread::sleep(Duration::from_millis(delay));
                         let _ = res_tx.send(TurnOutcome::Failed { reason });
                     }

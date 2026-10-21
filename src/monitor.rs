@@ -525,7 +525,14 @@ impl Monitor {
                 Ok((None, enrich(crate::standalone::agents())))
             })();
             // The shells agents left running, from the processes.
-            let result = result.map(|(base, mut shown)| { if !demo { crate::shells::add_shells(&mut shown, &session); } (base, shown) });
+            let result = result.map(|(mut base, mut shown)| {
+                if !demo {
+                    if let Some((fresh, _)) = base.as_mut() { crate::shells::drop_exited(fresh, &session); }
+                    crate::shells::drop_exited(&mut shown, &session);
+                    crate::shells::add_shells(&mut shown, &session);
+                }
+                (base, shown)
+            });
             let _ = sender.send(Inbox::Refresh { generation, result, herdr });
             wake();
         });

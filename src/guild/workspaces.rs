@@ -255,6 +255,39 @@ pub fn publish(project: &Project, ref_name: &str, base: &str, message: &str, wri
     result
 }
 
+/// Bring `from` (the project's target, typically) into a quest's branch,
+/// in a temporary checkout, with compare-and-swap on the branch, so later
+/// attempts start from it. Returns (old head, new head, files changed);
+/// a conflict aborts and names its files.
+pub fn sync_quest(project: &Project, quest: &Quest, from: &str) -> GitResult<(String, String, Vec<String>)> {
+    let repo = Path::new(&project.repo_path);
+    let expected = ensure_integration_branch(project, quest)?;
+    let source = rev_parse(repo, from)?;
+    let tmp = crate::paths::worktrees_dir().join(&project.id).join(format!("sync-{}", short(&quest.integration_ref)));
+    if tmp.exists() { let _ = git(repo, &["worktree", "remove", "--force", &tmp.display().to_string()]); }
+    let _ = git(repo, &["worktree", "prune"]);
+    git(repo, &["worktree", "add", "--detach", &tmp.display().to_string(), &expected])?;
+    let result = (|| -> GitResult<(String, String, Vec<String>)> {
+        let ident = ["-c", "user.name=Guild", "-c", "user.email=guild@agents-pixel-dungeon"];
+        let message = format!("guild: bring {from} into the quest");
+        let mut merge: Vec<&str> = ident.to_vec();
+        merge.extend(["merge", "--no-edit", "-m", &message, &source]);
+        if let Err(e) = git(&tmp, &merge) {
+            let conflicts = git(&tmp, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+            let _ = git(&tmp, &["merge", "--abort"]);
+            return Err(if conflicts.trim().is_empty() { e } else { format!("conflicts in: {}", conflicts.lines().collect::<Vec<_>>().join(", ")) });
+        }
+        let new_sha = rev_parse(&tmp, "HEAD")?;
+        if new_sha == expected { return Ok((expected.clone(), new_sha, vec![])); }
+        let files: Vec<String> = git(&tmp, &["diff", "--name-only", &expected, &new_sha]).unwrap_or_default().lines().map(str::to_string).collect();
+        git(repo, &["update-ref", &quest.integration_ref, &new_sha, &expected])?;
+        Ok((expected.clone(), new_sha, files))
+    })();
+    let _ = git(repo, &["worktree", "remove", "--force", &tmp.display().to_string()]);
+    let _ = git(repo, &["worktree", "prune"]);
+    result
+}
+
 /// A detached checkout of `sha` at `dir`, for a human to play; never the
 /// user's checkout.
 pub fn checkout_detached(project: &Project, sha: &str, dir: &Path) -> GitResult<()> {
@@ -346,7 +379,7 @@ mod tests {
         assert_eq!(candidate.files_changed, 1);
         assert_ne!(candidate.head_sha, base);
         let quest = Quest { id: "q1".into(), project_id: "p".into(), title: "q".into(), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some(base.clone()), plan_version: 1, created_at: now(), updated_at: now() };
-        let task = Task { id: "t1".into(), quest_id: "q1".into(), title: "add file".into(), instructions: String::new(), acceptance: vec![], depends_on: vec![], role: "implementer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Accepted, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now() };
+        let task = Task { id: "t1".into(), quest_id: "q1".into(), title: "add file".into(), instructions: String::new(), acceptance: vec![], depends_on: vec![], role: "implementer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Accepted, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now() };
         let merged = integrate(&project, &quest, &candidate, &task).unwrap();
         assert_ne!(merged, base);
         let files = git(Path::new(&project.repo_path), &["ls-tree", "--name-only", &merged]).unwrap();

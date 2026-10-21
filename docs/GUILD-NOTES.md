@@ -119,3 +119,15 @@ Decided with the user: the agent you talk to is not the one that answers the mem
 - **The Visual tab** in guild mode: notes, swatches (a click copies the hex), a palette form, image cards with their colours, **→ Palette**, and files dropped on the window (or picked) sent to `visual.add`. CLI `guild visual <project> …`; the brief names it.
 - Checked: palette parsing on the formats artists use; colours most present first, no near twins, exact for pixel art (it failed on a blended thumbnail first); a service test adding a PNG and a `.gpl`, captioning, notes, the prompt context, the export's copies, removal deleting the copy, and the policy (read yes, delete no — which caught a delete allowed when the guild's home sits in the temporary folder); an app test dropping two files on the tab (seen failing with the drop handling removed), and captures of the tab on the demo.
 
+## M18 — Retries that go on, quests that catch up, limits per task (2026-10-21)
+
+The rest of the guild's feedback on harness-directive.
+
+- **F-HD-03 (c), F-HD-05**: an attempt that stops before finishing (failed, timed out, cancelled) keeps what it had written: `keep_partial` commits it as `Attempt::partial`. A retry goes on from the last candidate, else from that partial work (`Carried::Partial`, and its prompt says so); when neither applies on the current base, its prompt names the branch and commit where the work is (`Carried::Left`) instead of starting over in silence.
+- **F-HD-06**: `quest.sync` / `guild quest sync <quest> [--from REF]` merges the project's target into the quest's branch in a temporary checkout, with compare-and-swap on the branch; a conflict aborts and names its files; the user's checkout never moves. Attempts started afterwards see it.
+- **F-HD-07**: `Task::timeout_minutes` (`--timeout` on `task new`/`task set`, `timeoutMinutes` in `guild_start_quest`) is an attempt's limit instead of the guild's; the snapshot carries each running attempt's working time and limit, and `guild_status`/`guild_wait` mark with ⚠ one past two thirds of it.
+- **F-HD-14** (the project's): harness-directive's `tools/capture.sh` gives each capture two tries of 120 s (its 0ac8d48).
+- **A Kiro room that would not go**: Herdr keeps naming a pane after the last agent it saw there; a Kiro that ended left a "kiro" with an unknown state whose pane was only a shell, and finishing it again typed /exit into zsh. `shells::still_running`: an agent Herdr cannot read the state of, whose pane's shell runs nothing, has exited, and its room goes.
+- The feedback entries are now in the guild's database (FB-001…FB-014) with their status and commit.
+- Checked: a retry after a failure that had written a file starts with it and is told so (it fails with `keep_partial` disabled); a quest takes a change from main, moves nothing when there is none, and a conflict names its file and leaves the branch where it was; a task's own limit keeps an attempt past the guild's (it fails when the limit is ignored) and the ⚠ shows past two thirds; the exited-agent rule on a table of processes, and on the real panes (the Kiro pane's shell had no children, this session's had one).
+
