@@ -25,10 +25,7 @@ pub struct Assets {
     props: HashMap<&'static str, TextureHandle>,
 }
 
-pub const ROOM_FILES: [(&str, &[u8]); 24] = [
-    ("guild_room", include_bytes!("../Resources/Sprites/rooms/guild_room.png")),
-    ("guild_room_medium", include_bytes!("../Resources/Sprites/rooms/guild_room_medium.png")),
-    ("guild_room_small", include_bytes!("../Resources/Sprites/rooms/guild_room_small.png")),
+pub const ROOM_FILES: [(&str, &[u8]); 21] = [
     ("room_working", include_bytes!("../Resources/Sprites/rooms/room_working.png")),
     ("room_working_front", include_bytes!("../Resources/Sprites/rooms/room_working_front.png")),
     ("room_blocked", include_bytes!("../Resources/Sprites/rooms/room_blocked.png")),
@@ -176,15 +173,6 @@ impl Assets {
         // A background shell: an iron cauldron of green brew on little legs.
         prop("cauldron", pixel_image(&["..kkkkkkkk..", ".kGGgGGGgGk.", "kkkkkkkkkkkk", "kIiIIIIIIIdk", "kIiIIIIIIIdk", "kIIIIIIIIIdk", ".kIIIIIIIdk.", "..kkkkkkkk..", "..k......k.."],
             &[('k', INK), ('G', rgb(0.55, 0.92, 0.36)), ('g', rgb(0.3, 0.7, 0.25)), ('I', rgb(0.33, 0.33, 0.4)), ('i', rgb(0.55, 0.56, 0.64)), ('d', rgb(0.2, 0.2, 0.26))]), nearest);
-        // The guild's room: each member's chemistry set on its table, the
-        // stool it sits on, the director's pulpit.
-        let bench_colors = [('k', INK), ('w', rgb(0.635, 0.376, 0.235)), ('d', rgb(0.408, 0.22, 0.141)), ('l', rgb(0.769, 0.506, 0.322)),
-            ('R', rgb(0.894, 0.231, 0.267)), ('C', rgb(0.173, 0.91, 0.961)), ('G', rgb(0.388, 0.78, 0.302)), ('g', rgb(0.75, 0.85, 0.9)), ('W', rgb(0.918, 0.831, 0.667)), ('b', rgb(0.353, 0.412, 0.533))];
-        prop("chem_set", pixel_image(&["..k....k.....k..", ".kgk..kgk...kgk.", ".kRk.kgCgk..kGk.", "kRRRkkCCCk.kGGGk", "kRRRkkCCCk.kGGGk", "kkkkkkkkkkkkkkkk",
-            "kllllllllllllllk", "kwwwwwwwwwwwwwwk", "kddddddddddddddk", "kkkkkkkkkkkkkkkk", ".kd..........dk.", ".kd..........dk.", ".kd..........dk.", ".kk..........kk."], &bench_colors), nearest);
-        prop("stool", pixel_image(&["kkkkkkkk", "kllllllk", "kwwwwwwk", "kkkkkkkk", ".kd..dk.", ".kd..dk.", ".kd..dk.", ".kk..kk."], &bench_colors), nearest);
-        prop("pulpit", pixel_image(&["......kkkkkk", "...kkkWWWkWk", ".kkWWbWWWkWk", "kWWWWWWWbkWk", "kkkkkkkkkkkk", "kllllllllllk", ".kkkkkkkkkk.", "...kwwwwk...",
-            "...kwddwk...", "...kwddwk...", "...kwddwk...", "...kwddwk...", "...kwddwk...", "..kkwwwwkk..", ".kllllllllk.", ".kkkkkkkkkk."], &bench_colors), nearest);
         prop("glow", radial(64, Color32::WHITE, &[(0.0, 1.0), (0.45, 0.35), (1.0, 0.0)], 0.0), TextureOptions::LINEAR);
         prop("darkness", radial(128, rgb(0.02, 0.01, 0.04), &[(0.0, 0.0), (0.1, 0.12), (0.28, 0.6), (0.5, 0.82), (1.0, 0.86)], 0.86), TextureOptions::LINEAR);
         Assets { rooms, heroes, sleepers, arms, git_tome, git_tome_arms, props }
