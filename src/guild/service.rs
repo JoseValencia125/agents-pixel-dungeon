@@ -2398,7 +2398,7 @@ impl Service {
             Permission => {
                 let p = attempt.pending_permission.clone().ok_or_else(|| ApiError::conflict("the permission was answered already"))?;
                 let options: Vec<String> = p.options.iter().map(|o| format!("{} ({})", o.name, o.kind)).collect();
-                format!("{worker} asks for a permission while working in its worktree {}:\n\n```\n{}\n```\n{}\n\nIts harness offers: {}.", workspace.map(|w| w.path).unwrap_or_default(), p.title.trim(), p.detail.trim(), options.join(", "))
+                format!("{worker} asks for a permission while working in its worktree {} (its scratch folder: {}):\n\n```\n{}\n```\n{}\n\nIts harness offers: {}.", workspace.map(|w| w.path).unwrap_or_default(), crate::paths::scratch_dir(&attempt.id).display(), p.title.trim(), p.detail.trim(), options.join(", "))
             }
             Candidate => {
                 let mut diff = attempt.candidate.as_ref().and_then(|c| c.diff_artifact_id.clone()).and_then(|id| self.artifact_text(&id).ok()).unwrap_or_default();
