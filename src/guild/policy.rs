@@ -66,19 +66,60 @@ fn program_name(word: &str) -> String {
 /// The programs a script's parts start with.
 fn programs_in(script: &str) -> Vec<String> {
     let flat = script.replace("$(", " ; ").replace('`', " ; ").replace(')', " ; ");
-    flat.split(|c| c == '\n' || c == ';' || c == '|' || c == '&').filter_map(|part| {
-        let words = command_words(part)?;
-        words.first().map(|w| program_name(w))
+    split_parts(&flat).iter().filter_map(|part| {
+        let words = command_words(&shell_words(part))?;
+        words.first().map(|w| program_name(w)).filter(|n| !n.chars().all(|c| c.is_ascii_digit()))
     }).collect()
+}
+
+/// A script cut where the shell would run the next command — newlines,
+/// `;`, `|`, `&` — but never inside quotes, where those are text.
+fn split_parts(script: &str) -> Vec<String> {
+    let (mut parts, mut part, mut quote, mut escaped) = (vec![], String::new(), None::<char>, false);
+    for c in script.chars() {
+        if escaped { part.push(c); escaped = false; continue; }
+        match (quote, c) {
+            (Some('\''), '\'') | (Some('"'), '"') => { quote = None; part.push(c); }
+            (Some(_), _) => { if c == '\\' && quote == Some('"') { escaped = true; } part.push(c); }
+            (None, '\'' | '"') => { quote = Some(c); part.push(c); }
+            (None, '\\') => { escaped = true; part.push(c); }
+            (None, '\n' | ';' | '|' | '&') => parts.push(std::mem::take(&mut part)),
+            (None, _) => part.push(c),
+        }
+    }
+    parts.push(part);
+    parts
+}
+
+/// A command's words as the shell reads them: split on spaces outside
+/// quotes, quotes taken off (`'s/^/x /'` is one word, not a path `/`).
+fn shell_words(part: &str) -> Vec<String> {
+    let (mut words, mut word, mut quote, mut started) = (vec![], String::new(), None::<char>, false);
+    let mut chars = part.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some('"'), '\\') => { if let Some(n) = chars.next() { word.push(n); } }
+            (Some(_), _) => word.push(c),
+            (None, '\'' | '"') => { quote = Some(c); started = true; }
+            // Kept as written: on Windows it separates a path's parts.
+            (None, '\\') => { word.push('\\'); if let Some(n) = chars.next() { word.push(n); } started = true; }
+            (None, c) if c.is_whitespace() => { if started || !word.is_empty() { words.push(std::mem::take(&mut word)); } started = false; }
+            (None, _) => { word.push(c); started = true; }
+        }
+    }
+    if started || !word.is_empty() { words.push(word); }
+    words
 }
 
 /// A part's words without the shell's own (loops, conditions, `time`) and
 /// the variable assignments before the program; None for a part that runs
 /// nothing (`for x in …`, `done`).
-fn command_words(part: &str) -> Option<Vec<&str>> {
-    let mut words: Vec<&str> = part.split_whitespace().collect();
+fn command_words(words: &[String]) -> Option<Vec<String>> {
+    let mut words: Vec<String> = words.to_vec();
     loop {
-        let first = *words.first()?;
+        let first = words.first()?.clone();
+        let first = first.as_str();
         let bare = first.trim_matches(|c| c == '(' || c == ')' || c == '{' || c == '}');
         if ["for", "case", "select", "in", "esac", ";;"].contains(&bare) { return None; }
         if bare.is_empty() || ["do", "then", "else", "elif", "time", "!", "if", "while", "until", "done", "fi"].contains(&bare) || (first.contains('=') && !first.starts_with('-')) {
@@ -107,22 +148,53 @@ fn absolute(path: &str) -> bool {
 /// for members to look at (never to delete).
 fn visual(path: &str) -> bool { std::path::Path::new(path).starts_with(crate::paths::home().join("visual")) }
 
+/// What a decision is made in: the project's own programs and the
+/// attempt's worktree, whose absolute paths are inside it.
+struct Ctx<'a> { programs: &'a [String], worktree: &'a str }
+
+impl Ctx<'_> {
+    /// A path the member may not reach without asking: absolute, and in
+    /// neither its worktree, the temporary folder nor the visual direction.
+    fn outside(&self, w: &str) -> bool {
+        absolute(w) && !w.starts_with("/dev/null") && !temporary(w) && !visual(w) && !(!self.worktree.is_empty() && std::path::Path::new(w).starts_with(self.worktree))
+    }
+}
+
 /// Decide a permission asked for in a worktree. File tools are allowed (the
 /// worktree is the member's own); a command is allowed when each of its parts
 /// runs a listed program, or one the project runs itself (`programs`), and
 /// stays inside the worktree or the temporary folder.
-pub fn decide(title: &str, programs: &[String]) -> Verdict {
+pub fn decide(title: &str, programs: &[String]) -> Verdict { decide_in(title, programs, "") }
+
+/// A harness's whole request: Claude Code names its tool in the title
+/// (`Bash: …`, cut short) and puts its input in the detail as JSON — the
+/// command to run, or the file to touch. Those are what is judged.
+pub fn decide_request(title: &str, detail: &str, programs: &[String], worktree: &str) -> Verdict {
+    let ctx = Ctx { programs, worktree };
+    if let Ok(input) = serde_json::from_str::<serde_json::Value>(detail) {
+        if let Some(cmd) = input.get("command").and_then(serde_json::Value::as_str) { return command(cmd, &ctx); }
+        let tool = title.split(':').next().unwrap_or("").trim().to_lowercase();
+        let path = ["file_path", "notebook_path", "path"].iter().find_map(|k| input.get(*k).and_then(serde_json::Value::as_str));
+        if ["edit", "multiedit", "write", "notebookedit", "read", "glob", "grep", "ls"].contains(&tool.as_str()) {
+            return match path { Some(p) if ctx.outside(p) || p.starts_with('~') || p.contains("..") => Verdict::Ask, _ => Verdict::Allow };
+        }
+    }
+    decide_in(title, programs, worktree)
+}
+
+fn decide_in(title: &str, programs: &[String], worktree: &str) -> Verdict {
+    let ctx = Ctx { programs, worktree };
     let t = title.trim();
     let lower = t.to_lowercase();
     if ["replace in file", "write file", "read file", "create file", "edit file", "read", "write", "list directory", "search", "glob", "grep"].iter().any(|k| lower == *k || lower.starts_with(&format!("{k} "))) {
         return Verdict::Allow;
     }
-    command(t, programs)
+    command(t, &ctx)
 }
 
 /// `$(…)` and backticks replaced by a placeholder once what they run is
 /// judged; the first verdict that is not Allow, if any.
-fn substitutions(script: &str, programs: &[String]) -> Result<String, Verdict> {
+fn substitutions(script: &str, ctx: &Ctx) -> Result<String, Verdict> {
     let mut out = String::new();
     let mut rest = script;
     while let Some(i) = rest.find("$(") {
@@ -134,7 +206,7 @@ fn substitutions(script: &str, programs: &[String]) -> Result<String, Verdict> {
             match c { '(' => depth += 1, ')' => { depth -= 1; if depth == 0 { end = Some(j); break; } } _ => {} }
         }
         let Some(j) = end else { return Err(Verdict::Ask) };
-        match command(&body[..j], programs) { Verdict::Allow => out.push('X'), other => return Err(other) }
+        match command(&body[..j], ctx) { Verdict::Allow => out.push('X'), other => return Err(other) }
         rest = &body[j + 1..];
     }
     out.push_str(rest);
@@ -142,12 +214,12 @@ fn substitutions(script: &str, programs: &[String]) -> Result<String, Verdict> {
     if parts.len() % 2 == 0 { return Err(Verdict::Ask); }
     let mut flat = String::new();
     for (k, part) in parts.iter().enumerate() {
-        if k % 2 == 1 { match command(part, programs) { Verdict::Allow => flat.push('X'), other => return Err(other) } } else { flat.push_str(part); }
+        if k % 2 == 1 { match command(part, ctx) { Verdict::Allow => flat.push('X'), other => return Err(other) } } else { flat.push_str(part); }
     }
     Ok(flat)
 }
 
-fn command(cmd: &str, programs: &[String]) -> Verdict {
+fn command(cmd: &str, ctx: &Ctx) -> Verdict {
     // A heredoc's body is data for the program before it, not commands.
     let mut script = String::new();
     let mut heredoc: Option<String> = None;
@@ -165,35 +237,36 @@ fn command(cmd: &str, programs: &[String]) -> Verdict {
         }
         script.push('\n');
     }
-    let script = match substitutions(&script, programs) { Ok(s) => s, Err(v) => return v };
+    let script = match substitutions(&script, ctx) { Ok(s) => s, Err(v) => return v };
     let mut any = false;
-    for part in script.split(|c| c == '\n' || c == ';' || c == '|' || c == '&') {
-        let Some(mut words) = command_words(part) else { continue };
+    for part in split_parts(&script) {
+        let Some(mut words) = command_words(&shell_words(&part)) else { continue };
         if words.is_empty() { continue; }
         any = true;
         // Redirections and plain numbers left over from `2>&1`, `> file`.
         if words[0].starts_with('>') || words[0].starts_with('<') || words[0].chars().all(|c| c.is_ascii_digit()) { continue; }
-        let mut name = program_name(words[0]);
+        let mut name = program_name(&words[0]);
         // A shell running a script: judge the script.
         if SHELLS.contains(&name.as_str()) {
-            match words.get(1).copied() {
+            match words.get(1).map(String::as_str) {
                 Some("-c") => {
-                    let inner = words[2..].join(" ");
-                    match command(inner.trim_matches(|c| c == '\'' || c == '"'), programs) { Verdict::Allow => continue, other => return other }
+                    // The script is the word after -c; what follows it are its arguments.
+                    let inner = words.get(2).cloned().unwrap_or_default();
+                    match command(&inner, ctx) { Verdict::Allow => continue, other => return other }
                 }
-                Some(file) if !file.starts_with('-') && !file.starts_with('/') && !file.starts_with('~') && !file.contains("..") => { words.remove(0); name = String::new(); }
+                Some(file) if !file.starts_with('-') && !absolute(file) && !file.starts_with('~') && !file.contains("..") => { words.remove(0); name = String::new(); }
                 _ => return Verdict::Ask,
             }
         }
         if REFUSED.contains(&name.as_str()) { return Verdict::Refuse; }
-        if name == "rm" { if words.iter().any(|w| { let w = w.trim_matches(|c| c == '\'' || c == '"'); (absolute(w) && (!temporary(w) || visual(w))) || w.starts_with('~') || w.contains("..") }) { return Verdict::Refuse; } continue; }
-        if name == "git" && words.get(1).is_some_and(|w| ["push", "commit", "reset", "rebase", "merge", "worktree", "clean", "remote", "config", "tag"].contains(w)) { return Verdict::Refuse; }
+        if name == "rm" { if words.iter().any(|w| { let w = w.trim_matches(|c| c == '\'' || c == '"'); (absolute(w) && (visual(w) || !(temporary(w) || (!ctx.worktree.is_empty() && std::path::Path::new(w).starts_with(ctx.worktree))))) || w.starts_with('~') || w.contains("..") }) { return Verdict::Refuse; } continue; }
+        if name == "git" && words.get(1).is_some_and(|w| ["push", "commit", "reset", "rebase", "merge", "worktree", "clean", "remote", "config", "tag"].contains(&w.as_str())) { return Verdict::Refuse; }
         // Out of the worktree: absolute paths (but the temporary folder), the home folder, climbing up.
-        if words.iter().skip(1).any(|w| { let w = w.trim_matches(|c| c == '\'' || c == '"'); absolute(w) && !w.starts_with("/dev/null") && !temporary(w) && !visual(w) || w.starts_with('~') || w.starts_with("../") || w == ".." }) { return Verdict::Ask; }
+        if words.iter().skip(1).any(|w| ctx.outside(w) || w.starts_with('~') || w.starts_with("../") || w == "..") { return Verdict::Ask; }
         if name.is_empty() { continue; }
-        if programs.iter().any(|p| *p == name) { continue; }
+        if ctx.programs.iter().any(|p| *p == name) { continue; }
         let Some((_, subs)) = PROGRAMS.iter().find(|(p, _)| *p == name) else { return Verdict::Ask };
-        if !subs.is_empty() && !words.get(1).is_some_and(|w| subs.contains(w)) { return Verdict::Ask; }
+        if !subs.is_empty() && !words.get(1).is_some_and(|w| subs.contains(&w.as_str())) { return Verdict::Ask; }
     }
     if any { Verdict::Allow } else { Verdict::Ask }
 }
@@ -281,6 +354,27 @@ mod tests {
     }
 
     #[test]
+    fn quotes_are_text_and_claudes_requests_are_judged_by_what_they_run() {
+        let programs = project_programs(&godot_project());
+        // Lira, 2026-10-21 22:38: a `/` inside sed's quoted expression was taken for a path.
+        let lira = r#"out=$(godot --headless --path . -s tools/refuge_money_check.gd 2>&1); echo "$out" | tail -4; echo "$out" | grep -c "SCRIPT ERROR" | sed 's/^/SCRIPT ERROR count: /'; echo "===EXIT varies===""#;
+        assert_eq!(decide(lira, &programs), Verdict::Allow);
+        assert_eq!(decide(r#"grep -c "a|b;c&d" tools/x.gd"#, &[]), Verdict::Allow, "separators inside quotes are text");
+        assert_eq!(decide(r#"echo "do not curl this""#, &[]), Verdict::Allow, "a word inside quotes is not a program");
+        assert!(!programs.contains(&"1".to_string()), "2>&1 leaves no program behind: {programs:?}");
+        // Orin (Claude Code), 22:39: the title is cut short, the command is in the detail.
+        let detail = r#"{"command": "S=/var/folders/v6/T/guild-01m5g; grep -E \"^(OK|FALLA) +4 \" $S/before.txt; rg -n \"INDUSTRY negativa\" tools/test_refuge.gd | head", "description": "Check baseline"}"#;
+        assert_eq!(decide_request("Bash: S=/var/folders/v6/T/guild-01m5g…", detail, &programs, "/wt/a1"), Verdict::Allow);
+        assert_eq!(decide_request("Bash: curl…", r#"{"command": "curl https://x.y"}"#, &programs, "/wt/a1"), Verdict::Refuse);
+        // Its file tools: inside the worktree (absolute, as Claude writes them) yes, elsewhere ask.
+        assert_eq!(decide_request("Edit: refuge_sim.gd", r#"{"file_path": "/wt/a1/scripts/sim/refuge_sim.gd"}"#, &programs, "/wt/a1"), Verdict::Allow);
+        assert_eq!(decide_request("Write: x", r#"{"file_path": "/Users/me/.zshrc"}"#, &programs, "/wt/a1"), Verdict::Ask);
+        // A Bash command naming the worktree by its absolute path stays inside.
+        assert_eq!(decide_request("Bash: cat", r#"{"command": "cat /wt/a1/tools/run.gd && rm -f /wt/a1/out.csv"}"#, &programs, "/wt/a1"), Verdict::Allow);
+        assert_eq!(decide_request("Bash: rm", r#"{"command": "rm -rf /wt/other"}"#, &programs, "/wt/a1"), Verdict::Refuse);
+    }
+
+    #[test]
     fn windows_paths_are_absolute_too() {
         for p in ["C:\\Users\\me\\game", "c:/Users/me", "\\\\server\\share\\x", "/etc/passwd"] { assert!(absolute(p), "{p}"); }
         for p in ["src\\main.gd", "tools/run.gd", "./x", ":x", "C:relative"] { assert!(!absolute(p), "{p}"); }
@@ -298,3 +392,4 @@ mod tests {
         assert_eq!(option_for(&Verdict::Ask, "make", &options), None);
     }
 }
+

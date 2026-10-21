@@ -249,7 +249,12 @@ impl Service {
         attempt_transition(a.state, to).map_err(ApiError::conflict)?;
         a.state = to;
         if failure.is_some() { a.failure = failure; }
-        if to.is_terminal() { a.finished_at = Some(now()); }
+        if to.is_terminal() {
+            a.finished_at = Some(now());
+            // A finished attempt asks for nothing any more: its harness is gone.
+            a.pending_permission = None;
+            a.deciding = false;
+        }
         a.updated_at = now();
         store.put_attempt(&a)?;
         let kind = match to {
@@ -2222,7 +2227,11 @@ impl Service {
                 self.emit(Event::new("permission.requested", "harness").about_attempt(attempt).with(json!({"requestId": request_id, "title": title, "detail": detail, "options": options})));
                 // Routine work in the worktree is answered at once; only the unusual waits.
                 let programs = self.project_of_attempt(attempt).map(|p| crate::policy::project_programs(&p)).unwrap_or_default();
-                let verdict = crate::policy::decide(&title, &programs);
+                let worktree = {
+                    let store = self.store.lock().unwrap();
+                    store.attempt(attempt_id).ok().flatten().and_then(|a| a.workspace_id).and_then(|w| store.workspace(&w).ok().flatten()).map(|w| w.path).unwrap_or_default()
+                };
+                let verdict = crate::policy::decide_request(&title, &detail, &programs, &worktree);
                 if let Some(option) = crate::policy::option_for(&verdict, &title, &options) {
                     let by = if verdict == crate::policy::Verdict::Allow { "policy" } else { "policy-refused" };
                     if let Err(e) = self.permission_respond(&json!({"attemptId": attempt_id, "requestId": request_id, "optionId": option, "by": by})) {
@@ -2431,7 +2440,12 @@ impl Service {
             Candidate => {
                 let mut diff = attempt.candidate.as_ref().and_then(|c| c.diff_artifact_id.clone()).and_then(|id| self.artifact_text(&id).ok()).unwrap_or_default();
                 if crate::domain::cut(&mut diff, 40_000) { diff.push_str("\n… (cut)"); }
-                let verifiers: Vec<String> = attempt.verifier_results.iter().map(|v| format!("- {} {}{}", v.id, v.status, v.tail.lines().last().map(|l| format!(": {l}")).unwrap_or_default())).collect();
+                // Each verifier's end, not only its last line: what it ran is the evidence.
+                let verifiers: Vec<String> = attempt.verifier_results.iter().map(|v| {
+                    let lines: Vec<&str> = v.tail.lines().collect();
+                    let tail = lines[lines.len().saturating_sub(15)..].join("\n    ");
+                    format!("- {} {}{}{}", v.id, v.status, if v.required { " (required)" } else { "" }, if tail.trim().is_empty() { String::new() } else { format!(":\n    {tail}") })
+                }).collect();
                 format!("{worker} left this candidate. Its summary: {}\n\nVerifiers:\n{}\n\nDiff:\n```diff\n{diff}\n```", attempt.summary.trim(), if verifiers.is_empty() { "- none".into() } else { verifiers.join("\n") })
             }
             Failure => format!("The task ran out of attempts ({} of {}). The last one, by {worker}, failed: {}\n\nIts last words: {}", task.attempts_made, task.max_attempts, attempt.failure.clone().unwrap_or_default(), attempt.summary.trim()),
@@ -4118,6 +4132,19 @@ mod tests {
         fake.attempts[0].worked_seconds = 20;
         assert!(!crate::mcp::task_line(&fake, &fake.tasks[0]).contains("⚠"), "not yet");
         service.handle("attempt.cancel", &json!({"attemptId": a.id})).unwrap();
+    }
+
+    #[test]
+    fn an_attempt_that_ends_while_asking_asks_for_nothing_any_more() {
+        let (_home, service, quest_id) = setup(MockBehaviour::AskPermission { file: "x.txt".into(), content: "x".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Ask first"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "waiting", |s| s.attempts.first().is_some_and(|a| a.pending_permission.is_some()));
+        service.handle("attempt.cancel", &json!({"attemptId": snap.attempts[0].id})).unwrap();
+        let snap = wait_for(&service, "ended", |s| s.attempts[0].state.is_terminal());
+        assert!(snap.attempts[0].pending_permission.is_none(), "a cancelled attempt kept its question");
+        let call = |m: &str, p: Value| service.handle(m, &p).map_err(|e| e.message);
+        assert!(!crate::mcp::run_tool("guild_status", &json!({}), &call, &|_| {}).unwrap().contains("NEEDS YOU: permission"));
     }
 
     #[test]
