@@ -45,11 +45,12 @@ USAGE
   guild models [kiro|codex|claude|mock]  the models the harness announces
 
   guild quest new <project> <title> [--description TEXT]
+  guild quest sync <quest> [--from REF]   bring the project's target (or REF) into the quest's branch; later attempts start from it
   guild task new <quest> <title> [--instructions TEXT] [--accept TEXT]... [--depends ID,ID]
                                      [--role R] [--member ID] [--model M] [--priority N] [--max-attempts N] [--id ID]
-                                     [--strategy single|reviewed|race] [--candidates N] [--select policy|judge|user] [--auto-integrate]
+                                     [--strategy single|reviewed|race] [--candidates N] [--select policy|judge|user] [--auto-integrate] [--timeout MIN]
                                      a race runs N members at once; the selection picks among the candidates that passed the verifiers
-  guild task set <task> [--title T] [--instructions TEXT] [--accept TEXT]... [--depends ID,ID | --no-depends] [--role R] [--member ID] [--priority N]
+  guild task set <task> [--title T] [--instructions TEXT] [--accept TEXT]... [--depends ID,ID | --no-depends] [--role R] [--member ID] [--priority N] [--timeout MIN]
                                      change a task nobody has started yet; --accept replaces the criteria
   guild decisions <task>             how each candidate was chosen: by the policy, a judge or you
   guild question new <project> --question TEXT [--context TEXT] [--system ID]
@@ -484,6 +485,12 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             println!("member {} · {} · model {}", r["id"].as_str().unwrap_or(""), r["harness"].as_str().unwrap_or(""), r["model_id"].as_str().unwrap_or("(harness default)"));
             Ok(())
         }
+        "quest" if a.positional.first().copied() == Some("sync") => {
+            let r = call(&ensure_running()?, "quest.sync", json!({"questId": a.pos(1, "quest")?, "from": a.flag("from")}))?;
+            if r["changed"] == true { println!("quest {} now has {} ({} files): {}", r["questId"].as_str().unwrap_or(""), r["from"].as_str().unwrap_or(""), r["files"].as_array().map(Vec::len).unwrap_or(0), r["files"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")); }
+            else { println!("quest {} already has {}", r["questId"].as_str().unwrap_or(""), r["from"].as_str().unwrap_or("")); }
+            Ok(())
+        }
         "quest" => {
             if a.pos(0, "subcommand")? != "new" { return Err(USAGE.into()); }
             let r = call(&ensure_running()?, "quest.create", json!({"projectId": a.pos(1, "project")?, "title": a.pos(2, "title")?, "description": a.flag("description")}))?;
@@ -497,6 +504,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             if let Some(d) = a.flag("depends") { params["dependsOn"] = json!(d.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).collect::<Vec<_>>()); }
             if a.has("no-depends") { params["dependsOn"] = json!([]); }
             if let Some(p) = a.flag("priority").and_then(|s| s.parse::<i64>().ok()) { params["priority"] = json!(p); }
+            if let Some(m) = a.flag("timeout").and_then(|s| s.parse::<u64>().ok()) { params["timeoutMinutes"] = json!(m); }
             let r = call(&ensure_running()?, "task.update", params)?;
             println!("task {} · {} · v{} · depends on {}", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""), r["version"], r["depends_on"].as_array().map(|d| d.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).filter(|s| !s.is_empty()).unwrap_or_else(|| "nothing".into()));
             Ok(())
@@ -510,6 +518,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                 "priority": a.flag("priority").and_then(|s| s.parse::<i64>().ok()), "maxAttempts": a.flag("max-attempts").and_then(|s| s.parse::<u64>().ok()),
                 "candidates": a.flag("candidates").and_then(|s| s.parse::<u64>().ok()), "autoIntegrate": a.has("auto-integrate"),
                 "strategy": a.flag("strategy"), "selection": a.flag("select"),
+                "timeoutMinutes": a.flag("timeout").and_then(|s| s.parse::<u64>().ok()),
             });
             let r = call(&ensure_running()?, "task.create", params)?;
             println!("task {} · {} ({})", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""), r["state"].as_str().unwrap_or(""));

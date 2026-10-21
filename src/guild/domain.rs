@@ -171,6 +171,9 @@ pub struct Task {
     /// Integrate the best passing candidate without asking.
     #[serde(default)]
     pub auto_integrate: bool,
+    /// How long an attempt may work on it, when not the guild's default.
+    #[serde(default)]
+    pub timeout_minutes: Option<u32>,
     /// The candidate that won, once decided.
     #[serde(default)]
     pub winner_attempt_id: Option<String>,
@@ -365,6 +368,10 @@ pub struct Attempt {
     /// stale harness stream cannot finish a newer generation.
     pub generation: u32,
     pub candidate: Option<Candidate>,
+    /// What an attempt that stopped before finishing (failed, timed out,
+    /// cancelled) had written: committed so a retry goes on from it.
+    #[serde(default)]
+    pub partial: Option<Candidate>,
     /// What the agent said last, for the room and the inspector.
     pub summary: String,
     /// Last tool activity: read, forge, brew, summon, plan, type, gems.
@@ -385,6 +392,12 @@ pub struct Attempt {
     /// Why the orchestrator left the decision to the delegate or the user.
     #[serde(default)]
     pub escalation: Option<String>,
+    /// While it runs, in the snapshot only: how long it has worked (its
+    /// permission waits left out) and how long it may.
+    #[serde(default)]
+    pub worked_seconds: u64,
+    #[serde(default)]
+    pub limit_seconds: u64,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub created_at: String,
@@ -704,7 +717,7 @@ mod tests {
         Task {
             id: id.into(), quest_id: "q".into(), title: id.into(), instructions: String::new(), acceptance: vec![],
             depends_on: deps.iter().map(|s| s.to_string()).collect(), role: "implementer".into(), member_id: None, model_id: None,
-            priority: 0, state: TaskState::Pending, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, winner_attempt_id: None, version: 1,
+            priority: 0, state: TaskState::Pending, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, version: 1,
             created_at: now(), updated_at: now(),
         }
     }
