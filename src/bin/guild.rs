@@ -45,6 +45,8 @@ USAGE
                                      [--role R] [--member ID] [--model M] [--priority N] [--max-attempts N] [--id ID]
                                      [--strategy single|reviewed|race] [--candidates N] [--select policy|judge|user] [--auto-integrate]
                                      a race runs N members at once; the selection picks among the candidates that passed the verifiers
+  guild task set <task> [--title T] [--instructions TEXT] [--accept TEXT]... [--depends ID,ID | --no-depends] [--role R] [--member ID] [--priority N]
+                                     change a task nobody has started yet; --accept replaces the criteria
   guild decisions <task>             how each candidate was chosen: by the policy, a judge or you
   guild question new <project> --question TEXT [--context TEXT] [--system ID]
   guild question resolve <project> <Q-id> --decision TEXT [--why TEXT] [--answer TEXT] [--evidence TEXT]... [--rejected TEXT]...
@@ -180,7 +182,7 @@ fn parse(args: &[String]) -> Args<'_> {
     Args { positional, flags }
 }
 
-fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground" | "detach" | "enable" | "disable") }
+fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground" | "detach" | "enable" | "disable" | "no-depends") }
 
 impl Args<'_> {
     fn flag(&self, name: &str) -> Option<&str> { self.flags.iter().rev().find(|(k, _)| *k == name).and_then(|(_, v)| *v) }
@@ -451,6 +453,17 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             if a.pos(0, "subcommand")? != "new" { return Err(USAGE.into()); }
             let r = call(&ensure_running()?, "quest.create", json!({"projectId": a.pos(1, "project")?, "title": a.pos(2, "title")?, "description": a.flag("description")}))?;
             println!("quest {} · {}", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        "task" if a.positional.first().copied() == Some("set") => {
+            let mut params = json!({"taskId": a.pos(1, "task")?});
+            for (flag, key) in [("title", "title"), ("instructions", "instructions"), ("role", "role"), ("member", "memberId")] { if let Some(v) = a.flag(flag) { params[key] = json!(v); } }
+            if !a.all("accept").is_empty() { params["acceptance"] = json!(a.all("accept")); }
+            if let Some(d) = a.flag("depends") { params["dependsOn"] = json!(d.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).collect::<Vec<_>>()); }
+            if a.has("no-depends") { params["dependsOn"] = json!([]); }
+            if let Some(p) = a.flag("priority").and_then(|s| s.parse::<i64>().ok()) { params["priority"] = json!(p); }
+            let r = call(&ensure_running()?, "task.update", params)?;
+            println!("task {} · {} · v{} · depends on {}", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""), r["version"], r["depends_on"].as_array().map(|d| d.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).filter(|s| !s.is_empty()).unwrap_or_else(|| "nothing".into()));
             Ok(())
         }
         "task" => {

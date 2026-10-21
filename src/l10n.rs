@@ -12,6 +12,8 @@ pub const LANGUAGES: [&str; 5] = ["es", "en", "fr", "it", "pt"];
 pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock::new(|| {
     let rows: &[(&str, [&str; 4])] = &[
         // Guild mode: an agent orchestrates the guild
+        ("{} · el orquestador decide", ["{} · the orchestrator is deciding", "{} · l'orchestrateur décide", "{} · l'orchestratore decide", "{} · o orquestrador decide"]),
+        ("{} · escalado: {}", ["{} · escalated: {}", "{} · remonté : {}", "{} · inoltrato: {}", "{} · escalado: {}"]),
         ("⚔ Modo guild", ["⚔ Guild mode", "⚔ Mode guilde", "⚔ Modalità gilda", "⚔ Modo guilda"]),
         ("Que este agente sea el orquestador de la guild: arma el equipo, reparte el trabajo y lleva el diseño", ["Make this agent the guild's orchestrator: it builds the team, hands out the work and keeps the design", "Faire de cet agent l'orchestrateur de la guilde : il forme l'équipe, répartit le travail et tient le design", "Rendi questo agente l'orchestratore della gilda: forma la squadra, distribuisce il lavoro e cura il design", "Fazer deste agente o orquestrador da guilda: monta a equipe, distribui o trabalho e cuida do design"]),
         ("Modo guild: que este agente sea el orquestador de la guild", ["Guild mode: make this agent the guild's orchestrator", "Mode guilde : faire de cet agent l'orchestrateur de la guilde", "Modalità gilda: rendi questo agente l'orchestratore della gilda", "Modo guilda: fazer deste agente o orquestrador da guilda"]),

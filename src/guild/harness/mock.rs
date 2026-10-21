@@ -45,6 +45,8 @@ pub struct MockHarness {
     /// How the mock answers an AI player's turn (the prompt has "## Your move").
     player: Mutex<Option<PlayerFn>>,
     orchestrator_reply: Mutex<Option<String>>,
+    /// How the mock rules when the guild's orchestrator is woken for a decision.
+    decider: Mutex<Option<PlayerFn>>,
     /// Milliseconds the turn takes, so rooms show working for a moment.
     pub delay_ms: u64,
     state: Arc<Mutex<MockState>>,
@@ -52,7 +54,7 @@ pub struct MockHarness {
 
 impl MockHarness {
     pub fn new(behaviour: MockBehaviour) -> MockHarness {
-        MockHarness { behaviour: Mutex::new(behaviour), judge_reply: Mutex::new(None), analysis_reply: Mutex::new(None), player: Mutex::new(None), orchestrator_reply: Mutex::new(None), delay_ms: 50, state: Arc::default() }
+        MockHarness { behaviour: Mutex::new(behaviour), judge_reply: Mutex::new(None), analysis_reply: Mutex::new(None), player: Mutex::new(None), orchestrator_reply: Mutex::new(None), decider: Mutex::new(None), delay_ms: 50, state: Arc::default() }
     }
     pub fn set_behaviour(&self, b: MockBehaviour) { *self.behaviour.lock().unwrap() = b; }
     /// Answer judge prompts with this text (a JSON block naming a winner).
@@ -61,6 +63,8 @@ impl MockHarness {
     pub fn set_player(&self, f: impl Fn(&str) -> String + Send + Sync + 'static) { *self.player.lock().unwrap() = Some(Arc::new(f)); }
     pub fn set_analysis_reply(&self, text: impl Into<String>) { *self.analysis_reply.lock().unwrap() = Some(text.into()); }
     pub fn set_orchestrator_reply(&self, text: impl Into<String>) { *self.orchestrator_reply.lock().unwrap() = Some(text.into()); }
+    /// Rule on the orchestrator's decisions with this: it gets the prompt, returns the answer.
+    pub fn set_decider(&self, f: impl Fn(&str) -> String + Send + Sync + 'static) { *self.decider.lock().unwrap() = Some(Arc::new(f)); }
     /// Session ids that were reopened through `resume_session`.
     /// Every prompt sent, in order.
     pub fn prompts(&self) -> Vec<String> { self.state.lock().unwrap().prompts.clone() }
@@ -119,6 +123,9 @@ impl HarnessAdapter for MockHarness {
         }
         if text.contains("## Guild conversation") {
             if let Some(reply) = self.orchestrator_reply.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(reply); }
+        }
+        if text.contains("## Decision needed") {
+            if let Some(decider) = self.decider.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(decider(text)); }
         }
         if text.contains("## Playtest metrics") {
             if let Some(reply) = self.analysis_reply.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(reply); }
