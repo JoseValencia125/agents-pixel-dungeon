@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -58,6 +58,9 @@ pub struct Service {
     ai_stops: Mutex<Vec<String>>,
     /// The member answering the user right now, if one is.
     orchestrating: Mutex<Option<String>>,
+    /// How many attempts run at once: the settings' until the orchestrator
+    /// or the user changes it (`guild.concurrency`), then kept in the store.
+    concurrency: AtomicUsize,
     pub settings: Settings,
     pub stop: Arc<AtomicBool>,
     log_file: Mutex<Option<std::fs::File>>,
@@ -91,7 +94,9 @@ fn slug(s: &str) -> String {
 
 impl Service {
     pub fn new(store: Store, settings: Settings) -> Arc<Service> {
+        let concurrency = store.meta("concurrency").ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(settings.concurrency);
         Arc::new(Service {
+            concurrency: AtomicUsize::new(concurrency),
             store: Mutex::new(store),
             adapters: Mutex::new(HashMap::new()),
             harness_status: Mutex::new(vec![]),
@@ -378,7 +383,7 @@ impl Service {
         let available = self.available_harnesses();
         for (task, wanted) in slots { for _ in 0..wanted {
             let active = self.running.lock().unwrap().len();
-            if active >= self.settings.concurrency { break; }
+            if active >= self.concurrency.load(Ordering::Relaxed) { break; }
             let attempt = {
                 let store = self.store.lock().unwrap();
                 let members = store.members()?;
@@ -866,12 +871,7 @@ impl Service {
         s.push_str(&format!("\n## Playtest plan\nprofiles: {} · runs per profile: {}\n", e.plan.profiles.join(", "), e.plan.runs_per_profile));
         s.push_str("\n## Playtest metrics\nPer variant and player profile: counts of events, means of numeric fields (as event.field), runs started/completed, and the distribution of choices (`top` is the most taken choice and `top_share` its share: a dominant strategy shows as a high top_share).\n```json\n");
         let mut text = serde_json::to_string_pretty(&metrics).unwrap_or_default();
-        if text.len() > 40_000 {
-            let mut end = 40_000;
-            while !text.is_char_boundary(end) { end -= 1; }
-            text.truncate(end);
-            text.push_str("\n… (truncated)");
-        }
+        if cut(&mut text, 40_000) { text.push_str("\n… (truncated)"); }
         s.push_str(&text);
         s.push_str("\n```\n\nCompare the variants against the hypothesis and the intended experience and answer with the JSON block only. Use the variant ids given above in recommended_variant.\n");
         Ok(s)
@@ -2358,6 +2358,7 @@ impl Service {
         snap.conversation = self.conversation(200)?;
         snap.orchestrator = crate::orchestrator::pick(&snap.members, &self.available_harnesses()).map(|m| m.id);
         snap.orchestrator_busy = self.orchestrating.lock().unwrap().is_some();
+        snap.concurrency = self.concurrency.load(Ordering::Relaxed);
         Ok(snap)
     }
 
@@ -2461,6 +2462,7 @@ impl Service {
             }
             "orchestrator.say" => self.orchestrator_say(params),
             "member.add" => self.member_add(params),
+            "guild.concurrency" => self.set_concurrency(params),
             "member.remove" => self.member_remove(p_str(params, "memberId")?),
             "guild.close" => self.guild_close(),
             "guild.reopen" => self.guild_reopen(),
@@ -2778,6 +2780,16 @@ impl Service {
         store.put_design(&d)?;
         self.emit_locked(&store, Event::new("design.updated", "user").with(json!({"projectId": id, "version": d.version, "loops": d.loops.len(), "parts": d.parts.len()})));
         Ok(serde_json::to_value(d).unwrap())
+    }
+
+    /// How many members work at once, from 1 to 16; kept between runs.
+    fn set_concurrency(&self, params: &Value) -> ApiResult {
+        let n = params.get("concurrency").and_then(Value::as_u64).filter(|n| (1..=16).contains(n)).ok_or_else(|| ApiError::invalid("concurrency must be 1 to 16"))? as usize;
+        let store = self.store.lock().unwrap();
+        store.set_meta("concurrency", &n.to_string())?;
+        self.concurrency.store(n, Ordering::Relaxed);
+        self.emit_locked(&store, Event::new("guild.concurrency", "user").with(json!({"concurrency": n})));
+        Ok(json!({"concurrency": n}))
     }
 
     fn member_add(&self, params: &Value) -> ApiResult {
@@ -3748,6 +3760,21 @@ mod tests {
         assert_eq!(kinds.iter().filter(|k| *k == "candidate.rejected").count(), 2);
         assert!(kinds.contains(&"race.finished".to_string()));
         assert!(workspaces::git(&repo, &["ls-tree", "--name-only", &snap.quests[0].integration_ref]).unwrap().contains("hello.txt"));
+    }
+
+    #[test]
+    fn concurrency_changes_while_running_and_survives_a_restart() {
+        let home = TempHome::new();
+        let db = home.0.join("guild.db");
+        let service = Service::new(Store::open(&db).unwrap(), Settings::default());
+        assert_eq!(service.snapshot().unwrap().concurrency, 2, "the settings' until changed");
+        assert!(service.handle("guild.concurrency", &json!({"concurrency": 0})).is_err());
+        assert!(service.handle("guild.concurrency", &json!({"concurrency": 17})).is_err());
+        service.handle("guild.concurrency", &json!({"concurrency": 5})).unwrap();
+        assert_eq!(service.snapshot().unwrap().concurrency, 5);
+        drop(service);
+        let again = Service::new(Store::open(&db).unwrap(), Settings { concurrency: 2, ..Settings::default() });
+        assert_eq!(again.snapshot().unwrap().concurrency, 5, "kept in the store");
     }
 
     #[test]

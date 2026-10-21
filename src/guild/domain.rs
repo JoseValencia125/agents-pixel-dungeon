@@ -11,6 +11,16 @@ pub fn new_id() -> String { ulid::Ulid::new().to_string().to_lowercase() }
 
 fn one() -> u32 { 1 }
 
+/// Cuts `s` to at most `max` bytes without splitting a character (agents'
+/// text is Spanish, French…: a byte cut inside "é" panics). True when it cut.
+pub fn cut(s: &mut String, max: usize) -> bool {
+    if s.len() <= max { return false; }
+    let mut end = max;
+    while !s.is_char_boundary(end) { end -= 1; }
+    s.truncate(end);
+    true
+}
+
 pub fn now() -> String { chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true) }
 
 /// Which harness runs an attempt: an open identifier, so the core never
@@ -546,6 +556,9 @@ pub struct Snapshot {
     pub orchestrator: Option<String>,
     #[serde(default)]
     pub orchestrator_busy: bool,
+    /// How many attempts may run at once.
+    #[serde(default)]
+    pub concurrency: usize,
 }
 
 /// What `probe` found out about an installed harness.
@@ -662,6 +675,16 @@ pub fn validate_dag(tasks: &[Task]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cutting_text_never_splits_a_character() {
+        let mut s = "acción".to_string();          // "ó" is bytes 4–5
+        assert!(cut(&mut s, 5));
+        assert_eq!(s, "acci");
+        let mut short = "hola".to_string();
+        assert!(!cut(&mut short, 10));
+        assert_eq!(short, "hola");
+    }
 
     fn task(id: &str, deps: &[&str]) -> Task {
         Task {

@@ -522,10 +522,8 @@ pub fn prompt_context(d: &LivingGameDesign) -> String {
     // lines, never the rule, and is never cut inside a character.
     let budget = PROMPT_BUDGET - UNKNOWN_RULE.len() - "…\n".len();
     if s.len() > budget {
-        let mut end = budget;
-        while !s.is_char_boundary(end) { end -= 1; }
-        end = s[..end].rfind('\n').map(|i| i + 1).unwrap_or(end);
-        s.truncate(end);
+        crate::domain::cut(&mut s, budget);
+        if let Some(i) = s.rfind('\n') { s.truncate(i + 1); }
         s.push_str("…\n");
     }
     s.push_str(UNKNOWN_RULE);
@@ -728,6 +726,82 @@ pub fn export(repo: &Path, b: &DesignBundle) -> std::io::Result<Vec<String>> {
     Ok(written)
 }
 
+/// The whole design on one page, as the guild tab of an orchestrating
+/// agent shows it and `design <project> doc` prints it: broadest first,
+/// what is unknown said as such, the open questions and the decisions
+/// last. Markdown with `#` to `###` headings, `- ` lists and `**bold**`.
+pub fn document(d: &LivingGameDesign, questions: &[DesignQuestion], decisions: &[DesignDecision]) -> String {
+    let sub = |title: &str, body: &str| if body.trim().is_empty() { String::new() } else { format!("### {title}\n\n{}\n\n", body.trim()) };
+    let sub_list = |title: &str, items: &[String]| if items.is_empty() { String::new() } else { format!("### {title}\n\n{}\n", md_list(items)) };
+    let mut o = format!("# {}\n\n", if d.title.trim().is_empty() { "Untitled game" } else { d.title.trim() });
+    o.push_str(&format!("_Version {} · design maturity {}%_\n\n", d.version, maturity_percent(d)));
+    if !d.status.trim().is_empty() { o.push_str(&format!("{}\n\n", d.status.trim())); }
+    let c = &d.concept;
+    let mut concept = sub("Concept statement", &c.statement) + &sub("Genre", &c.genre) + &sub("Audience", &c.audience) + &sub_list("Unique selling points", &c.usps);
+    concept += &sub_list("Pillars, in priority order", &d.pillars.iter().map(|p| {
+        let mut l = format!("**{}**", p.name.trim());
+        if !p.statement.trim().is_empty() { l.push_str(&format!(": {}", p.statement.trim())); }
+        if !p.design_test.trim().is_empty() { l.push_str(&format!(" Test: {}", p.design_test.trim())); }
+        l
+    }).collect::<Vec<_>>());
+    concept += &sub_list("Anti-pillars", &d.anti_pillars);
+    concept += &sub("World fiction", &c.world_fiction);
+    concept += &sub("Platform, technology and scope", &c.platform_scope);
+    concept += &sub("Monetization", &c.monetization);
+    concept += &sub("Competition", &c.competition);
+    o.push_str(&format!("## Concept · {}\n\n", d.concept_maturity.as_str()));
+    o.push_str(if concept.is_empty() { "_Not written yet._\n\n" } else { &concept });
+    let e = &d.experience;
+    let experience = sub("Fantasy", &e.fantasy) + &sub("Point of view and setting", &e.pov) + &sub_list("The player should feel", &e.player_should_feel) + &sub_list("Desired behaviours", &e.desired_behaviors) + &sub_list("Avoid", &e.avoid) + &sub_list("Key moments", &e.key_moments) + &sub("What keeps the player", &e.engagement);
+    o.push_str(&format!("## Player experience · {}\n\n", d.experience_maturity.as_str()));
+    o.push_str(if experience.is_empty() { "_Not written yet._\n\n" } else { &experience });
+    let style = sub("Visual", &d.style.visual) + &sub("Audio", &d.style.audio) + &sub_list("References", &d.style.references);
+    if !style.is_empty() { o.push_str(&format!("## Visual and audio style\n\n{style}")); }
+    o.push_str(&format!("## Loops · {}\n\n", d.loops_maturity.as_str()));
+    if d.loops.is_empty() { o.push_str("_None yet._\n\n"); }
+    for l in &d.loops {
+        o.push_str(&format!("### {}\n\n{} ↺\n\n", l.name, l.steps.join(" → ")));
+        if !l.inputs.is_empty() { o.push_str(&format!("**Inputs:** {}\n\n", l.inputs.join(", "))); }
+        if !l.outputs.is_empty() { o.push_str(&format!("**Outputs:** {}\n\n", l.outputs.join(", "))); }
+        if !l.feedback.trim().is_empty() { o.push_str(&format!("**Feedback:** {}\n\n", l.feedback.trim())); }
+        if !l.failure.trim().is_empty() { o.push_str(&format!("**Fails when:** {}\n\n", l.failure.trim())); }
+    }
+    if !d.objectives.trim().is_empty() { o.push_str(&format!("## Objectives and progression\n\n{}\n\n", d.objectives.trim())); }
+    if !d.interactivity.trim().is_empty() { o.push_str(&format!("## Interactivity\n\n{}\n\n", d.interactivity.trim())); }
+    o.push_str("## Systems\n\n");
+    if d.systems.is_empty() { o.push_str("_None yet._\n\n"); }
+    for s in &d.systems {
+        o.push_str(&format!("### {} · {}\n\n", s.name, s.maturity.as_str()));
+        if !s.intent.trim().is_empty() { o.push_str(&format!("**Intent:** {}\n\n", s.intent.trim())); }
+        if !s.current.trim().is_empty() { o.push_str(&format!("{}\n\n", s.current.trim())); }
+        for (title, items) in [("Known", &s.known), ("Unknown, not decided", &s.unknown), ("Formulas", &s.formulas), ("Tuning", &s.tuning), ("Edge cases", &s.edge_cases), ("Acceptance", &s.acceptance)] {
+            if !items.is_empty() { o.push_str(&format!("**{title}**\n\n{}\n", md_list(items))); }
+        }
+        if !s.depends_on.is_empty() { o.push_str(&format!("**Depends on:** {}\n\n", s.depends_on.join(", "))); }
+    }
+    if !d.parts.is_empty() {
+        o.push_str("## Objects\n\n");
+        for p in &d.parts {
+            o.push_str(&format!("### {}\n\n{}{}", p.name, md_list(&p.attributes), md_list(&p.rules)));
+            if !p.notes.trim().is_empty() { o.push_str(&format!("{}\n", p.notes.trim())); }
+            o.push('\n');
+        }
+    }
+    for s in d.sections.iter().filter(|s| !s.body.trim().is_empty()) { o.push_str(&format!("## {} · {}\n\n{}\n\n", s.title, s.maturity.as_str(), s.body.trim())); }
+    let open: Vec<&DesignQuestion> = questions.iter().filter(|q| q.status == "open").collect();
+    o.push_str(&format!("## Open questions ({})\n\n", open.len()));
+    for q in &open { o.push_str(&format!("- **{}** {}\n", q.id, q.question)); }
+    if open.is_empty() { o.push_str("_None._\n"); }
+    o.push_str(&format!("\n## Decisions ({})\n\n", decisions.len()));
+    for dec in decisions.iter().rev() {
+        o.push_str(&format!("- **{}** {}", dec.id, dec.decision));
+        if !dec.why.trim().is_empty() { o.push_str(&format!(" — {}", dec.why.trim())); }
+        o.push('\n');
+    }
+    if decisions.is_empty() { o.push_str("_None._\n"); }
+    o
+}
+
 /// Read `<repo>/game-design/`: the structured `design.json`, or the
 /// experience TOML an older export left.
 pub fn import(repo: &Path, project_id: &str) -> Option<DesignBundle> {
@@ -769,6 +843,18 @@ pub fn next_id(prefix: &str, existing: impl Iterator<Item = String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_document_holds_the_whole_design_and_says_what_is_open() {
+        let mut d = template("p", "Verbrawl", "videogame");
+        d.pillars = vec![Pillar { name: "Wit".into(), statement: "the right word wins".into(), design_test: "does it reward the apt word?".into() }];
+        let q = DesignQuestion { id: "Q-001".into(), project_id: "p".into(), question: "How much should length weigh?".into(), status: "open".into(), ..Default::default() };
+        let text = document(&d, &[q], &[]);
+        for needle in ["# Verbrawl", "## Concept", "**Wit**: the right word wins Test: does it reward the apt word?", "## Loops", "## Systems", "## Open questions (1)", "**Q-001** How much should length weigh?", "## Decisions (0)"] {
+            assert!(text.contains(needle), "the document lacks {needle:?}:\n{text}");
+        }
+        for s in &d.systems { assert!(text.contains(&format!("### {} · ", s.name))); }
+    }
+
     use super::*;
 
     #[test]

@@ -364,7 +364,7 @@ fn current_attempt<'a>(snap: &'a Snapshot, member: &Member) -> Option<&'a Attemp
         .or_else(|| mine.iter().copied().filter(|a| a.state == AttemptState::Passed && snap.tasks.iter().any(|t| t.id == a.task_id && matches!(t.state, TaskState::Accepted | TaskState::Integrating))).max_by(|a, b| a.created_at.cmp(&b.created_at)))
 }
 
-fn member_agent(snap: &Snapshot, m: &Member) -> Agent {
+pub fn member_agent(snap: &Snapshot, m: &Member) -> Agent {
     let attempt = current_attempt(snap, m);
     let task = attempt.and_then(|a| snap.tasks.iter().find(|t| t.id == a.task_id));
     let quest = task.and_then(|t| snap.quests.iter().find(|q| q.id == t.quest_id));
@@ -1131,6 +1131,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         ],
         orchestrator: Some("kael".into()),
         orchestrator_busy: false,
+        concurrency: 3,
     }
 }
 

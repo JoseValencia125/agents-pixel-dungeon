@@ -98,6 +98,15 @@ impl Store {
         Ok(out)
     }
 
+    /// A setting the guild keeps between runs (`concurrency`, …).
+    pub fn meta(&self, key: &str) -> StoreResult<Option<String>> {
+        self.conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0)).optional().map_err(e)
+    }
+    pub fn set_meta(&self, key: &str, value: &str) -> StoreResult<()> {
+        self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)", params![key, value]).map_err(e)?;
+        Ok(())
+    }
+
     // ----- entities -----
 
     pub fn put_project(&self, p: &Project) -> StoreResult<()> { self.put("projects", &p.id, &[], p) }
@@ -339,6 +348,7 @@ impl Store {
             conversation: vec![],
             orchestrator: None,
             orchestrator_busy: false,
+            concurrency: 0,
         })
     }
 }
