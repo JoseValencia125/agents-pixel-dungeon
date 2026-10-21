@@ -1317,21 +1317,65 @@ impl Room {
     /// write, the potions to run commands), beside the orchestrator's table
     /// while it asks, by the trophy when its candidate is ready, by the door
     /// before it starts. `k` is how many are already at that spot.
-    fn crew_spot(status: &str, action: &str, k: usize) -> (Pos2, f32) {
-        let spots: &[(f32, f32, f32)] = match (status, action) {
-            ("blocked", _) => &[(60.0, 56.0, -1.0), (60.0, 66.0, -1.0), (68.0, 61.0, -1.0)],
-            ("done", _) => &[(36.0, 84.0, 1.0), (60.0, 84.0, -1.0), (28.0, 78.0, 1.0)],
-            ("unknown", _) => &[(72.0, 88.0, 1.0), (80.0, 88.0, -1.0)],
-            ("working", "read") => &[(110.0, 36.0, 1.0), (122.0, 36.0, -1.0), (116.0, 38.0, 1.0)],
-            ("working", "plan") | ("working", "type") => &[(64.0, 36.0, 1.0), (76.0, 36.0, -1.0), (70.0, 38.0, 1.0)],
-            ("working", "forge") => &[(75.0, 62.0, 1.0), (87.0, 62.0, -1.0), (81.0, 64.0, 1.0)],
-            ("working", "brew") | ("working", "gems") => &[(104.0, 72.0, 1.0), (118.0, 72.0, -1.0), (128.0, 72.0, -1.0)],
-            ("working", _) => &[(72.0, 76.0, 1.0), (84.0, 76.0, -1.0), (78.0, 80.0, 1.0)],
-            _ => &[(99.0, 80.0, 1.0), (109.0, 80.0, 1.0), (119.0, 80.0, -1.0), (129.0, 80.0, -1.0), (104.0, 88.0, 1.0), (114.0, 88.0, 1.0), (124.0, 88.0, -1.0)],
+    fn crew_spot(size: RoomSize, status: &str, action: &str, k: usize) -> (Pos2, f32) {
+        // Each size has its own art (the medium room's floor is shorter, the
+        // small one's wall too), so its own spots.
+        let station = match (status, action) {
+            ("blocked", _) => 0, ("done", _) => 1, ("unknown", _) => 2,
+            ("working", "read") => 3, ("working", "plan") | ("working", "type") => 4, ("working", "forge") => 5,
+            ("working", "brew") | ("working", "gems") => 6, ("working", _) => 7, _ => 8,
         };
+        const LARGE: [&[(f32, f32, f32)]; 9] = [
+            &[(60.0, 56.0, -1.0), (60.0, 66.0, -1.0), (68.0, 61.0, -1.0)],
+            &[(36.0, 84.0, 1.0), (60.0, 84.0, -1.0), (28.0, 78.0, 1.0)],
+            &[(72.0, 88.0, 1.0), (80.0, 88.0, -1.0)],
+            &[(110.0, 36.0, 1.0), (122.0, 36.0, -1.0), (116.0, 38.0, 1.0)],
+            &[(64.0, 36.0, 1.0), (76.0, 36.0, -1.0), (70.0, 38.0, 1.0)],
+            &[(75.0, 62.0, 1.0), (87.0, 62.0, -1.0), (81.0, 64.0, 1.0)],
+            &[(104.0, 72.0, 1.0), (118.0, 72.0, -1.0), (128.0, 72.0, -1.0)],
+            &[(72.0, 76.0, 1.0), (84.0, 76.0, -1.0), (78.0, 80.0, 1.0)],
+            &[(99.0, 80.0, 1.0), (109.0, 80.0, 1.0), (119.0, 80.0, -1.0), (129.0, 80.0, -1.0), (104.0, 88.0, 1.0), (114.0, 88.0, 1.0), (124.0, 88.0, -1.0)],
+        ];
+        const MEDIUM: [&[(f32, f32, f32)]; 9] = [
+            &[(60.0, 40.0, -1.0), (60.0, 50.0, -1.0), (64.0, 45.0, -1.0)],
+            &[(48.0, 52.0, 1.0), (40.0, 54.0, 1.0)],
+            &[(72.0, 55.0, 1.0), (80.0, 55.0, -1.0)],
+            &[(90.0, 33.0, 1.0), (88.0, 36.0, -1.0)],
+            &[(64.0, 33.0, 1.0), (76.0, 33.0, -1.0), (70.0, 34.0, 1.0)],
+            &[(62.0, 52.0, 1.0), (90.0, 50.0, -1.0), (76.0, 56.0, 1.0)],
+            &[(104.0, 40.0, 1.0), (118.0, 40.0, -1.0), (128.0, 40.0, -1.0)],
+            &[(60.0, 46.0, 1.0), (88.0, 46.0, -1.0)],
+            &[(101.0, 47.0, 1.0), (111.0, 47.0, 1.0), (121.0, 47.0, -1.0), (131.0, 47.0, -1.0), (106.0, 54.0, 1.0), (116.0, 54.0, 1.0), (126.0, 54.0, -1.0)],
+        ];
+        const SMALL: [&[(f32, f32, f32)]; 9] = [
+            &[(58.0, 22.0, -1.0), (58.0, 30.0, -1.0)],
+            &[(50.0, 32.0, 1.0), (42.0, 33.0, 1.0)],
+            &[(72.0, 34.0, 1.0), (80.0, 34.0, -1.0)],
+            &[(90.0, 17.0, 1.0), (88.0, 19.0, -1.0)],
+            &[(62.0, 15.0, 1.0), (76.0, 15.0, -1.0)],
+            &[(62.0, 30.0, 1.0), (90.0, 28.0, -1.0)],
+            &[(104.0, 21.0, 1.0), (118.0, 21.0, -1.0), (128.0, 21.0, -1.0)],
+            &[(60.0, 26.0, 1.0), (88.0, 26.0, -1.0)],
+            &[(101.0, 28.0, 1.0), (111.0, 28.0, 1.0), (121.0, 28.0, -1.0), (131.0, 28.0, -1.0), (106.0, 33.0, 1.0), (116.0, 33.0, 1.0), (126.0, 33.0, -1.0)],
+        ];
+        let spots = match size { RoomSize::Large => LARGE, RoomSize::Medium => MEDIUM, RoomSize::Small => SMALL }[station];
         let (x, y, facing) = spots[k % spots.len()];
         let nudge = (k / spots.len()) as f32 * 5.0;
         (pos2(x + nudge, y + nudge * 0.4), facing)
+    }
+
+    /// The crew at its spots in the art of the room's size, at once: the
+    /// size changed under it.
+    fn place_crew(&mut self) {
+        let mut taken: HashMap<(String, String), usize> = HashMap::new();
+        for t in &mut self.crew {
+            let n = taken.entry((t.status.clone(), if t.status == "working" { t.action.clone() } else { String::new() })).or_insert(0);
+            let (target, facing) = Room::crew_spot(self.size, &t.status, &t.action, *n);
+            *n += 1;
+            t.target = target;
+            t.pos = target;
+            t.facing = facing;
+        }
     }
 
     /// Send each member of the crew to its spot; one joining comes in by
@@ -1342,11 +1386,11 @@ impl Room {
         for m in crew {
             let action = m.action.clone().unwrap_or_default();
             let n = taken.entry((m.status.clone(), if m.status == "working" { action.clone() } else { String::new() })).or_insert(0);
-            let (target, facing) = Room::crew_spot(&m.status, &action, *n);
+            let (target, facing) = Room::crew_spot(self.size, &m.status, &action, *n);
             *n += 1;
             let mut t = match self.crew.iter().position(|t| t.name == m.name) {
                 Some(i) => self.crew.remove(i),
-                None => Trainee { name: m.name.clone(), harness: harness_for(&m.harness), status: String::new(), action: String::new(), pos: pos2(72.0, 96.0), target, facing },
+                None => Trainee { name: m.name.clone(), harness: harness_for(&m.harness), status: String::new(), action: String::new(), pos: pos2(72.0, self.size.art_h() - 4.0), target, facing },
             };
             t.harness = harness_for(&m.harness);
             t.status = m.status.clone();
@@ -1365,12 +1409,13 @@ impl Room {
     /// up at their stations while they work. Its art fills the room's
     /// frame at any size.
     fn draw_guild(&self, painter: &Painter, origin: Pos2, assets: &Assets, selected: bool) {
+        // The room's whole width at the rooms' 1.5 pt per pixel, in the art of its size.
         let f = self.drawn_frame().translate(origin.to_vec2());
-        let scale = f.height() / ART.y;
-        let art = Rect::from_center_size(f.center(), ART * scale);
-        painter.rect_filled(f, CornerRadius::ZERO, Color32::from_rgb(18, 15, 23));
+        let scale = 1.5;
+        let art = f;
+        let name = match self.size { RoomSize::Large => "guild_room".to_string(), size => format!("guild_room_{}", size.key()) };
         let clipped = painter.with_clip_rect(f);
-        if let Some(room) = assets.room("guild_room") { clipped.image(room.tex, art, room.uv, Color32::WHITE); }
+        if let Some(room) = assets.room(&name) { clipped.image(room.tex, art, room.uv, Color32::WHITE); }
         let at = |p: Pos2| pos2(art.min.x + p.x * scale, art.min.y + p.y * scale);
         let t = self.clock;
         let mark = |p: Pos2, s: f32, status: &str| match status {
@@ -1380,16 +1425,16 @@ impl Room {
             _ => {}
         };
         // The orchestrator behind its table: the table's front goes over it.
-        let lead = at(pos2(26.0, 38.0));
-        let size = HERO * scale / 1.5;
+        let lead = at(pos2(26.0, match self.size { RoomSize::Large => 38.0, RoomSize::Medium => 26.0, RoomSize::Small => 10.0 }));
+        let size = HERO;
         let frame = if self.status == "working" { assets.hero_frame(self.harness, "work", (t / 0.18) as usize) } else { assets.hero_frame(self.harness, "idle", (t / 0.5) as usize) };
         draw_sprite(&clipped, frame, lead, vec2(size, size), false, 0.0, Color32::WHITE);
-        if let Some(front) = assets.room("guild_room_front") { clipped.image(front.tex, art, front.uv, Color32::WHITE); }
+        if let Some(front) = assets.room(&format!("{name}_front")) { clipped.image(front.tex, art, front.uv, Color32::WHITE); }
         mark(lead, size, &self.status);
         // The members, back to front.
         let mut order: Vec<&Trainee> = self.crew.iter().collect();
         order.sort_by(|a, b| a.pos.y.total_cmp(&b.pos.y));
-        let s = 24.0 * scale / 1.5;
+        let s = 24.0;
         for c in order {
             let p = at(c.pos);
             let walking = (c.target - c.pos).length() > 0.3;
@@ -2122,7 +2167,7 @@ impl Scene {
                         }
                     }
                     // Only what shows is drawn; the dragged room is drawn last, over the others.
-                    room.size = size;
+                    if room.size != size { room.size = size; room.place_crew(); }
                     room.beside = slot.width() > ROW_W + 1.0;
                     if ui.is_rect_visible(rect) && !dragged {
                         room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
@@ -2317,6 +2362,15 @@ mod tests {
         scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
         let kael = scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Kael").unwrap();
         assert_eq!((kael.pos, kael.target), (pos2(99.0, 80.0), pos2(75.0, 62.0)));
+        // Every size has its spots inside its own art.
+        let room = scene.rooms.get_mut("w1:p1").unwrap();
+        for size in RoomSize::ALL {
+            room.size = size;
+            room.place_crew();
+            for c in &room.crew { assert!(c.pos.y > 0.0 && c.pos.y < size.art_h() && c.pos.x > 6.0 && c.pos.x < 138.0, "{} inside the {} room: {:?}", c.name, size.key(), c.pos); }
+        }
+        room.size = RoomSize::Large;
+        room.place_crew();
         // Someone hired comes in by the door.
         lead.crew.push(member("Nim", "idle", None));
         scene.sync(&[agent("a", "idle"), lead, agent("b", "idle")]);
