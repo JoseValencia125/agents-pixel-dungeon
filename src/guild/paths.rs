@@ -52,3 +52,7 @@ pub fn ensure_home() -> std::io::Result<PathBuf> {
 /// system's temporary folder so the permission policy lets members use it;
 /// the guild deletes it when the attempt ends.
 pub fn scratch_dir(attempt_id: &str) -> PathBuf { std::env::temp_dir().join(format!("guild-{attempt_id}")) }
+
+/// Where the guild keeps a project's visual direction: its copies of the
+/// images added to it.
+pub fn visual_dir(project_id: &str) -> PathBuf { home().join("visual").join(project_id) }

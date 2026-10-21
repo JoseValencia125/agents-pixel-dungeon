@@ -44,6 +44,8 @@ pub struct SystemDraft {
 
 #[derive(Clone, Default)]
 pub struct Draft {
+    /// Not edited here: carried through so saving keeps it.
+    pub visual_direction: guild::design::VisualDirection,
     pub title: String,
     pub status: String,
     pub statement: String,
@@ -83,6 +85,7 @@ pub fn lines(s: &str) -> Vec<String> { s.lines().map(str::trim).filter(|l| !l.is
 impl Draft {
     pub fn from_design(d: &LivingGameDesign) -> Draft {
         Draft {
+            visual_direction: d.visual.clone(),
             title: d.title.clone(), status: d.status.clone(),
             statement: d.concept.statement.clone(), genre: d.concept.genre.clone(), audience: d.concept.audience.clone(), usps: d.concept.usps.join("\n"),
             pillars: d.pillars.iter().map(|p| [p.name.trim(), p.statement.trim(), p.design_test.trim()].join(" | ").trim_end_matches([' ', '|']).to_string()).collect::<Vec<_>>().join("\n"),
@@ -120,6 +123,8 @@ impl Draft {
             interactivity: self.interactivity.trim().into(),
             parts: self.parts.iter().filter(|p| !p.name.trim().is_empty()).map(|p| Part { id: p.id.clone(), name: p.name.trim().into(), attributes: lines(&p.attributes), rules: lines(&p.rules), notes: String::new() }).collect(),
             sections: self.sections.clone(),
+            // The visual direction has its own tab: the chamber keeps it as it was.
+            visual: self.visual_direction.clone(),
             concept_maturity: self.concept_maturity, experience_maturity: self.experience_maturity, loops_maturity: self.loops_maturity,
             version: 0,
             updated_at: String::new(),

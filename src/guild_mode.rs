@@ -15,7 +15,20 @@ use guild::domain::*;
 use serde_json::json;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Tab { #[default] Chat, Guild, Quests, Design }
+pub enum Tab { #[default] Chat, Guild, Quests, Design, Visual }
+
+/// The visual direction tab between frames: thumbnails decoded once (None
+/// when a file could not be read), the palette being written, the notes
+/// being edited, a hex just copied.
+#[derive(Default)]
+pub struct VisualState {
+    textures: std::collections::HashMap<String, Option<egui::TextureHandle>>,
+    palette_name: String,
+    palette_colors: String,
+    notes: Option<String>,
+    captions: std::collections::HashMap<String, String>,
+    copied: Option<(String, f64)>,
+}
 
 const INK: Color32 = Color32::from_rgb(222, 214, 232);
 const DIM: Color32 = Color32::from_rgb(150, 143, 165);
@@ -62,8 +75,13 @@ pub fn tab_strip(ui: &mut Ui, tab: &mut Tab, view: &GuildView, cwd: &str) -> boo
     let waiting = snap.map(|s| asking(s).len()).unwrap_or(0);
     let quests = snap.zip(project).map(|(s, p)| s.quests.iter().filter(|q| q.project_id == p.id && matches!(q.state, QuestState::Running | QuestState::Paused | QuestState::Blocked)).count()).unwrap_or(0);
     let design = snap.zip(project).and_then(|(s, p)| s.designs.iter().find(|d| d.project_id == p.id));
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+    // The tabs wrap to a second line rather than widen the panel; the way
+    // out keeps its place on the right.
+    let full = ui.available_width();
+    let reserve = if full > 760.0 { 200.0 } else { 26.0 };
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(vec2(full - reserve, 0.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
         ui.spacing_mut().button_padding = vec2(8.0, 3.0);
         let mut chip = |ui: &mut Ui, which: Tab, label: String, hot: bool| {
             let on = *tab == which;
@@ -76,7 +94,10 @@ pub fn tab_strip(ui: &mut Ui, tab: &mut Tab, view: &GuildView, cwd: &str) -> boo
         chip(ui, Tab::Guild, if waiting > 0 { format!("{} · {members} · {waiting}!", tr("Gremio")) } else { format!("{} · {members}", tr("Gremio")) }, waiting > 0);
         chip(ui, Tab::Quests, format!("{} · {quests}", tr("Misiones")), false);
         chip(ui, Tab::Design, match design { Some(d) => format!("{} · {}%", tr("Diseño"), guild::design::maturity_percent(d)), None => tr("Diseño") }, false);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let visuals = design.map(|d| d.visual.images.len() + d.visual.palettes.len()).unwrap_or(0);
+        chip(ui, Tab::Visual, if visuals > 0 { format!("{} · {visuals}", tr("Visual")) } else { tr("Visual") }, false);
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
             // Narrow, the way out is a × with its words on hover.
             let label = if ui.available_width() > 190.0 { tr("Salir del modo guild") } else { "×".into() };
             let tip = format!("{} — {}", tr("Salir del modo guild"), tr("La sala vuelve a ser solo el chat; la guild y su trabajo siguen"));
@@ -102,7 +123,7 @@ pub fn body(ui: &mut Ui, tab: Tab, view: &mut GuildView, cwd: &str, now: f64, wi
         return action;
     };
     // A member's own work opens in place, from the crew or a quest's task.
-    if tab != Tab::Design {
+    if !matches!(tab, Tab::Design | Tab::Visual) {
         if let Some(id) = view.hall_member.clone() {
             if let Some(member) = snap.members.iter().find(|m| m.id == id) {
                 if ui.add(egui::Button::new(mono(&tr("← Volver"), 11.0).color(INK)).frame(false)).clicked() { view.hall_member = None; return action; }
@@ -122,6 +143,7 @@ pub fn body(ui: &mut Ui, tab: Tab, view: &mut GuildView, cwd: &str, now: f64, wi
             Tab::Guild => crew(ui, view, &snap),
             Tab::Quests => quests(ui, view, &snap, project.as_ref()),
             Tab::Design => action.studio = design(ui, &snap, project.as_ref(), wide),
+            Tab::Visual => visual(ui, view, &snap, project.as_ref(), wide),
             Tab::Chat => {}
         }
     });
@@ -391,6 +413,142 @@ fn document(ui: &mut Ui, d: &LivingGameDesign) {
     }
 }
 
+/// A `#rrggbb` as a colour.
+fn hex_color(hex: &str) -> Option<Color32> {
+    let h = hex.trim_start_matches('#');
+    if h.len() != 6 { return None; }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
+/// A row of swatches; a click copies its hex.
+fn swatches(ui: &mut Ui, state: &mut VisualState, colors: &[String], size: f32) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+        for hex in colors {
+            let Some(color) = hex_color(hex) else { continue };
+            let (rect, response) = ui.allocate_exact_size(vec2(size, size), egui::Sense::click());
+            ui.painter().rect_filled(rect, CornerRadius::same(3), color);
+            ui.painter().rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 40)), egui::StrokeKind::Inside);
+            let response = response.on_hover_text(format!("{hex} · {}", tr("clic para copiar")));
+            if response.clicked() {
+                ui.ctx().copy_text(hex.clone());
+                state.copied = Some((hex.clone(), ui.input(|i| i.time)));
+            }
+        }
+    });
+}
+
+/// An image's thumbnail, decoded once and kept, at most 320 px a side.
+fn thumbnail(ctx: &egui::Context, state: &mut VisualState, file: &str) -> Option<egui::TextureHandle> {
+    state.textures.entry(file.to_string()).or_insert_with(|| {
+        let bytes = std::fs::read(file).ok()?;
+        let image = image::load_from_memory(&bytes).ok()?.thumbnail(320, 320).to_rgba8();
+        let (w, h) = image.dimensions();
+        Some(ctx.load_texture(file, egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], image.as_raw()), egui::TextureOptions::NEAREST))
+    }).clone()
+}
+
+/// The game's visual direction: notes, palettes and images, with files
+/// dropped on it (or picked) added to it — images kept with their colours,
+/// palette files read into palettes.
+fn visual(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot, project: Option<&Project>, wide: bool) {
+    let Some(project) = project else {
+        ui.label(mono(&tr("La guild aún no tiene este repositorio. El orquestador lo añade al pasar a modo guild."), 11.0).color(DIM));
+        return;
+    };
+    let pid = project.id.clone();
+    let empty = guild::design::VisualDirection::default();
+    let v = snap.designs.iter().find(|d| d.project_id == pid).map(|d| &d.visual).unwrap_or(&empty);
+    // Files dropped anywhere on the window while this tab is open.
+    let (hovering, dropped) = ui.ctx().input(|i| (!i.raw.hovered_files.is_empty(), i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>()));
+    for path in dropped { view.command("visual.add", json!({"projectId": pid, "path": path.display().to_string()})); }
+    let frame_color = if hovering { GOLD } else { Color32::from_rgba_unmultiplied(254, 174, 52, 60) };
+    Frame::new().stroke(Stroke::new(if hovering { 2.0_f32 } else { 1.0_f32 }, frame_color)).corner_radius(CornerRadius::same(5)).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.label(mono(&if hovering { tr("Suelta para añadir a la dirección visual") } else { tr("Arrastra aquí imágenes (PNG, JPG, GIF, WebP) o paletas (.gpl, .hex, .pal)") }, 11.0).color(if hovering { GOLD } else { DIM }));
+            if ui.button(mono(&tr("+ Añadir archivos…"), 10.5)).clicked() {
+                if let Some(files) = rfd::FileDialog::new().add_filter(&tr("Imágenes y paletas"), &["png", "jpg", "jpeg", "gif", "webp", "gpl", "hex", "pal", "txt"]).pick_files() {
+                    for f in files { view.command("visual.add", json!({"projectId": pid, "path": f.display().to_string()})); }
+                }
+            }
+        });
+    });
+    let state = &mut view.visual;
+    if let Some((hex, at)) = &state.copied {
+        if ui.input(|i| i.time) - at < 1.5 { ui.label(mono(&trf("{} copiado", &[hex]), 10.5).color(GREEN)); } else { state.copied = None; }
+    }
+    let mut commands: Vec<(&'static str, serde_json::Value)> = vec![];
+    // Notes.
+    h2(ui, &tr("Notas de dirección"), None);
+    let saved = v.notes.clone();
+    let notes = state.notes.get_or_insert_with(|| saved.clone());
+    let width = ui.available_width();
+    ui.add(egui::TextEdit::multiline(notes).desired_rows(3).desired_width(width).hint_text(tr("Resolución, contorno, luz, formas, lo que nunca: lo que el arte debe respetar")).font(egui::FontId::monospace(crate::ui::fs(11.0))));
+    if *notes != saved && ui.button(mono(&tr("Guardar notas"), 10.5)).clicked() {
+        commands.push(("visual.notes", json!({"projectId": pid, "notes": notes.clone()})));
+        state.notes = None;
+    }
+    // Palettes.
+    h2(ui, &trf("Paletas ({})", &[&v.palettes.len()]), None);
+    for p in &v.palettes {
+        ui.horizontal(|ui| {
+            ui.label(mono(&p.name, 11.5).strong().color(INK));
+            ui.label(mono(&format!("{} · {}", p.id, trf("{} colores", &[&p.colors.len()])), 10.0).color(DIM));
+            if ui.add(egui::Button::new(mono("×", 11.0).color(DIM)).frame(false)).on_hover_text(tr("Quitar la paleta")).clicked() { commands.push(("visual.remove", json!({"projectId": pid, "id": p.id}))); }
+        });
+        swatches(ui, state, &p.colors, 22.0);
+        ui.add_space(4.0);
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut state.palette_name).desired_width(140.0).hint_text(tr("Nombre")).font(egui::FontId::monospace(crate::ui::fs(10.5))));
+        ui.add(egui::TextEdit::singleline(&mut state.palette_colors).desired_width(if wide { 360.0 } else { 200.0 }).hint_text("#1a1c2c #5d275d #b13e53 …").font(egui::FontId::monospace(crate::ui::fs(10.5))));
+        let colors = guild::design::parse_palette(&state.palette_colors);
+        if ui.add_enabled(!state.palette_name.trim().is_empty() && !colors.is_empty(), egui::Button::new(mono(&tr("+ Paleta"), 10.5))).clicked() {
+            commands.push(("visual.palette", json!({"projectId": pid, "name": state.palette_name.trim(), "colors": colors})));
+            state.palette_name.clear();
+            state.palette_colors.clear();
+        }
+    });
+    // Images.
+    h2(ui, &trf("Imágenes ({})", &[&v.images.len()]), None);
+    if v.images.is_empty() { missing(ui); }
+    let card = if wide { 200.0 } else { 160.0 };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+        for img in &v.images {
+            Frame::new().fill(Color32::from_rgba_unmultiplied(255, 255, 255, 6)).corner_radius(CornerRadius::same(4)).inner_margin(Margin::same(6)).show(ui, |ui| {
+                ui.set_width(card);
+                ui.vertical(|ui| {
+                    match thumbnail(ui.ctx(), state, &img.file) {
+                        Some(tex) => {
+                            let [w, h] = tex.size();
+                            let scale = (card / w as f32).min(card * 0.75 / h as f32);
+                            ui.image((tex.id(), vec2(w as f32 * scale, h as f32 * scale)));
+                        }
+                        None => { ui.label(mono(&tr("(no se puede mostrar)"), 10.0).color(DIM)); }
+                    }
+                    let caption = state.captions.entry(img.id.clone()).or_insert_with(|| img.caption.clone());
+                    let edit = ui.add(egui::TextEdit::singleline(caption).desired_width(card).hint_text(img.name.clone()).font(egui::FontId::monospace(crate::ui::fs(10.5))));
+                    if edit.lost_focus() && *caption != img.caption { commands.push(("visual.update", json!({"projectId": pid, "id": img.id, "caption": caption.clone()}))); }
+                    let kind = match img.kind.as_str() { "concept" => tr("concepto"), "asset" => tr("asset"), _ => tr("referencia") };
+                    ui.label(mono(&format!("{} · {kind}", img.id), 9.5).color(DIM));
+                    let colors = img.colors.clone();
+                    swatches(ui, state, &colors, 16.0);
+                    ui.horizontal(|ui| {
+                        if !img.colors.is_empty() && ui.add(egui::Button::new(mono(&tr("→ Paleta"), 10.0)).frame(false)).on_hover_text(tr("Guardar sus colores como paleta")).clicked() {
+                            commands.push(("visual.palette", json!({"projectId": pid, "name": if img.caption.trim().is_empty() { img.name.clone() } else { img.caption.clone() }, "colors": img.colors})));
+                        }
+                        if ui.add(egui::Button::new(mono(&tr("× Quitar"), 10.0).color(DIM)).frame(false)).clicked() { commands.push(("visual.remove", json!({"projectId": pid, "id": img.id}))); }
+                    });
+                });
+            });
+        }
+    });
+    for (method, params) in commands { view.command(method, params); }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,6 +608,28 @@ mod tests {
         a.escalation = Some("it installs software".into());
         assert!(asking(&snap).iter().any(|(m, _)| m.id == orin.id), "escalated: the user's");
         assert!(guild_view::member_agent(&snap, &orin).activity.contains("it installs software"));
+    }
+
+    #[test]
+    fn files_dropped_on_the_visual_tab_go_to_the_guild_and_it_shows_palettes_and_images() {
+        let ctx = egui::Context::default();
+        let mut view = GuildView::new(std::sync::Arc::new(|| {}));
+        view.set_demo(true);
+        view.poll();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 3000.0)));
+        let drop = |p: &str| egui::DroppedFile { path: Some(p.into()), ..Default::default() };
+        let mut texts = String::new();
+        for input in [egui::RawInput { screen_rect: screen, ..Default::default() }, egui::RawInput { screen_rect: screen, dropped_files: vec![drop("/art/hero.png"), drop("/art/sweetie.gpl")], ..Default::default() }] {
+            let output = ctx.run(input, |ctx| { egui::CentralPanel::default().show(ctx, |ui| { body(ui, Tab::Visual, &mut view, "~/demo/verbrawl", 0.0, true); }); });
+            texts.clear();
+            for clipped in output.shapes { if let egui::Shape::Text(t) = clipped.shape { texts.push_str(&t.galley.job.text); texts.push('\n'); } }
+        }
+        let added: Vec<String> = view.demo_commands.iter().filter(|(m, _)| m == "visual.add").map(|(_, p)| p["path"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(added, ["/art/hero.png", "/art/sweetie.gpl"], "each dropped file, once");
+        assert!(view.demo_commands.iter().all(|(_, p)| p["projectId"] == "verbrawl"));
+        for needle in ["Papel y tinta".to_string(), trf("Paletas ({})", &[&2]), trf("Imágenes ({})", &[&2]), tr("Notas de dirección"), tr("+ Añadir archivos…"), tr("→ Paleta")] {
+            assert!(texts.contains(needle.as_str()), "the tab lacks {needle:?}:\n{texts}");
+        }
     }
 
     #[test]

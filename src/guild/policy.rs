@@ -96,6 +96,10 @@ fn temporary(path: &str) -> bool {
     ["/tmp/", "/private/tmp/", "/var/folders/"].iter().any(|t| path.starts_with(t) || path == t.trim_end_matches('/')) || (!tmp.is_empty() && path.starts_with(tmp))
 }
 
+/// A path in the guild's visual direction: the game's reference images,
+/// for members to look at (never to delete).
+fn visual(path: &str) -> bool { path.starts_with(&crate::paths::home().join("visual").display().to_string()) }
+
 /// Decide a permission asked for in a worktree. File tools are allowed (the
 /// worktree is the member's own); a command is allowed when each of its parts
 /// runs a listed program, or one the project runs itself (`programs`), and
@@ -175,10 +179,10 @@ fn command(cmd: &str, programs: &[String]) -> Verdict {
             }
         }
         if REFUSED.contains(&name.as_str()) { return Verdict::Refuse; }
-        if name == "rm" { if words.iter().any(|w| { let w = w.trim_matches(|c| c == '\'' || c == '"'); (w.starts_with('/') && !temporary(w)) || w.starts_with('~') || w.contains("..") }) { return Verdict::Refuse; } continue; }
+        if name == "rm" { if words.iter().any(|w| { let w = w.trim_matches(|c| c == '\'' || c == '"'); (w.starts_with('/') && (!temporary(w) || visual(w))) || w.starts_with('~') || w.contains("..") }) { return Verdict::Refuse; } continue; }
         if name == "git" && words.get(1).is_some_and(|w| ["push", "commit", "reset", "rebase", "merge", "worktree", "clean", "remote", "config", "tag"].contains(w)) { return Verdict::Refuse; }
         // Out of the worktree: absolute paths (but the temporary folder), the home folder, climbing up.
-        if words.iter().skip(1).any(|w| { let w = w.trim_matches(|c| c == '\'' || c == '"'); w.starts_with('/') && !w.starts_with("/dev/null") && !temporary(w) || w.starts_with('~') || w.starts_with("../") || w == ".." }) { return Verdict::Ask; }
+        if words.iter().skip(1).any(|w| { let w = w.trim_matches(|c| c == '\'' || c == '"'); w.starts_with('/') && !w.starts_with("/dev/null") && !temporary(w) && !visual(w) || w.starts_with('~') || w.starts_with("../") || w == ".." }) { return Verdict::Ask; }
         if name.is_empty() { continue; }
         if programs.iter().any(|p| *p == name) { continue; }
         let Some((_, subs)) = PROGRAMS.iter().find(|(p, _)| *p == name) else { return Verdict::Ask };

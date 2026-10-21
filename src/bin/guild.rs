@@ -34,6 +34,10 @@ USAGE
   guild found <path> [--name NAME] [--template videogame|blank|none] [--member NAME:ROLE:HARNESS[:MODEL]]...
   guild roles                        the roles of the catalogue
   guild design <project> [get|doc|template|export]   the game design: as JSON, as the document, from the template, onto its branch
+  guild visual <project> [get]       the visual direction: images, palettes, notes
+  guild visual <project> add <file>... [--caption T] [--kind reference|concept|asset]   an image (kept with its colours) or a palette file (.gpl .hex .pal)
+  guild visual <project> palette <name> <#rrggbb>... [--id PAL-001]   add (or replace) a palette
+  guild visual <project> caption <id> <text>  |  remove <id>  |  notes <text>
   guild design <project> set <file|->  replace the whole design with this JSON (as `get` prints it)
   guild member add <id> --harness kiro|codex|claude|mock [--role R]... [--model M] [--mode MODE] [--name N]
   guild member set <id> [--role R]... [--model M] [--mode MODE] [--name N] [--harness H] [--enable|--disable]
@@ -343,6 +347,37 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             let r = call(&ensure_running()?, "roles.list", json!({}))?;
             for role in r.as_array().into_iter().flatten() {
                 println!("{:<18} {:<13} {}", role["id"].as_str().unwrap_or(""), role["guild"].as_str().unwrap_or(""), role["name"].as_str().unwrap_or(""));
+            }
+            Ok(())
+        }
+        "visual" => {
+            let project = a.pos(0, "project")?;
+            let client = ensure_running()?;
+            match a.positional.get(1).copied().unwrap_or("get") {
+                "add" => {
+                    let files: Vec<&str> = a.positional.iter().skip(2).copied().collect();
+                    if files.is_empty() { return Err("missing a file to add".into()); }
+                    for f in files {
+                        let path = std::fs::canonicalize(f).map(|p| p.display().to_string()).unwrap_or_else(|_| f.to_string());
+                        let r = call(&client, "visual.add", json!({"projectId": project, "path": path, "caption": a.flag("caption"), "kind": a.flag("kind")}))?;
+                        println!("{} · {} · {}", r["id"].as_str().unwrap_or(""), r["name"].as_str().unwrap_or(f), r["colors"].as_array().map(|c| c.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")).unwrap_or_default());
+                    }
+                }
+                "palette" => {
+                    let colors: Vec<&str> = a.positional.iter().skip(3).copied().collect();
+                    let r = call(&client, "visual.palette", json!({"projectId": project, "name": a.pos(2, "palette name")?, "colors": colors, "id": a.flag("id")}))?;
+                    println!("{} · {} · {}", r["id"].as_str().unwrap_or(""), r["name"].as_str().unwrap_or(""), r["colors"].as_array().map(|c| c.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")).unwrap_or_default());
+                }
+                "caption" => { call(&client, "visual.update", json!({"projectId": project, "id": a.pos(2, "image id")?, "caption": a.positional.iter().skip(3).copied().collect::<Vec<_>>().join(" ")}))?; println!("ok"); }
+                "remove" => { call(&client, "visual.remove", json!({"projectId": project, "id": a.pos(2, "id")?}))?; println!("removed"); }
+                "notes" => { call(&client, "visual.notes", json!({"projectId": project, "notes": a.positional.iter().skip(2).copied().collect::<Vec<_>>().join(" ")}))?; println!("ok"); }
+                _ => {
+                    let d = call(&client, "design.get", json!({"projectId": project}))?;
+                    let v = &d["visual"];
+                    if let Some(n) = v["notes"].as_str().filter(|n| !n.is_empty()) { println!("{n}\n"); }
+                    for p in v["palettes"].as_array().into_iter().flatten() { println!("{} · {} · {}", p["id"].as_str().unwrap_or(""), p["name"].as_str().unwrap_or(""), p["colors"].as_array().map(|c| c.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")).unwrap_or_default()); }
+                    for i in v["images"].as_array().into_iter().flatten() { println!("{} · {} · {} · {}", i["id"].as_str().unwrap_or(""), i["kind"].as_str().unwrap_or(""), i["caption"].as_str().filter(|c| !c.is_empty()).or(i["name"].as_str()).unwrap_or(""), i["file"].as_str().unwrap_or("")); }
+                }
             }
             Ok(())
         }

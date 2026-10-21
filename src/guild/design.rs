@@ -256,6 +256,9 @@ pub struct LivingGameDesign {
     pub parts: Vec<Part>,
     #[serde(default)]
     pub sections: Vec<DesignSection>,
+    /// The game's look: reference and concept images, palettes, notes.
+    #[serde(default)]
+    pub visual: VisualDirection,
     /// Maturity of the concept-level sections, set by the human.
     #[serde(default)]
     pub concept_maturity: Maturity,
@@ -267,6 +270,100 @@ pub struct LivingGameDesign {
     pub version: u32,
     #[serde(default)]
     pub updated_at: String,
+}
+
+/// The game's visual direction: what it should look like, shown rather
+/// than told. Images are the guild's own copies; palettes are hex colours.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct VisualDirection {
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub palettes: Vec<Palette>,
+    #[serde(default)]
+    pub images: Vec<VisualImage>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Palette {
+    pub id: String,
+    pub name: String,
+    /// `#rrggbb`, in order.
+    #[serde(default)]
+    pub colors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct VisualImage {
+    pub id: String,
+    /// The guild's copy of it.
+    pub file: String,
+    /// What it was called when it was added.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub caption: String,
+    /// reference, concept or asset.
+    #[serde(default)]
+    pub kind: String,
+    /// Its dominant colours, most present first.
+    #[serde(default)]
+    pub colors: Vec<String>,
+}
+
+pub const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+pub const PALETTE_EXTENSIONS: [&str; 4] = ["gpl", "hex", "pal", "txt"];
+
+/// The dominant colours of an image, most present first: real pixels
+/// grouped in buckets of 16 levels per channel, transparent pixels left
+/// out, and a colour too close to one already taken is skipped.
+pub fn dominant_colors(image: &image::RgbaImage, count: usize) -> Vec<String> {
+    // Real pixels on a grid, never a resized copy: resampling would blend
+    // neighbours into colours the art does not have.
+    let (w, h) = image.dimensions();
+    let step = (w.max(h) / 128).max(1) as usize;
+    let mut buckets: std::collections::HashMap<(u8, u8, u8), (u32, [u64; 3])> = std::collections::HashMap::new();
+    for p in (0..h).step_by(step).flat_map(|y| (0..w).step_by(step).map(move |x| image.get_pixel(x, y))) {
+        if p[3] < 128 { continue; }
+        let e = buckets.entry((p[0] >> 4, p[1] >> 4, p[2] >> 4)).or_insert((0, [0; 3]));
+        e.0 += 1;
+        for c in 0..3 { e.1[c] += p[c] as u64; }
+    }
+    let mut ranked: Vec<(u32, [u8; 3])> = buckets.into_values().map(|(n, sum)| (n, [(sum[0] / n as u64) as u8, (sum[1] / n as u64) as u8, (sum[2] / n as u64) as u8])).collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut out: Vec<[u8; 3]> = vec![];
+    for (_, c) in ranked {
+        let far = out.iter().all(|o| (0..3).map(|i| (o[i] as i32 - c[i] as i32).pow(2)).sum::<i32>() > 40 * 40);
+        if far { out.push(c); }
+        if out.len() == count { break; }
+    }
+    out.into_iter().map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])).collect()
+}
+
+/// A palette file's colours: GIMP's and Aseprite's `.gpl` (`R G B name`
+/// lines), JASC `.pal` (a header, then `R G B`), or any text with `#rrggbb`
+/// or `rrggbb` values, one or more per line.
+pub fn parse_palette(text: &str) -> Vec<String> {
+    let mut out = vec![];
+    let jasc = text.trim_start().starts_with("JASC-PAL");
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        // `#` starts a comment, unless a colour follows it.
+        if line.is_empty() || line.starts_with('#') && !(line.len() >= 7 && line[1..7].chars().all(|c| c.is_ascii_hexdigit())) { continue; }
+        if line.starts_with("GIMP") || line.starts_with("Name:") || line.starts_with("Columns:") || (jasc && i < 3) { continue; }
+        let numbers: Vec<u8> = line.split_whitespace().take(3).filter_map(|w| w.parse::<u8>().ok()).collect();
+        if numbers.len() == 3 && line.split_whitespace().next().is_some_and(|w| w.parse::<u8>().is_ok()) {
+            out.push(format!("#{:02x}{:02x}{:02x}", numbers[0], numbers[1], numbers[2]));
+            continue;
+        }
+        for word in line.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+            let hex = word.trim_start_matches('#').trim_start_matches("0x");
+            let hex = if hex.len() == 8 && hex.to_lowercase().starts_with("ff") { &hex[2..] } else { hex };
+            if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) { out.push(format!("#{}", hex.to_lowercase())); }
+        }
+    }
+    out.dedup();
+    out
 }
 
 /// The name the rest of the guild grew up with.
@@ -518,6 +615,13 @@ pub fn prompt_context(d: &LivingGameDesign) -> String {
         if !p.rules.is_empty() { s.push_str(&format!(" — rules: {}", p.rules.join("; "))); }
         s.push('\n');
     }
+    let v = &d.visual;
+    if !v.notes.trim().is_empty() || !v.palettes.is_empty() || !v.images.is_empty() {
+        s.push_str("\n## Visual direction (follow it; these colours, not others)\n");
+        if !v.notes.trim().is_empty() { s.push_str(&format!("{}\n", v.notes.trim())); }
+        for p in &v.palettes { s.push_str(&format!("Palette {}: {}\n", p.name, p.colors.join(" "))); }
+        for i in &v.images { s.push_str(&format!("Image ({}): {}{} — {}\n", if i.kind.is_empty() { "reference" } else { &i.kind }, if i.caption.trim().is_empty() { &i.name } else { i.caption.trim() }, if i.colors.is_empty() { String::new() } else { format!(" · colours {}", i.colors.join(" ")) }, i.file)); }
+    }
     // The closing rule always survives: a long design loses its last whole
     // lines, never the rule, and is never cut inside a character.
     let budget = PROMPT_BUDGET - UNKNOWN_RULE.len() - "…\n".len();
@@ -717,7 +821,24 @@ pub fn export(repo: &Path, b: &DesignBundle) -> std::io::Result<Vec<String>> {
         if let Some(dcs) = &e.decision { t.push_str(&format!("\n## Human decision\n\n{} {} {}\n", dcs.action, dcs.variant_id.clone().unwrap_or_default(), dcs.note)); }
         write(&format!("experiments/{}.md", file_id(&e.id)), t)?;
     }
+    let v = &d.visual;
+    let mut copied = vec![];
+    if !v.notes.trim().is_empty() || !v.palettes.is_empty() || !v.images.is_empty() {
+        let dir = root.join("visual");
+        std::fs::create_dir_all(&dir)?;
+        let mut t = "# Visual direction\n\n".to_string();
+        t.push_str(&section("Notes", &v.notes));
+        for p in &v.palettes { t.push_str(&format!("## Palette: {}\n\n{}\n\n", p.name, p.colors.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(" "))); }
+        for i in &v.images {
+            let file = std::path::Path::new(&i.file);
+            let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| i.id.clone());
+            if std::fs::copy(file, dir.join(&name)).is_ok() { copied.push(dir.join(&name).display().to_string()); }
+            t.push_str(&format!("## {} ({})\n\n![{}]({})\n\n{}\n\n", if i.caption.trim().is_empty() { &i.name } else { i.caption.trim() }, if i.kind.is_empty() { "reference" } else { &i.kind }, i.name, name, i.colors.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(" ")));
+        }
+        write("visual/visual.md", t)?;
+    }
     write("design.json", serde_json::to_string_pretty(b).unwrap_or_default())?;
+    written.extend(copied);
     let readme = root.join("README.md");
     if !readme.exists() {
         std::fs::write(&readme, "# Game design\n\nWritten by the guild from its living game design. `overview.md` is the main page; the folders hold the current design (concept, loops, systems, objects, sections) and, apart from it, the history (questions, decisions, hypotheses, experiments). `design.json` is the structured state the guild reads back when the project is added again. Edit in the dungeon's design chamber; the guild rewrites these files.\n")?;
@@ -843,6 +964,29 @@ pub fn next_id(prefix: &str, existing: impl Iterator<Item = String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn palettes_are_read_from_the_files_artists_use() {
+        let gpl = "GIMP Palette\nName: Sweetie 16\nColumns: 4\n# a comment\n 26  28  44\tblack\n 93  39  93 purple\n";
+        assert_eq!(parse_palette(gpl), ["#1a1c2c", "#5d275d"]);
+        let jasc = "JASC-PAL\n0100\n2\n255 0 0\n0 255 0\n";
+        assert_eq!(parse_palette(jasc), ["#ff0000", "#00ff00"]);
+        let hex = "; lospec export\n1a1c2c\n#B13E53 red\nFFEF7D57\n#zzzzzz\n";
+        assert_eq!(parse_palette(hex), ["#1a1c2c", "#b13e53", "#ef7d57"], "plain, with a name after it, with an alpha in front; nonsense skipped");
+        assert_eq!(parse_palette("#1a1c2c, #5d275d; #b13e53"), ["#1a1c2c", "#5d275d", "#b13e53"]);
+    }
+
+    #[test]
+    fn an_images_colours_come_most_present_first_without_near_twins() {
+        let mut img = image::RgbaImage::new(40, 40);
+        for (x, _, p) in img.enumerate_pixels_mut() {
+            *p = if x < 30 { image::Rgba([200, 40, 50, 255]) } else if x < 38 { image::Rgba([20, 30, 200, 255]) } else { image::Rgba([0, 0, 0, 0]) };
+        }
+        img.put_pixel(0, 0, image::Rgba([202, 42, 52, 255]));
+        let colors = dominant_colors(&img, 6);
+        assert_eq!(colors.len(), 2, "a near twin and transparent pixels left out: {colors:?}");
+        assert!(colors[0].starts_with("#c8") || colors[0].starts_with("#c9"), "the red first: {colors:?}");
+    }
+
     #[test]
     fn the_document_holds_the_whole_design_and_says_what_is_open() {
         let mut d = template("p", "Verbrawl", "videogame");
