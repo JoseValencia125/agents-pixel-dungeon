@@ -3764,7 +3764,11 @@ mod tests {
 
     #[test]
     fn what_the_orchestrator_escalates_reaches_the_delegate_with_its_reason() {
-        let (_home, service, quest_id, _mock) = with_orchestrator(|_| "```json\n{\"decision\": \"escalate\", \"reason\": \"it installs software\"}\n```".into());
+        // Each decision escalates with its own reason: answering the permission brings a candidate, which wakes the orchestrator again.
+        let (_home, service, quest_id, _mock) = with_orchestrator(|prompt| {
+            let reason = if prompt.contains("Decision needed: permission") { "it installs software" } else { "the criteria are ambiguous" };
+            format!("```json\n{{\"decision\": \"escalate\", \"reason\": \"{reason}\"}}\n```")
+        });
         service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
         let snap = wait_for(&service, "escalated", |s| s.attempts.first().is_some_and(|a| a.escalation.is_some()));
         let a = &snap.attempts[0];
@@ -3775,8 +3779,11 @@ mod tests {
         // The delegate answers; the escalation is settled.
         let perm = a.pending_permission.clone().unwrap();
         service.handle("permission.respond", &json!({"attemptId": a.id, "requestId": perm.request_id, "optionId": "allow"})).unwrap();
+        // Whatever the candidate's decision has reached by now, the permission's escalation went with the answer.
         let snap = wait_for(&service, "submitted", |s| s.attempts[0].state == AttemptState::Submitted);
-        assert!(snap.attempts[0].escalation.is_none() || snap.attempts[0].deciding, "the permission's escalation went with it");
+        assert_ne!(snap.attempts[0].escalation.as_deref(), Some("it installs software"), "the permission's escalation outlived its answer");
+        let snap = wait_for(&service, "the candidate escalated", |s| s.attempts[0].escalation.is_some() && !s.attempts[0].deciding);
+        assert_eq!(snap.attempts[0].escalation.as_deref(), Some("the criteria are ambiguous"), "a candidate the orchestrator would not take waits for the delegate");
     }
 
     #[test]
