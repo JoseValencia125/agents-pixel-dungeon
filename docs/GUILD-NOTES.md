@@ -93,3 +93,11 @@ From the guild's own feedback on harness-directive (F-HD-03, F-HD-04, F-HD-13): 
 - **Waiting is not working.** `Running::working_time` leaves out the time a permission waited, so the time limit only counts work; `guild_status`/`guild_wait` show how long each member has waited.
 - Checked: policy tests with the commands that actually waited on 2026-10-21 (Orin's `/tmp` script and Godot run, Lira's edit and test run, the project's verifier script), allowed with the project's programs and asked without them, and what must stay refused or asked; a service test where an attempt with a 2 s limit waits 3 s for a permission and lives (it failed before the change), with its wait shown in `guild_status` and its scratch folder created and then removed.
 
+## M15 — Small fixes from the guild's feedback (2026-10-21)
+
+- **F-HD-02**: `task new` without `--strategy` sent `"strategy": null`, which the service read as a strategy and refused; a null strategy is now the default (single, chosen by the user), as `guild_start_quest` always did.
+- **F-HD-01**: `task.update` / `guild task set` changes a task nobody has started (title, instructions, acceptance, dependencies, role, pinned member, priority) instead of cancelling and recreating it; new dependencies are checked for cycles and existence, and a ready task goes back to waiting for them.
+- **Brief** (F-HD-03/04 in practice, F-HD-07, F-HD-08, F-HD-09): look at the guild before and after each answer to the user and settle what waits, oldest permission first; a read-only reviewer in parallel as soon as something is integrated; a long analysis and its write-up in separate tasks; a read-only review of the specification with a hand-written conservation check before the first quest of a system with flows; edit tasks instead of recreating them.
+- **Roles** (F-HD-12): to measure against the code before a change, `git stash` or `git show HEAD:<path>` into a scratch file, never files copied back by hand.
+- Checked: a service test creating tasks with a null strategy (it fails with the exact error of F-HD-02 before the change), editing one, refusing a cycle, an unknown dependency and a task already started, and keeping the edited task waiting for its new dependency.
+

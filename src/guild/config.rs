@@ -152,7 +152,7 @@ fn role(id: &str, name: &str, guild: &str, prompt: &str) -> Role {
     Role { id: id.into(), name: name.into(), guild: guild.into(), prompt: prompt.into() }
 }
 
-const COMMON: &str = " Work only inside the current directory, which is your own git worktree. Do not commit; the guild commits your work. Finish with a short summary of what you changed, how you verified it, and anything left undone.";
+const COMMON: &str = " Work only inside the current directory, which is your own git worktree. Do not commit; the guild commits your work. To measure against the code before your change, use `git stash` and `git stash pop`, or `git show HEAD:<path>` into a scratch file; never copy files back by hand, which leaves the worktree half old. Finish with a short summary of what you changed, how you verified it, and anything left undone.";
 
 /// Every role the guild knows, game studio included. `implementer`,
 /// `reviewer` and `planner` are the software roles; the rest follow

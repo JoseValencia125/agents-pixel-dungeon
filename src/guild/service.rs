@@ -2559,6 +2559,7 @@ impl Service {
             "guild.reopen" => self.guild_reopen(),
             "quest.create" => self.quest_create(params),
             "task.create" => self.task_create(params),
+            "task.update" => self.task_update(params),
             "quest.start" => self.quest_start(params),
             "quest.pause" => self.quest_set(params, QuestState::Paused, &[QuestState::Running]),
             "quest.resume" => self.quest_set(params, QuestState::Running, &[QuestState::Paused, QuestState::Blocked]),
@@ -2945,20 +2946,7 @@ impl Service {
         let quest_id = p_str(params, "questId")?;
         let store = self.store.lock().unwrap();
         let quest = store.quest(quest_id)?.ok_or_else(|| ApiError::not_found(format!("quest {quest_id}")))?;
-        let acceptance: Vec<AcceptanceCriterion> = params
-            .get("acceptance")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .enumerate()
-                    .filter_map(|(i, v)| match v {
-                        Value::String(s) => Some(AcceptanceCriterion { id: format!("AC-{}", i + 1), text: s.clone() }),
-                        Value::Object(o) => Some(AcceptanceCriterion { id: o.get("id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("AC-{}", i + 1)), text: o.get("text").and_then(Value::as_str).unwrap_or("").into() }),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let acceptance = parse_acceptance(params).unwrap_or_default();
         let state = if quest.state == QuestState::Draft { TaskState::Draft } else { TaskState::Pending };
         let strategy = parse_strategy(params)?;
         let task = Task {
@@ -2992,6 +2980,44 @@ impl Service {
         self.atomic(&store, || {
             store.put_task(&task)?;
             self.emit_locked(&store, Event::new("task.created", "user").about_task(&task, &quest.project_id).with(json!({"title": task.title, "dependsOn": task.depends_on})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(task).unwrap())
+    }
+
+    /// Change a task nobody has started yet: its title, instructions,
+    /// acceptance, dependencies, role, pinned member or priority. New
+    /// dependencies are checked like a new task's and make it wait for them.
+    fn task_update(&self, params: &Value) -> ApiResult {
+        let task_id = p_str(params, "taskId")?;
+        let store = self.store.lock().unwrap();
+        let mut task = store.task(task_id)?.ok_or_else(|| ApiError::not_found(format!("task {task_id}")))?;
+        if !matches!(task.state, TaskState::Draft | TaskState::Pending | TaskState::Ready) || task.attempts_made > 0 {
+            return Err(ApiError::conflict(format!("task {task_id} is {:?}: only a task not yet started can change", task.state)));
+        }
+        let quest = store.quest(&task.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
+        if let Some(t) = p_opt(params, "title") { task.title = t; }
+        if let Some(t) = params.get("instructions").and_then(Value::as_str) { task.instructions = t.trim().to_string(); }
+        if let Some(a) = parse_acceptance(params) { task.acceptance = a; }
+        if let Some(r) = p_opt(params, "role") { task.role = r; }
+        if params.get("memberId").is_some() { task.member_id = p_opt(params, "memberId"); }
+        if let Some(p) = params.get("priority").and_then(Value::as_i64) { task.priority = p as i32; }
+        let deps_changed = params.get("dependsOn").is_some_and(|d| d.is_array()) && p_list(params, "dependsOn") != task.depends_on;
+        if deps_changed {
+            task.depends_on = p_list(params, "dependsOn");
+            let mut all = store.tasks_of_quest(&task.quest_id)?;
+            if let Some(missing) = task.depends_on.iter().find(|d| !all.iter().any(|t| &t.id == *d)) { return Err(ApiError::invalid(format!("no task {missing} in this quest"))); }
+            all.retain(|t| t.id != task.id);
+            all.push(task.clone());
+            validate_dag(&all).map_err(ApiError::invalid)?;
+            // Ready meant its old dependencies were done; the scheduler judges the new ones.
+            if task.state == TaskState::Ready { task.state = TaskState::Pending; }
+        }
+        task.version += 1;
+        task.updated_at = now();
+        self.atomic(&store, || {
+            store.put_task(&task)?;
+            self.emit_locked(&store, Event::new("task.updated", "user").about_task(&task, &quest.project_id).with(json!({"title": task.title, "dependsOn": task.depends_on, "version": task.version})));
             Ok(())
         })?;
         Ok(serde_json::to_value(task).unwrap())
@@ -3304,8 +3330,22 @@ fn parse_judge_output(text: &str) -> Result<Value, String> {
 
 /// `strategy: {type, candidates, selection, autoIntegrate}`, or the older
 /// `candidates` / `autoIntegrate` flags, which mean a policy-selected race.
+/// `acceptance` as strings or `{id, text}` objects; None when absent.
+fn parse_acceptance(params: &Value) -> Option<Vec<AcceptanceCriterion>> {
+    params.get("acceptance").and_then(Value::as_array).map(|a| {
+        a.iter()
+            .enumerate()
+            .filter_map(|(i, v)| match v {
+                Value::String(s) => Some(AcceptanceCriterion { id: format!("AC-{}", i + 1), text: s.clone() }),
+                Value::Object(o) => Some(AcceptanceCriterion { id: o.get("id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("AC-{}", i + 1)), text: o.get("text").and_then(Value::as_str).unwrap_or("").into() }),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
 fn parse_strategy(params: &Value) -> Res<ExecutionStrategy> {
-    if let Some(s) = params.get("strategy") {
+    if let Some(s) = params.get("strategy").filter(|s| !s.is_null()) {
         if let Some(text) = s.as_str() {
             let kind = match text { "single" => StrategyKind::Single, "reviewed" => StrategyKind::Reviewed, "race" | "candidate_race" => StrategyKind::CandidateRace, "experiment" => StrategyKind::Experiment, other => return Err(ApiError::invalid(format!("unknown strategy {other}"))) };
             let candidates = params.get("candidates").and_then(Value::as_u64).unwrap_or(if kind == StrategyKind::Single || kind == StrategyKind::Reviewed { 1 } else { 3 }).clamp(1, 8) as u32;
@@ -3544,6 +3584,29 @@ mod tests {
         service.handle("task.retry", &json!({"taskId": "t1"})).unwrap();
         let snap = wait_for(&service, "third attempt", |s| s.attempts.len() == 3);
         assert_eq!(snap.tasks[0].max_attempts, 3);
+    }
+
+    #[test]
+    fn a_task_not_yet_started_can_change_and_a_missing_strategy_is_the_default() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Hang);
+        // The CLI sends "strategy": null when no --strategy is given (F-HD-02).
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "First", "strategy": null, "selection": null})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t2", "title": "Second", "instructions": "old", "strategy": null})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t3", "title": "Third", "dependsOn": ["t2"]})).unwrap();
+        // Edit instead of cancelling and recreating (F-HD-01).
+        let t = service.handle("task.update", &json!({"taskId": "t2", "instructions": "new", "acceptance": ["it works"], "dependsOn": ["t1"]})).unwrap();
+        assert_eq!((t["instructions"].as_str(), t["depends_on"].clone(), t["version"].as_u64()), (Some("new"), json!(["t1"]), Some(2)));
+        assert_eq!(t["acceptance"][0]["text"], "it works");
+        assert!(service.handle("task.update", &json!({"taskId": "t1", "dependsOn": ["t3"]})).is_err(), "a cycle t1 → t3 → t2 → t1");
+        assert!(service.handle("task.update", &json!({"taskId": "t1", "dependsOn": ["nope"]})).is_err(), "a dependency that does not exist");
+        // Once started it is the attempt's, not the plan's.
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "t1 running", |s| s.attempts.iter().any(|a| a.task_id == "t1"));
+        assert!(service.handle("task.update", &json!({"taskId": "t1", "title": "Late"})).is_err());
+        let snap = service.snapshot().unwrap();
+        let t2 = snap.tasks.iter().find(|t| t.id == "t2").unwrap();
+        assert_eq!(t2.state, TaskState::Pending, "waits for its new dependency");
+        assert!(snap.attempts.iter().all(|a| a.task_id == "t1"), "t2 does not start before t1");
     }
 
     #[test]
