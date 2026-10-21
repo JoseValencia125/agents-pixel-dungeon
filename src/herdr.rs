@@ -49,6 +49,9 @@ pub struct Agent {
     /// A training hall's crew (the guild's members), each walking to the
     /// station of what it does; the room's own hero leads from the dais.
     pub crew: Vec<CrewMember>,
+    /// The guild's own room: the orchestrator at its table, the crew on
+    /// the bench, whatever state the orchestrator is in.
+    pub guild_room: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +85,7 @@ impl Agent {
             subagent_harnesses: vec![],
             annex: None,
             hero_status: None,
+            guild_room: false,
             crew: vec![],
         }
     }

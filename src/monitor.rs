@@ -287,7 +287,7 @@ impl Monitor {
         if let Some((id, crew)) = &self.lead {
             if next.iter().any(|a| &a.id == id) {
                 next.retain(|a| a.id != crate::guild_view::HALL_ID);
-                for a in next.iter_mut().filter(|a| &a.id == id) { a.crew = crew.clone(); }
+                for a in next.iter_mut().filter(|a| &a.id == id) { a.crew = crew.clone(); a.guild_room = true; }
             }
         }
         // Sort last: background jobs and subagents can change a status after

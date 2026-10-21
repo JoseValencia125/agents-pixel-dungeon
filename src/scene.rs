@@ -658,7 +658,7 @@ impl Room {
             self.subagent_harnesses = agent.subagent_harnesses.clone();
             self.set_party();
         }
-        self.training = !agent.crew.is_empty();
+        self.training = agent.guild_room || !agent.crew.is_empty();
         if self.training {
             self.band = Some(style_for(&agent.status));
             self.set_crew(&agent.crew, animated);
@@ -1296,6 +1296,7 @@ impl Room {
     /// The whole room: its art, and the band around it (the repo's header,
     /// the footer). A double room draws both halves' art in one frame.
     pub fn draw(&self, painter: &Painter, origin: Pos2, assets: &Assets, selected: bool) {
+        if self.training { return self.draw_guild(painter, origin, assets, selected); }
         let trim = |f: Rect, (l, r, b): (f32, f32, f32)| Rect::from_min_max(pos2(f.min.x + l, f.min.y), pos2(f.max.x - r, f.max.y - b));
         let (mine, theirs) = if self.annex.is_some() { self.trims() } else { ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)) };
         let mut art = trim(self.drawn_frame().translate(origin.to_vec2()), mine);
@@ -1310,30 +1311,42 @@ impl Room {
         self.draw_band(painter, origin, art, selected);
     }
 
-    /// Where a member of the crew stands, in room-art pixels: at the
-    /// station of what it does while it works, else on the floor, the
-    /// crew spread across the room's width in their order.
-    /// `beside` is how many are already at the same station.
-    fn crew_spot(status: &str, action: &str, index: usize, count: usize, beside: usize) -> (Pos2, f32) {
-        if status == "working" {
-            if let Some((p, facing)) = station(action) { return (pos2(p.x + (beside % 3) as f32 * 9.0, p.y + 4.0), facing); }
-        }
-        let k = (index as f32 + 0.5) / count.max(1) as f32;
-        (pos2(18.0 + k * 108.0, if index % 2 == 0 { 90.0 } else { 84.0 }), if k < 0.5 { 1.0 } else { -1.0 })
+    /// Where a member of the crew stands in the guild's room, in its art
+    /// pixels: on the bench while free, else up at the station of what it
+    /// does (the shelf to read, the quest board to plan, the writing desk to
+    /// write, the potions to run commands), beside the orchestrator's table
+    /// while it asks, by the trophy when its candidate is ready, by the door
+    /// before it starts. `k` is how many are already at that spot.
+    fn crew_spot(status: &str, action: &str, k: usize) -> (Pos2, f32) {
+        let spots: &[(f32, f32, f32)] = match (status, action) {
+            ("blocked", _) => &[(60.0, 56.0, -1.0), (60.0, 66.0, -1.0), (68.0, 61.0, -1.0)],
+            ("done", _) => &[(36.0, 84.0, 1.0), (60.0, 84.0, -1.0), (28.0, 78.0, 1.0)],
+            ("unknown", _) => &[(72.0, 88.0, 1.0), (80.0, 88.0, -1.0)],
+            ("working", "read") => &[(110.0, 36.0, 1.0), (122.0, 36.0, -1.0), (116.0, 38.0, 1.0)],
+            ("working", "plan") | ("working", "type") => &[(64.0, 36.0, 1.0), (76.0, 36.0, -1.0), (70.0, 38.0, 1.0)],
+            ("working", "forge") => &[(75.0, 62.0, 1.0), (87.0, 62.0, -1.0), (81.0, 64.0, 1.0)],
+            ("working", "brew") | ("working", "gems") => &[(104.0, 72.0, 1.0), (118.0, 72.0, -1.0), (128.0, 72.0, -1.0)],
+            ("working", _) => &[(72.0, 76.0, 1.0), (84.0, 76.0, -1.0), (78.0, 80.0, 1.0)],
+            _ => &[(99.0, 80.0, 1.0), (109.0, 80.0, 1.0), (119.0, 80.0, -1.0), (129.0, 80.0, -1.0), (104.0, 88.0, 1.0), (114.0, 88.0, 1.0), (124.0, 88.0, -1.0)],
+        };
+        let (x, y, facing) = spots[k % spots.len()];
+        let nudge = (k / spots.len()) as f32 * 5.0;
+        (pos2(x + nudge, y + nudge * 0.4), facing)
     }
 
     /// Send each member of the crew to its spot; one joining comes in by
     /// the door. Without animation, each is at its spot at once.
     fn set_crew(&mut self, crew: &[crate::herdr::CrewMember], animated: bool) {
         let mut next: Vec<Trainee> = vec![];
-        let mut at_station: HashMap<String, usize> = HashMap::new();
-        for (i, m) in crew.iter().enumerate() {
+        let mut taken: HashMap<(String, String), usize> = HashMap::new();
+        for m in crew {
             let action = m.action.clone().unwrap_or_default();
-            let beside = if m.status == "working" { let n = at_station.entry(action.clone()).or_insert(0); *n += 1; *n - 1 } else { 0 };
-            let (target, facing) = Room::crew_spot(&m.status, &action, i, crew.len(), beside);
+            let n = taken.entry((m.status.clone(), if m.status == "working" { action.clone() } else { String::new() })).or_insert(0);
+            let (target, facing) = Room::crew_spot(&m.status, &action, *n);
+            *n += 1;
             let mut t = match self.crew.iter().position(|t| t.name == m.name) {
                 Some(i) => self.crew.remove(i),
-                None => Trainee { name: m.name.clone(), harness: harness_for(&m.harness), status: String::new(), action: String::new(), pos: pos2(72.0, 99.0), target, facing },
+                None => Trainee { name: m.name.clone(), harness: harness_for(&m.harness), status: String::new(), action: String::new(), pos: pos2(72.0, 96.0), target, facing },
             };
             t.harness = harness_for(&m.harness);
             t.status = m.status.clone();
@@ -1346,27 +1359,45 @@ impl Room {
         self.crew = next;
     }
 
-    /// The guild's members in the orchestrator's room: smaller than its
-    /// hero, each in its own harness, working, asking (the alert) or done
-    /// (the tick).
-    fn draw_crew(&self, painter: &Painter, origin: Pos2, assets: &Assets) {
+    /// The guild's own room: the orchestrator at its table on the left,
+    /// always there, showing its state (working, the alert while it asks,
+    /// the tick when it is done); the members on the bench on the right,
+    /// up at their stations while they work. Its art fills the room's
+    /// frame at any size.
+    fn draw_guild(&self, painter: &Painter, origin: Pos2, assets: &Assets, selected: bool) {
+        let f = self.drawn_frame().translate(origin.to_vec2());
+        let scale = f.height() / ART.y;
+        let art = Rect::from_center_size(f.center(), ART * scale);
+        painter.rect_filled(f, CornerRadius::ZERO, Color32::from_rgb(18, 15, 23));
+        let clipped = painter.with_clip_rect(f);
+        if let Some(room) = assets.room("guild_room") { clipped.image(room.tex, art, room.uv, Color32::WHITE); }
+        let at = |p: Pos2| pos2(art.min.x + p.x * scale, art.min.y + p.y * scale);
         let t = self.clock;
+        let mark = |p: Pos2, s: f32, status: &str| match status {
+            // Just over the head (the sprite has room above it).
+            "blocked" => { let bob = (t * 6.0).sin() * 1.5; draw_sprite(&clipped, assets.prop("alert"), pos2(p.x, p.y - s * 0.4 - 8.0 * scale / 1.5 + bob), vec2(6.0, 11.0) * 1.2 * scale / 1.5, false, 0.0, Color32::WHITE); }
+            "done" => draw_sprite(&clipped, assets.prop("tick"), pos2(p.x, p.y - s * 0.4 - 7.0 * scale / 1.5), vec2(11.0, 12.0) * scale / 1.5, false, 0.0, Color32::WHITE),
+            _ => {}
+        };
+        // The orchestrator behind its table: the table's front goes over it.
+        let lead = at(pos2(26.0, 38.0));
+        let size = HERO * scale / 1.5;
+        let frame = if self.status == "working" { assets.hero_frame(self.harness, "work", (t / 0.18) as usize) } else { assets.hero_frame(self.harness, "idle", (t / 0.5) as usize) };
+        draw_sprite(&clipped, frame, lead, vec2(size, size), false, 0.0, Color32::WHITE);
+        if let Some(front) = assets.room("guild_room_front") { clipped.image(front.tex, art, front.uv, Color32::WHITE); }
+        mark(lead, size, &self.status);
+        // The members, back to front.
         let mut order: Vec<&Trainee> = self.crew.iter().collect();
         order.sort_by(|a, b| a.pos.y.total_cmp(&b.pos.y));
+        let s = 24.0 * scale / 1.5;
         for c in order {
-            let q = self.place(Room::rp(c.pos));
-            let p = pos2(origin.x + q.x, origin.y + q.y);
+            let p = at(c.pos);
             let walking = (c.target - c.pos).length() > 0.3;
             let frame = if !walking && c.status == "working" { assets.hero_frame(c.harness, "work", (t / 0.16) as usize) } else { assets.hero_frame(c.harness, "idle", (t / if walking { 0.14 } else { 0.5 }) as usize) };
-            let s = 24.0;
-            draw_sprite(painter, frame, p, vec2(s, s), c.facing < 0.0, 0.0, Color32::WHITE);
-            if walking { continue; }
-            match c.status.as_str() {
-                "blocked" => { let bob = (t * 6.0).sin() * 1.5; draw_sprite(painter, assets.prop("alert"), pos2(p.x, p.y - s / 2.0 - 8.0 + bob), vec2(6.0, 11.0) * 1.2, false, 0.0, Color32::WHITE); }
-                "done" => draw_sprite(painter, assets.prop("tick"), pos2(p.x, p.y - s / 2.0 - 7.0), vec2(11.0, 12.0), false, 0.0, Color32::WHITE),
-                _ => {}
-            }
+            draw_sprite(&clipped, frame, p, vec2(s, s), c.facing < 0.0, 0.0, Color32::WHITE);
+            if !walking { mark(p, s, &c.status); }
         }
+        self.draw_band(painter, origin, f, selected);
     }
 
     /// The room's art: backdrop, lights, heroes, props, particles.
@@ -1486,7 +1517,6 @@ impl Room {
         if self.party_visible {
             for mini in self.party.iter().filter(|m| m.front) { self.draw_mini(&clipped, mini, origin, assets, mini_tint); }
         }
-        self.draw_crew(&clipped, origin, assets);
         // Night in the inn's room: the moon through the window lights the
         // reader; the hearth in the corner glows and flickers.
         if style.status == "idle" && !self.in_transition {
@@ -2256,11 +2286,14 @@ mod tests {
     }
 
     #[test]
-    fn the_guilds_room_is_as_tall_as_any_and_its_crew_walks_in_it() {
+    fn the_guilds_room_is_as_tall_as_any_with_the_crew_on_the_bench_or_at_work() {
         let mut scene = Scene::new();
-        let mut lead = agent("w1:p1", "working");
+        let mut lead = agent("w1:p1", "done");
+        lead.guild_room = true;
+        scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
+        assert!(scene.rooms.get("w1:p1").unwrap().training, "the guild's room even before anyone is hired");
         let member = |name: &str, status: &str, action: Option<&str>| crate::herdr::CrewMember { name: name.into(), harness: "kiro".into(), status: status.into(), action: action.map(str::to_string) };
-        lead.crew = vec![member("Orin", "blocked", None), member("Aria", "working", Some("read")), member("Kael", "idle", None)];
+        lead.crew = vec![member("Orin", "blocked", None), member("Aria", "working", Some("read")), member("Kael", "idle", None), member("Lira", "idle", None), member("Bo", "working", Some("brew"))];
         scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
         assert!(!scene.is_double(1));
         for columns in [1, 2, 3] {
@@ -2268,18 +2301,26 @@ mod tests {
             assert_eq!(slots[1].size(), slots[0].size(), "{columns} columns: a room like the others");
         }
         let room = scene.rooms.get("w1:p1").unwrap();
-        assert_eq!(room.style.status, "working", "the orchestrator's own room");
+        assert_eq!(room.status, "done", "the orchestrator keeps its state: the tick");
         let at = |name: &str| room.crew.iter().find(|c| c.name == name).unwrap().target;
-        assert_eq!(at("Aria"), pos2(53.0, 37.0), "reading: at the bookshelf");
-        let (orin, kael) = (at("Orin"), at("Kael"));
-        assert!(orin.x < kael.x && orin.y > 80.0 && kael.y > 80.0, "the others on the floor, in order");
-        for c in &room.crew { assert!((0.0..=ART.x).contains(&c.target.x) && (0.0..=ART.y).contains(&c.target.y), "{} inside the room", c.name); }
-        // Someone joining comes in by the door, then walks to its spot.
-        lead.crew.push(member("Lira", "idle", None));
+        assert_eq!(at("Kael"), pos2(99.0, 80.0), "free: on the bench");
+        assert_eq!(at("Lira"), pos2(109.0, 80.0), "beside the first");
+        assert_eq!(at("Aria"), pos2(110.0, 36.0), "reading: at the shelf");
+        assert_eq!(at("Bo"), pos2(104.0, 72.0), "running commands: at the potions");
+        assert_eq!(at("Orin"), pos2(60.0, 56.0), "asking: beside the orchestrator's table");
+        // They walked in by the door; given time, they reach their spots.
+        for _ in 0..200 { scene.rooms.get_mut("w1:p1").unwrap().advance(0.05); }
+        assert!(scene.rooms.get("w1:p1").unwrap().crew.iter().all(|c| c.pos == c.target));
+        // Getting up: a change of state walks it from the bench to its station.
+        lead.crew[2].status = "working".into();
+        lead.crew[2].action = Some("forge".into());
+        scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
+        let kael = scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Kael").unwrap();
+        assert_eq!((kael.pos, kael.target), (pos2(99.0, 80.0), pos2(75.0, 62.0)));
+        // Someone hired comes in by the door.
+        lead.crew.push(member("Nim", "idle", None));
         scene.sync(&[agent("a", "idle"), lead, agent("b", "idle")]);
-        let lira = scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Lira").unwrap();
-        assert_eq!(lira.pos, pos2(72.0, 99.0));
-        assert_ne!(lira.target, lira.pos);
+        assert_eq!(scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Nim").unwrap().pos, pos2(72.0, 96.0));
     }
 
     #[test]

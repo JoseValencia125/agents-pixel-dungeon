@@ -25,7 +25,9 @@ pub struct Assets {
     props: HashMap<&'static str, TextureHandle>,
 }
 
-pub const ROOM_FILES: [(&str, &[u8]); 21] = [
+pub const ROOM_FILES: [(&str, &[u8]); 23] = [
+    ("guild_room", include_bytes!("../Resources/Sprites/rooms/guild_room.png")),
+    ("guild_room_front", include_bytes!("../Resources/Sprites/rooms/guild_room_front.png")),
     ("room_working", include_bytes!("../Resources/Sprites/rooms/room_working.png")),
     ("room_working_front", include_bytes!("../Resources/Sprites/rooms/room_working_front.png")),
     ("room_blocked", include_bytes!("../Resources/Sprites/rooms/room_blocked.png")),

@@ -442,6 +442,7 @@ fn hall_agent(snap: &Snapshot) -> Option<Agent> {
     hall.hero_status = Some(if snap.orchestrator_busy { "working".into() } else { "idle".into() });
     let _ = &mine;
     hall.crew = crew.iter().map(|(m, _)| crew_member(snap, m)).collect();
+    hall.guild_room = true;
     Some(hall)
 }
 
