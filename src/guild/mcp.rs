@@ -104,6 +104,8 @@ fn latest_attempt<'a>(snap: &'a Snapshot, task_id: &str) -> Option<&'a Attempt> 
 /// What a task wants from the orchestrator, if anything.
 fn needs(snap: &Snapshot, t: &Task) -> Option<&'static str> {
     let a = latest_attempt(snap, &t.id);
+    // The guild's orchestrator is on it: nothing for anyone else yet.
+    if a.is_some_and(|a| a.deciding) { return None; }
     match (t.state, a.map(|a| a.state)) {
         (TaskState::Completed | TaskState::Cancelled | TaskState::Accepted | TaskState::Integrating, _) => None,
         (_, Some(AttemptState::WaitingInput)) => Some("permission"),
@@ -125,6 +127,10 @@ fn task_line(snap: &Snapshot, t: &Task) -> String {
     }
     if let Some(r) = &t.block_reason { s.push_str(&format!(" — {r}")); }
     if let Some(n) = needs(snap, t) { s.push_str(&format!("  ⟵ NEEDS YOU: {n}")); }
+    if let Some(a) = a {
+        if a.deciding { s.push_str("  (the guild's orchestrator is deciding)"); }
+        if let Some(why) = &a.escalation { s.push_str(&format!(" — escalated by the orchestrator: {why}")); }
+    }
     s
 }
 

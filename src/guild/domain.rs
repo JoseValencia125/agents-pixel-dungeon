@@ -374,6 +374,13 @@ pub struct Attempt {
     /// Times the session was reopened after a restart.
     #[serde(default)]
     pub resumed: u32,
+    /// The guild's orchestrator is deciding on it (a permission, the
+    /// candidate, a failure): nobody else needs to.
+    #[serde(default)]
+    pub deciding: bool,
+    /// Why the orchestrator left the decision to the delegate or the user.
+    #[serde(default)]
+    pub escalation: Option<String>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub created_at: String,
