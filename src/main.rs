@@ -13,6 +13,7 @@ mod assets;
 mod commands;
 mod events;
 mod guild_chamber;
+mod guild_mode;
 mod guild_studio;
 mod guild_view;
 mod herdr;
@@ -205,6 +206,8 @@ struct App {
     guild: guild_view::GuildView,
     show_board: bool,
     show_studio: bool,
+    /// The tab open in the room of the agent in guild mode.
+    guild_tab: guild_mode::Tab,
     shot_asked: bool,
     visible: bool,
     first_frame: bool,
@@ -320,6 +323,7 @@ impl App {
             guild,
             show_board: false,
             show_studio: false,
+            guild_tab: guild_mode::Tab::Chat,
             shot_asked: false,
             visible: true,
             first_frame: true,
@@ -826,6 +830,14 @@ impl eframe::App for App {
             }
         }
         if std::env::var("HPD_TEST_DIFF").is_ok() && now > 1.0 && now < 1.2 { self.guild.diff_open = true; }
+        // HPD_TEST_GUILD=chat|guild|quests|design: the open room in guild mode on that
+        // tab, kept in memory only (for captures).
+        if let Ok(v) = std::env::var("HPD_TEST_GUILD") {
+            if now > 1.3 && now < 1.5 {
+                if let Some(id) = self.monitor.selected.clone() { self.prefs.guild_lead = Some(id); }
+                self.guild_tab = match v.as_str() { "guild" => guild_mode::Tab::Guild, "quests" => guild_mode::Tab::Quests, "design" => guild_mode::Tab::Design, _ => guild_mode::Tab::Chat };
+            }
+        }
         // HPD_TEST_SHOT=<file.png>: save what the window shows after 3 s (or
         // HPD_TEST_SHOT_AT seconds), for captures when the screen cannot be
         // grabbed (another space is full screen).
@@ -927,6 +939,13 @@ impl eframe::App for App {
         let opening = (self.monitor.selected.is_some() || self.monitor.composing) && !was_open;
         if opening && self.shown_columns() == 1 { self.widened = true; }
         if !self.monitor.composing && self.monitor.selected.is_none() && self.widened { self.widened = false; needs_fit = true; }
+        // With an agent in guild mode, the guild's hall opens its room, on the crew.
+        if self.monitor.selected.as_deref() == Some(guild_view::HALL_ID) {
+            if let Some(lead) = self.prefs.guild_lead.clone().filter(|id| self.monitor.agents.iter().any(|a| &a.id == id)) {
+                self.monitor.select(Some(lead));
+                self.guild_tab = guild_mode::Tab::Guild;
+            }
+        }
         // The chat panel follows the selection.
         match (&self.monitor.selected, &self.chat) {
             (Some(id), Some(chat)) if &chat.agent_id == id => {}
@@ -1161,10 +1180,36 @@ impl eframe::App for App {
                                 if let Some(path) = action.terminal { self.terminals.open(ctx, &path); }
                                 if action.close { self.monitor.select(None); }
                             } else {
-                                let action = ui::chat_panel(ui, &self.monitor, &agent, chat, now, fullscreen);
-                                if action.terminal { self.terminals.open(ctx, &agent.cwd); }
-                                if action.close { self.monitor.select(None); }
-                                if action.console_step != 0 { self.step_console_scale(action.console_step); }
+                                // Guild mode: the guild's tabs over the chat.
+                                let lead = self.prefs.guild_lead.as_deref() == Some(agent.id.as_str());
+                                chat.guild_lead = lead;
+                                if lead && guild_mode::tab_strip(ui, &mut self.guild_tab, &self.guild, &agent.cwd) {
+                                    self.prefs.guild_lead = None;
+                                    self.prefs.save();
+                                    self.guild_tab = guild_mode::Tab::Chat;
+                                }
+                                let rest = ui.available_rect_before_wrap();
+                                let step = ui.scope_builder(egui::UiBuilder::new().max_rect(rest), |ui| {
+                                    if lead && self.guild_tab != guild_mode::Tab::Chat {
+                                        let action = guild_mode::body(ui, self.guild_tab, &mut self.guild, &agent.cwd, now, fullscreen);
+                                        if let Some(path) = action.terminal { self.terminals.open(ctx, &path); }
+                                        if action.studio { self.show_studio = true; }
+                                        return 0;
+                                    }
+                                    let action = ui::chat_panel(ui, &self.monitor, &agent, chat, now, fullscreen);
+                                    if action.terminal { self.terminals.open(ctx, &agent.cwd); }
+                                    if action.close { self.monitor.select(None); }
+                                    if action.guild {
+                                        // The agent becomes the orchestrator: one message, then its tabs.
+                                        chat.send_now(&self.monitor, &agent, &guild_mode::bootstrap(&guild_mode::guild_binary(), &agent.cwd));
+                                        self.prefs.guild_lead = Some(agent.id.clone());
+                                        self.prefs.save();
+                                        self.guild_tab = guild_mode::Tab::Chat;
+                                        self.guild.start();
+                                    }
+                                    action.console_step
+                                }).inner;
+                                if step != 0 { self.step_console_scale(step); }
                             }
                         }
                     } else {

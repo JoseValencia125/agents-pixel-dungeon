@@ -21,6 +21,11 @@ USAGE
   guild serve [--daemon] [--concurrency N] [--attempt-timeout MIN]
   guild mcp                          an MCP server on stdio, so Claude Code orchestrates the guild
   guild status                       the guild at a glance
+  guild orchestrate [<path>]         make the agent running this the guild's orchestrator: adds the repository
+                                     and prints its brief (how to lead, the roles, the commands, the guild now)
+  guild tool <name> [JSON|-]         run one of the MCP tools (guild_status, guild_start_quest, guild_wait,
+                                     guild_task, guild_diff, guild_decide, guild_permission) from a shell
+  guild concurrency [N]              how many members work at once (1–16), kept between runs
   guild snapshot                     the whole state as JSON
   guild stop                         stop the service
 
@@ -28,8 +33,11 @@ USAGE
                                      the branch quests start from and integrate into (default: the checkout's)
   guild found <path> [--name NAME] [--template videogame|blank|none] [--member NAME:ROLE:HARNESS[:MODEL]]...
   guild roles                        the roles of the catalogue
-  guild design <project> [get|template|export]   the game design: show it, start from the template, write game-design/ into the repo
+  guild design <project> [get|doc|template|export]   the game design: as JSON, as the document, from the template, onto its branch
+  guild design <project> set <file|->  replace the whole design with this JSON (as `get` prints it)
   guild member add <id> --harness kiro|codex|claude|mock [--role R]... [--model M] [--mode MODE] [--name N]
+  guild member set <id> [--role R]... [--model M] [--mode MODE] [--name N] [--harness H] [--enable|--disable]
+  guild member remove <id>
   guild models [kiro|codex|claude|mock]  the models the harness announces
 
   guild quest new <project> <title> [--description TEXT]
@@ -165,7 +173,7 @@ fn parse(args: &[String]) -> Args<'_> {
     Args { positional, flags }
 }
 
-fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground" | "detach") }
+fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground" | "detach" | "enable" | "disable") }
 
 impl Args<'_> {
     fn flag(&self, name: &str) -> Option<&str> { self.flags.iter().rev().find(|(k, _)| *k == name).and_then(|(_, v)| *v) }
@@ -236,6 +244,33 @@ fn daemonize(forward: &[String]) -> Result<(), String> {
 }
 
 // ----- client commands -----
+
+/// A command's text input: the file it names, or stdin for `-`, or the
+/// argument itself when it is inline JSON.
+fn read_arg(source: &str) -> Result<String, String> {
+    use std::io::Read;
+    if source == "-" {
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text).map_err(|e| e.to_string())?;
+        return Ok(text);
+    }
+    if source.trim_start().starts_with('{') || source.trim_start().starts_with('[') { return Ok(source.to_string()); }
+    std::fs::read_to_string(source).map_err(|e| format!("{source}: {e}"))
+}
+
+/// The repository a path is in (its top level), or the path itself.
+fn repo_root(path: &str) -> String {
+    let out = std::process::Command::new("git").args(["-C", path, "rev-parse", "--show-toplevel"]).output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => std::fs::canonicalize(path).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_string()),
+    }
+}
+
+fn same_path(a: &str, b: &str) -> bool {
+    let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+    canon(a) == canon(b)
+}
 
 fn ensure_running() -> Result<Client, String> {
     let client = Client::default_socket();
@@ -322,10 +357,78 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                     let r = call(&ensure_running()?, "design.system.set", json!({"projectId": project, "system": system}))?;
                     println!("design v{} · {} systems", r["version"], r["systems"].as_array().map(Vec::len).unwrap_or(0));
                 }
+                "set" => {
+                    let source = a.pos(2, "design file (or -)")?;
+                    let text = read_arg(source)?;
+                    let mut design: Value = serde_json::from_str(&text).map_err(|e| format!("design JSON: {e}"))?;
+                    // `get` prints the design itself; a bundle from design.json works too.
+                    if design.get("design").is_some() { design = design["design"].take(); }
+                    let r = call(&ensure_running()?, "design.set", json!({"projectId": project, "design": design}))?;
+                    println!("design v{} · {} loops · {} systems", r["version"], r["loops"].as_array().map(Vec::len).unwrap_or(0), r["systems"].as_array().map(Vec::len).unwrap_or(0));
+                }
+                "doc" => {
+                    let snap: Snapshot = serde_json::from_value(call(&ensure_running()?, "guild.snapshot", json!({}))?).map_err(|e| e.to_string())?;
+                    let design = snap.designs.iter().find(|d| d.project_id == project).ok_or_else(|| format!("no design for {project} yet: design {project} template"))?;
+                    let questions: Vec<_> = snap.questions.iter().filter(|q| q.project_id == project).cloned().collect();
+                    let decisions: Vec<_> = snap.design_decisions.iter().filter(|d| d.project_id == project).cloned().collect();
+                    print!("{}", guild::design::document(design, &questions, &decisions));
+                }
                 "template" => { let r = call(&ensure_running()?, "design.template", json!({"projectId": project, "template": a.flag("template").unwrap_or("videogame")}))?; println!("design v{} · {} loops · {} parts", r["version"], r["loops"].as_array().map(Vec::len).unwrap_or(0), r["parts"].as_array().map(Vec::len).unwrap_or(0)); }
                 "export" => { let r = call(&ensure_running()?, "design.export", json!({"projectId": project}))?; for f in r["files"].as_array().into_iter().flatten() { println!("{}", f.as_str().unwrap_or("")); } }
                 _ => { let r = call(&ensure_running()?, "design.get", json!({"projectId": project}))?; println!("{}", serde_json::to_string_pretty(&r).unwrap()); }
             }
+            Ok(())
+        }
+        "member" if a.positional.first().copied() == Some("set") => {
+            let id = a.pos(1, "member id")?;
+            let mut params = json!({"memberId": id});
+            if !a.all("role").is_empty() { params["roles"] = json!(a.all("role")); }
+            for key in ["model", "mode", "name", "harness"] { if let Some(v) = a.flag(key) { params[key] = json!(v); } }
+            if a.has("enable") { params["enabled"] = json!(true); }
+            if a.has("disable") { params["enabled"] = json!(false); }
+            let r = call(&ensure_running()?, "member.update", params)?;
+            println!("member {} · {} · {} · {}", r["id"].as_str().unwrap_or(""), r["harness"].as_str().unwrap_or(""), r["roles"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", "), if r["enabled"] == true { "enabled" } else { "disabled" });
+            Ok(())
+        }
+        "member" if a.positional.first().copied() == Some("remove") => {
+            call(&ensure_running()?, "member.remove", json!({"memberId": a.pos(1, "member id")?}))?;
+            println!("removed");
+            Ok(())
+        }
+        "concurrency" => {
+            let client = ensure_running()?;
+            if let Some(n) = a.positional.first() {
+                let n: u64 = n.parse().map_err(|_| "concurrency must be a number")?;
+                call(&client, "guild.concurrency", json!({"concurrency": n}))?;
+            }
+            let snap = call(&client, "guild.snapshot", json!({}))?;
+            println!("{} at once", snap["concurrency"]);
+            Ok(())
+        }
+        "tool" => {
+            let name = a.pos(0, "tool name")?;
+            let input = match a.positional.get(1) { Some(source) => read_arg(source)?, None => "{}".into() };
+            let input: Value = serde_json::from_str(&input).map_err(|e| format!("tool input JSON: {e}"))?;
+            let client = ensure_running()?;
+            let out = guild::mcp::run_tool(name, &input, &|method, params| call(&client, method, params), &std::thread::sleep)?;
+            println!("{out}");
+            Ok(())
+        }
+        "orchestrate" => {
+            let client = ensure_running()?;
+            let mut project_id = None;
+            if let Some(path) = a.positional.first() {
+                let root = repo_root(path);
+                let snap: Snapshot = serde_json::from_value(call(&client, "guild.snapshot", json!({}))?).map_err(|e| e.to_string())?;
+                project_id = match snap.projects.iter().find(|p| same_path(&p.repo_path, &root)) {
+                    Some(p) => Some(p.id.clone()),
+                    None => call(&client, "project.add", json!({"repoPath": root}))?["project"]["id"].as_str().map(str::to_string),
+                };
+            }
+            let snap: Snapshot = serde_json::from_value(call(&client, "guild.snapshot", json!({}))?).map_err(|e| e.to_string())?;
+            let project = project_id.as_ref().and_then(|id| snap.projects.iter().find(|p| &p.id == id)).or(snap.projects.first());
+            let bin = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "agents-pixel-dungeon-guild".into());
+            print!("{}", guild::orchestrator::brief(&snap, project, &bin));
             Ok(())
         }
         "member" => {

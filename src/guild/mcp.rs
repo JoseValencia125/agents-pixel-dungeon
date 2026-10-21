@@ -140,7 +140,8 @@ fn find_member<'a>(snap: &'a Snapshot, who: &str) -> Option<&'a Member> {
     snap.members.iter().find(|m| m.id == who || m.name.eq_ignore_ascii_case(who))
 }
 
-fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) -> Result<String, String> {
+/// One tool, as `tools/call` runs it; also `guild tool <name>` on the command line.
+pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) -> Result<String, String> {
     let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
     let need = |k: &str| s(k).filter(|v| !v.trim().is_empty()).ok_or_else(|| format!("missing {k}"));
     match name {

@@ -556,6 +556,9 @@ pub struct Snapshot {
     pub orchestrator: Option<String>,
     #[serde(default)]
     pub orchestrator_busy: bool,
+    /// How many attempts may run at once.
+    #[serde(default)]
+    pub concurrency: usize,
 }
 
 /// What `probe` found out about an installed harness.

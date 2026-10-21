@@ -49,6 +49,10 @@ pub fn pick(members: &[Member], available: &[HarnessKind]) -> Option<Member> {
 
 pub const ROLE_PROMPT: &str = "You are the orchestrator of a game development guild. You are the only member the user talks to; the other members never hear from the user directly. Understand what the user wants, answer briefly in the user's language, and when it needs work, plan it for the members. Do not edit files: read the repository if you need to, the members do the work.";
 
+/// How tasks are written, for the guild's own orchestrator and for an
+/// agent that orchestrates from its terminal.
+pub const TASK_RULES: &str = "Keep tasks small, each with verifiable acceptance. When you split one change between members, write the shared interface into every part's instructions (names, signatures, keys, where each thing lives), and end with an integration task that depends on the parts and checks them together: the whole flow tested end to end, and nothing left over from working apart (placeholders, comments about the merge, changes outside the task).";
+
 /// What the orchestrator is told for one message: who is in the guild,
 /// what is under way, the design, the conversation so far and the message.
 pub fn compose(project: &Project, members: &[Member], snap: &Snapshot, design: Option<&crate::design::GameDesign>, history: &[ChatLine], message: &str) -> String {
@@ -73,7 +77,7 @@ pub fn compose(project: &Project, members: &[Member], snap: &Snapshot, design: O
         s.push_str(&format!("{}: {}\n", if line.author == "user" { "User" } else { "You" }, line.text.trim()));
     }
     s.push_str(&format!("User: {}\n", message.trim()));
-    s.push_str("\nAnswer the user in a few sentences. If the message asks for work, end with one fenced ```json block, nothing after it: {\"title\": \"…\", \"description\": \"…\", \"tasks\": [{\"id\": \"t1\", \"title\": \"…\", \"instructions\": \"…\", \"acceptance\": [\"…\"], \"role\": \"<a member's role>\", \"dependsOn\": []}]}. Keep tasks small, each with verifiable acceptance; dependsOn names earlier task ids. When you split one change between members, write the shared interface into every part's instructions (names, signatures, keys, where each thing lives), and end with an integration task that depends on the parts and checks them together: the whole flow tested end to end, and nothing left over from working apart (placeholders, comments about the merge, changes outside the task). With no work to do, give no block.\n");
+    s.push_str(&format!("\nAnswer the user in a few sentences. If the message asks for work, end with one fenced ```json block, nothing after it: {{\"title\": \"…\", \"description\": \"…\", \"tasks\": [{{\"id\": \"t1\", \"title\": \"…\", \"instructions\": \"…\", \"acceptance\": [\"…\"], \"role\": \"<a member's role>\", \"dependsOn\": []}}]}}. {TASK_RULES} dependsOn names earlier task ids. With no work to do, give no block.\n"));
     s
 }
 
@@ -100,6 +104,80 @@ pub fn role_for(planned: &str, members: &[Member]) -> String {
     members.iter().find(|m| m.enabled).and_then(|m| m.roles.first().cloned()).unwrap_or_else(|| "implementer".into())
 }
 
+/// When to hire each role of the catalogue, for an orchestrator sizing
+/// its studio.
+fn hire_when(role: &str) -> &'static str {
+    match role {
+        "planner" => "you are the planner; hire another only to plan a second project",
+        "implementer" => "any code that is not game rules: tooling, build, scaffolding, UI plumbing",
+        "systems-designer" => "from the first day of a game: turns the concept into loops, systems, numbers with safe ranges and questions",
+        "gameplay-engineer" => "the core of a game's build: rules exactly as designed, data apart from logic, tests that saw the bug fail; two when parts are independent",
+        "judge" => "when you race candidates (--strategy race --select judge); never an author of them",
+        "reviewer" => "always one once code lands: finds what is wrong with each candidate before you accept it",
+        "art-director" => "when the game shows anything: ART_DIRECTION.md and asset briefs before any asset",
+        "asset-artist" => "after the art director wrote briefs",
+        "sprite-animator" => "characters or effects that move",
+        "technical-artist" => "many assets, or an engine import: checks sizes, sheets, palettes, pivots automatically",
+        "visual-qa" => "before saying an asset or a screen is done: judges it in the running game",
+        "ai-player" => "once the game speaks the agent protocol ([ai_play]): plays as a persona and says what it felt",
+        "exploit-hunter" => "once a loop is playable: breaks the economy, finds dominant strategies, reports reproducible findings",
+        "design-analyst" => "experiments: reads the playtest metrics against a hypothesis",
+        _ => "",
+    }
+}
+
+/// What an agent that was running on its own reads when it becomes the
+/// guild's orchestrator (`guild orchestrate`): who it is now, how it
+/// behaves when the user wants a game, the roles it can hire, how it
+/// writes tasks, the commands that change every tab the user sees, and
+/// the guild as it is.
+pub fn brief(snap: &Snapshot, project: Option<&Project>, bin: &str) -> String {
+    let g = "guild";
+    let quoted = if bin.contains(' ') { format!("'{bin}'") } else { bin.to_string() };
+    let pid = project.map(|p| p.id.clone()).unwrap_or_else(|| "<project>".into());
+    let mut s = String::new();
+    s.push_str("# You are the guild's orchestrator\n\n");
+    s.push_str("The user switched this session to guild mode. You keep talking with the user here, in their language, as before; you now also run a guild of agents (its members: Claude, Codex, Kiro… each in its own git worktree) that do the building. The user's dungeon shows your room with tabs — Guild (members and what each does), Quests (the work and what waits for a decision), Design (the game design document) — and every tab reads the guild's state. Change them with the commands below; never write the guild's files by hand. Members never hear from the user: everything they know is in the task you write. Use your own subagents for reading and research if your harness has them; the members are for work that lands in the repository.\n\n");
+    s.push_str("## Have an opinion\n\nYou are the studio's lead, not a form. Recommend one option and say why in a line; give the alternative only when the trade-off is real. When a request contradicts the design's pillars, say so and propose what would serve them. Ask only the questions whose answer changes the plan, and put your default next to each one, so silence means yes.\n\n");
+    s.push_str("## When the user wants to make a game\n\n");
+    s.push_str("1. **Pitch before you plan.** In your first answer propose: a working title, the game in one sentence, three pillars in priority order (each with the yes/no test a choice must pass), the core loop in three to five steps, the first playable slice (one loop, one screen, a few minutes of play, no menus), the stack (what the repository already uses; for an empty one, TypeScript + Vite + Canvas for a 2D web game, or the engine the user names) and the studio you would hire. At most two questions, typically the feeling they want and the platform, each with your default.\n");
+    s.push_str(&format!("2. **Write it down at once.** No design yet: `{g} design {pid} template`. Then put the pitch in it: `{g} design {pid} get > /tmp/design.json`, edit, `{g} design {pid} set /tmp/design.json` (title, concept, pillars, anti-pillars, experience, the core loop, each system at maturity `concept` with what is known and unknown). Every unknown becomes `question new`; never invent a number silently — a number needs a safe range or it is a question.\n"));
+    s.push_str("3. **Hire for the slice, not for the dream.** Start with a systems designer, one or two gameplay engineers and a reviewer; an art director when the slice shows anything; the exploit hunter and AI players once there is something to play. Add members when tasks are truly independent, remove them when work is a chain: parallel parts that share seams are where guild work goes wrong. Raise concurrency to the number of members that should work at once.\n");
+    s.push_str("4. **The first quest is the slice.** Scaffold, the core loop playable, tests as the verifier, and `[play]` (and `[ai_play]` when it can speak the agent protocol) in `.guild/guild.toml`, so the user can press Play. Decisions you take go to `decision new`; systems move up in maturity as they are built.\n");
+    s.push_str("5. **Then loop.** Wait, read each candidate's diff against its acceptance and the design, accept or reject with a reason the member can act on. After every playable build ask the user to play it; turn what they notice into questions, questions into hypotheses, hypotheses into experiments.\n\n");
+    s.push_str(&format!("## Writing tasks\n\nA member sees only its task: instructions, acceptance, role. {TASK_RULES} Pin a task to a member with `member`, or race several with `candidates`.\n\n"));
+    s.push_str("## Roles you can hire\n\nEach role's own prompt already frames every attempt its member makes.\n\n");
+    for r in &snap.roles {
+        s.push_str(&format!("- `{}` ({}) — {}\n", r.id, r.guild, hire_when(&r.id)));
+    }
+    let harnesses: Vec<String> = snap.harnesses.iter().filter(|h| h.available).map(|h| h.kind.to_string()).collect();
+    s.push_str(&format!("\nHarnesses available on this machine: {}.\n\n", if harnesses.is_empty() { "none detected yet (run status)".into() } else { harnesses.join(", ") }));
+    s.push_str(&format!("## Commands\n\n`guild` below is `{quoted}`: write that path in every command, a shell keeps no alias between your calls.\n\n"));
+    s.push_str(&format!("Guild tab — members and how many work at once:\n- `{g} member add <id> --harness claude|codex|kiro --role R [--role R2] [--model M] [--name N]`\n- `{g} member set <id> [--role R]… [--model M] [--harness H] [--enable|--disable]`  ·  `{g} member remove <id>`\n- `{g} concurrency <N>` (1–16)  ·  `{g} roles`  ·  `{g} models <harness>`\n\n"));
+    s.push_str(&format!("Quests tab — work for the members (JSON as the argument, or `-` to read it from stdin):\n- `{g} tool guild_start_quest '{{\"title\": \"…\", \"tasks\": [{{\"id\": \"t1\", \"title\": \"…\", \"instructions\": \"…\", \"acceptance\": [\"…\"], \"role\": \"gameplay-engineer\", \"dependsOn\": []}}]}}'`\n- `{g} tool guild_wait '{{\"questId\": \"…\"}}'` blocks until something needs you (up to 9 min; run it in the background if your harness can and keep talking to the user)\n- `{g} tool guild_task '{{\"taskId\": \"…\"}}'`  ·  `{g} tool guild_diff '{{\"taskId\": \"…\"}}'`\n- `{g} tool guild_decide '{{\"taskId\": \"…\", \"decision\": \"accept|reject|retry|cancel\", \"reason\": \"…\"}}'`  ·  `{g} tool guild_permission '{{\"taskId\": \"…\", \"optionId\": \"…\"}}'`\n- `{g} tool guild_status` the guild at a glance\n\n"));
+    s.push_str(&format!("Design tab — the living game design:\n- `{g} design {pid} doc` reads it as the user sees it  ·  `get` as JSON  ·  `set <file|->` replaces it  ·  `template`\n- `{g} design {pid} system set <id> --name N --maturity M --intent … --current … --known … --unknown …`\n- `{g} question new {pid} --question …`  ·  `{g} question resolve {pid} <Q-id> --decision … --why …`  ·  `{g} decision new {pid} --decision … --why …`\n- `{g} design {pid} export` commits game-design/ to the branch guild/design/{pid}, never the checkout\n\n"));
+    s.push_str("Accepting a task merges it into the quest's branch guild/quest/<id>, never into the user's branch; tell the user the branch when a quest completes.\n\n");
+    s.push_str("## The guild now\n\n");
+    match project {
+        Some(p) => s.push_str(&format!("Project `{}` — {} at {} (quests start from {}).\n", p.id, p.name, p.repo_path, p.target_ref.trim_start_matches("refs/heads/"))),
+        None => s.push_str("No project yet: run `guild orchestrate <repository path>` to add it.\n"),
+    }
+    s.push_str(&format!("Concurrency: {} at once.\n", snap.concurrency.max(1)));
+    let members: Vec<&Member> = snap.members.iter().filter(|m| m.enabled).collect();
+    if members.is_empty() { s.push_str("Members: none. Hire the studio the work needs.\n"); }
+    for m in members { s.push_str(&format!("- {} (`{}`) — {} on {}{}\n", m.name, m.id, m.roles.join(", "), m.harness, m.model_id.as_ref().map(|x| format!(" · {x}")).unwrap_or_default())); }
+    for q in snap.quests.iter().filter(|q| project.is_none_or(|p| q.project_id == p.id) && matches!(q.state, QuestState::Running | QuestState::Paused | QuestState::Blocked)) {
+        s.push_str(&format!("Quest `{}` {:?}: {}\n", q.id, q.state, q.title));
+        for t in snap.tasks.iter().filter(|t| t.quest_id == q.id) { s.push_str(&format!("  - `{}` [{}] {:?}: {}\n", t.id, t.role, t.state, t.title)); }
+    }
+    match project.and_then(|p| snap.designs.iter().find(|d| d.project_id == p.id)) {
+        Some(d) => s.push_str(&crate::design::prompt_context(d)),
+        None => s.push_str("Design: none yet.\n"),
+    }
+    s.push_str("\nNow answer the user: say in one line that you run the guild, and carry on with what they asked. If they had asked for nothing, ask what they want to make.\n");
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +189,21 @@ mod tests {
         let plan = plan.unwrap();
         assert_eq!(plan.tasks.len(), 2);
         assert_eq!(plan.tasks[1].depends_on, vec!["t1".to_string()]);
+    }
+
+    #[test]
+    fn the_brief_leads_with_opinions_and_names_every_command_and_role() {
+        let project = Project { id: "ember".into(), name: "Ember".into(), repo_path: "/r/ember".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, created_at: String::new() };
+        let m = Member { id: "ada".into(), name: "Ada".into(), roles: vec!["systems-designer".into()], harness: HarnessId::named("claude"), model_id: Some("opus".into()), mode: None, role_prompt: String::new(), enabled: true };
+        let snap = Snapshot { projects: vec![project.clone()], members: vec![m], roles: crate::config::role_catalog(), concurrency: 3, ..Default::default() };
+        let b = brief(&snap, Some(&project), "/Applications/A B.app/guild");
+        for needle in ["Have an opinion", "Pitch before you plan", "three pillars", "Hire for the slice", "`guild` below is `'/Applications/A B.app/guild'`",
+            "guild design ember set", "guild tool guild_start_quest", "guild member add", "guild concurrency", "Concurrency: 3 at once", "Ada (`ada`) — systems-designer on claude · opus", "Design: none yet", TASK_RULES] {
+            assert!(b.contains(needle), "the brief lacks {needle:?}:\n{b}");
+        }
+        for r in crate::config::role_catalog() {
+            assert!(b.contains(&format!("- `{}`", r.id)) && !hire_when(&r.id).is_empty(), "role {} has no line", r.id);
+        }
     }
 
     #[test]

@@ -123,7 +123,18 @@ In the dungeon the guild is **one double room**, its hall: two halves in one fra
 
 Click the hall to talk to the **orchestrator**, the only member you address: the enabled member with the planner role, or the first enabled member when none has it. It reads the repository, the members and their roles, what is under way, the design and the conversation so far, answers in a few sentences and, when your message asks for work, plans it: the guild turns the plan into a quest with its tasks and dependencies and starts it at once, and the scheduler hands the tasks to the members (a task whose role nobody holds goes to an implementer). The orchestrator works in a scratch folder of its own, never in your checkout. Above the chat, **Needs you** lists the members waiting for a permission or a decision on a candidate, and **Under the hood** has one chip per member; either opens that member's work (its task, permission, candidate and transcript) inside the panel, with **← Back to the hall**.
 
-### Claude Code as the orchestrator
+### Guild mode: an agent you are already talking to leads the guild
+
+Any agent running in Herdr (Claude Code, Codex, Kiro…) can become the orchestrator without restarting it: open its room and press **⚔ Guild mode** (⚔ under the rooms). The app types one message into its chat asking it to run `agents-pixel-dungeon-guild orchestrate <its folder>`. That command adds the repository to the guild if it is not there yet and prints the agent's brief: how to lead (recommend, don't hand the user a form; at most two questions, each with a default), what to do when the user wants to make a game (pitch a title, three pillars with their tests, the core loop, the first playable slice, the stack and the studio; write it into the design at once; hire for the slice; the first quest is that slice), when to hire each role of the catalogue, how to write tasks, the commands, and the guild as it is now.
+
+You keep talking to the agent in its **Chat** tab, as before. The room gains three more tabs that read the guild and change as the agent works:
+
+- **Guild**: how many members work at once (− / +), who waits for you, and every member with its roles, harness, model and what it does; a click opens its work (task, permission, candidate, transcript).
+- **Quests**: the project's quests, under way first, with their branch and each task's state, role and member; *needs you* marks a permission or a candidate to decide.
+- **Design**: the game design document on one page — concept and pillars, player experience, style, loops, systems with their maturity (known, not decided yet, formulas, tuning, edge cases, acceptance), objects, open questions and decisions. **Edit in the chamber** opens the design chamber.
+
+The agent changes all of it from its shell: `member add|set|remove`, `concurrency N`, `design <project> doc|get|set <file>|template|system set`, `question new|resolve`, `decision new`, and `tool <name> '<json>'`, which runs the MCP server's tools (`guild_start_quest`, `guild_wait`, `guild_task`, `guild_diff`, `guild_decide`, `guild_permission`, `guild_status`) without adding the MCP server. There is no limit on members, and how many work at once goes from 1 to 16 and is kept between runs. The agent's own subagents still show in its room. With an agent in guild mode, clicking the guild's hall opens that agent's room on the Guild tab. **Leave guild mode** (× when narrow) gives the room back its chat only; the guild and its work carry on.
+
 
 `agents-pixel-dungeon-guild mcp` is an MCP server on stdio, so a Claude Code session can run the guild while its members (Kiro, Codex…) do the work:
 

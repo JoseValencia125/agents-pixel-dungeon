@@ -410,11 +410,21 @@ pub struct ChatState {
     pull: Option<crate::changes::PullRequest>,
     pull_rx: Option<Receiver<Option<crate::changes::PullRequest>>>,
     next_pull: f64,
+    /// The agent orchestrates the guild: its tabs are over the chat, so
+    /// the chat offers no guild mode.
+    pub guild_lead: bool,
 }
 
 impl ChatState {
     pub fn new(agent_id: &str) -> ChatState {
-        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false, shell_open: None, shell_stop: None, changes: None, changes_rx: None, next_changes: 0.0, diff_path: None, diff: vec![], diff_rx: None, pull: None, pull_rx: None, next_pull: 0.0, model: None, model_rx: None, next_model: 0.0 }
+        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false, shell_open: None, shell_stop: None, changes: None, changes_rx: None, next_changes: 0.0, diff_path: None, diff: vec![], diff_rx: None, pull: None, pull_rx: None, next_pull: 0.0, model: None, model_rx: None, next_model: 0.0, guild_lead: false }
+    }
+
+    /// Send this message now, as if typed in the box: what is left in the
+    /// terminal's input is erased first.
+    pub fn send_now(&mut self, monitor: &Monitor, agent: &Agent, text: &str) {
+        self.draft = text.to_string();
+        submit_text(self, monitor, agent);
     }
 
     pub fn with_draft(mut self, draft: String) -> ChatState {
@@ -462,6 +472,8 @@ impl ChatState {
 pub struct ChatAction {
     pub close: bool,
     pub terminal: bool,
+    /// Make this agent the guild's orchestrator.
+    pub guild: bool,
     /// The console's text size: +1 bigger, -1 smaller.
     pub console_step: i8,
 }
@@ -630,7 +642,7 @@ fn changes_column(ui: &mut Ui, agent: &Agent, state: &mut ChatState) {
 }
 
 fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatState, now: f64, wide: bool) -> ChatAction {
-    let mut action = ChatAction { close: false, terminal: false, console_step: 0 };
+    let mut action = ChatAction { close: false, terminal: false, guild: false, console_step: 0 };
     // Files dropped on the window go to the message as paths.
     let dropped = dropped_paths(ui);
     if !dropped.is_empty() { add_paths(&mut state.draft, &dropped); state.focus = true; }
@@ -782,6 +794,9 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                     if button(ui, ">_ Terminal", Color32::from_rgb(254, 174, 52)).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
                         action.terminal = true;
                     }
+                    if !standalone && !state.guild_lead && button(ui, &tr("⚔ Modo guild"), Color32::from_rgb(181, 80, 136)).on_hover_text(tr("Que este agente sea el orquestador de la guild: arma el equipo, reparte el trabajo y lleva el diseño")).clicked() && !sending {
+                        action.guild = true;
+                    }
                     return;
                 }
                 if flat_button(ui, mono("x", 13.0).color(Color32::WHITE)).on_hover_text(tr("Cerrar")).clicked() { action.close = true; }
@@ -790,6 +805,9 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                 }
                 if flat_button(ui, mono(">_", 11.0).strong().color(Color32::from_gray(200))).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
                     action.terminal = true;
+                }
+                if !standalone && !state.guild_lead && flat_button(ui, mono("⚔", 12.0).color(Color32::from_rgb(214, 120, 180))).on_hover_text(tr("Modo guild: que este agente sea el orquestador de la guild")).clicked() && !sending {
+                    action.guild = true;
                 }
                 // The console's own text size.
                 if flat_button(ui, mono("A+", 11.0).color(Color32::from_gray(200))).on_hover_text(format!("{} (⌘⇧+)", tr("Consola más grande"))).clicked() { action.console_step = 1; }
