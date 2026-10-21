@@ -25,9 +25,8 @@ pub struct Assets {
     props: HashMap<&'static str, TextureHandle>,
 }
 
-pub const ROOM_FILES: [(&str, &[u8]); 22] = [
+pub const ROOM_FILES: [(&str, &[u8]); 21] = [
     ("room_working", include_bytes!("../Resources/Sprites/rooms/room_working.png")),
-    ("guild_hall", include_bytes!("../Resources/Sprites/rooms/guild_hall.png")),
     ("room_working_front", include_bytes!("../Resources/Sprites/rooms/room_working_front.png")),
     ("room_blocked", include_bytes!("../Resources/Sprites/rooms/room_blocked.png")),
     // The infirmary: the usage limit (drawn by scripts/room_limited.py).

@@ -23,18 +23,29 @@ pub struct AgentAlert {
     pub shell: Option<(String, String)>,
 }
 
+/// The state an agent rings for. The guild's room rings for its
+/// orchestrator only: the members work on their own, and what they ask
+/// for shows in the room without a sound.
+fn ringing_state(a: &Agent) -> &str {
+    if a.guild_room { a.hero_status.as_deref().unwrap_or(&a.status) } else { &a.status }
+}
+
 /// The agents whose change deserves an alert, those needing help first.
 pub fn alerts_for(previous: &HashMap<String, Agent>, next: &[Agent]) -> Vec<AgentAlert> {
     let mut alerts = vec![];
     for agent in next {
         let Some(old) = previous.get(&agent.id) else { continue };
-        if old.status == agent.status { continue; }
-        if agent.status == "blocked" {
+        let (was, now) = (ringing_state(old), ringing_state(agent));
+        if was == now { continue; }
+        if now == "blocked" {
             // The guild works on its own: a member asking for something
             // shows in its hall, but does not ring.
             if agent.id.starts_with(crate::guild_view::ID_PREFIX) { continue; }
             alerts.push(AgentAlert { kind: AlertKind::NeedsHelp, agent: agent.clone(), shell: None });
-        } else if agent.status == "done" || (old.status == "working" && agent.status == "idle") {
+        } else if now == "done" || (was == "working" && now == "idle") {
+            // An orchestrator ending a turn while it still waits on the guild
+            // in the background is not done: it is between two looks.
+            if agent.guild_room && agent.shells.iter().any(|s| s.is_guild()) { continue; }
             alerts.push(AgentAlert { kind: AlertKind::Finished, agent: agent.clone(), shell: None });
         }
     }
@@ -227,4 +238,34 @@ fn post_one(title: &str, body: &str, pane: &str, open_tx: Sender<String>) {
 fn post_one(title: &str, body: &str, _pane: &str, _open_tx: Sender<String>) {
     if NOTIFICATIONS_OFF.load(std::sync::atomic::Ordering::Relaxed) { return; }
     let _ = notify_rust::Notification::new().summary(title).body(body).appname("Agents Pixel Dungeon").show();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn by_id(agents: &[Agent]) -> HashMap<String, Agent> { agents.iter().map(|a| (a.id.clone(), a.clone())).collect() }
+
+    #[test]
+    fn the_guilds_room_rings_for_its_orchestrator_only() {
+        // The guild's own room: its state is the members' most pressing, its hero the orchestrator.
+        let hall = |status: &str, hero: &str| { let mut a = Agent::new(crate::guild_view::HALL_ID, "claude", status, "Game", "", "/r"); a.guild_room = true; a.hero_status = Some(hero.into()); a };
+        assert!(alerts_for(&by_id(&[hall("working", "idle")]), &[hall("done", "idle")]).is_empty(), "a member's candidate is ready: no sound");
+        assert!(alerts_for(&by_id(&[hall("working", "idle")]), &[hall("blocked", "idle")]).is_empty(), "a member asks: no sound");
+        let replied = alerts_for(&by_id(&[hall("working", "working")]), &[hall("working", "idle")]);
+        assert_eq!(replied.iter().map(|a| a.kind).collect::<Vec<_>>(), vec![AlertKind::Finished], "the orchestrator answered");
+        // An agent in guild mode rings for its own state, whatever its members do.
+        let lead = |status: &str, member: &str| { let mut a = Agent::new("w1:p1", "claude", status, "Game", "", "/r"); a.guild_room = true; a.crew = vec![crate::herdr::CrewMember { name: "Orin".into(), harness: "kiro".into(), status: member.into(), action: None }]; a };
+        assert!(alerts_for(&by_id(&[lead("working", "working")]), &[lead("working", "blocked")]).is_empty());
+        assert_eq!(alerts_for(&by_id(&[lead("working", "idle")]), &[lead("blocked", "idle")])[0].kind, AlertKind::NeedsHelp);
+        // Ending a turn while it waits on the guild in the background is not finishing.
+        let waiting = |status: &str| { let mut a = lead(status, "working"); a.shells = vec![crate::shells::Shell { pid: 7, command: "'/A P D.app/Contents/MacOS/agents-pixel-dungeon-guild' tool guild_wait '{}'".into(), label: "Wait for the quest".into(), started: 0, task: None, last_line: None, output: None }]; a };
+        assert!(alerts_for(&by_id(&[waiting("working")]), &[waiting("idle")]).is_empty());
+        assert!(alerts_for(&by_id(&[waiting("working")]), &[waiting("done")]).is_empty());
+        assert_eq!(alerts_for(&by_id(&[waiting("working")]), &[waiting("blocked")])[0].kind, AlertKind::NeedsHelp, "asking always rings");
+        assert_eq!(alerts_for(&by_id(&[lead("working", "working")]), &[lead("idle", "working")])[0].kind, AlertKind::Finished, "done for real: nothing left waiting");
+        // Any other agent rings as before.
+        let plain = |status: &str| Agent::new("w2:p1", "codex", status, "Other", "", "/o");
+        assert_eq!(alerts_for(&by_id(&[plain("working")]), &[plain("done")])[0].kind, AlertKind::Finished);
+    }
 }

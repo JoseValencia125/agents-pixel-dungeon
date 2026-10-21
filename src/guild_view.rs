@@ -334,12 +334,19 @@ impl GuildView {
 
     pub fn member_agent_id(member_id: &str) -> String { format!("{ID_PREFIX}{member_id}") }
 
-    /// The guild as one double room: the orchestrator at the desk, the
-    /// members around it at the stations of what they do. The user only
-    /// talks to the orchestrator; the members work below.
+    /// The guild as one room, the orchestrator's: its hero in its own
+    /// state, the members around it at the stations of what they do. The
+    /// user only talks to the orchestrator; the members work around it.
     pub fn agents(&self) -> Vec<Agent> {
         let Some(snap) = &self.snapshot else { return vec![] };
         hall_agent(snap).into_iter().collect()
+    }
+
+    /// Every enabled member as a character, for the room of the agent
+    /// that orchestrates in guild mode.
+    pub fn crew(&self) -> Vec<crate::herdr::CrewMember> {
+        let Some(snap) = &self.snapshot else { return vec![] };
+        snap.members.iter().filter(|m| m.enabled).map(|m| crew_member(snap, m)).collect()
     }
 
     /// The member, its active (or latest) attempt, that attempt's task and quest.
@@ -428,12 +435,20 @@ fn hall_agent(snap: &Snapshot) -> Option<Agent> {
         trf("Habla con {}", &[&lead.name])
     };
     let status = if snap.orchestrator_busy { "working" } else { most_pressing(rooms.iter().map(|(_, a)| a.status.as_str())) };
-    // A training hall: Claude leads from the dais (it orchestrates), and
-    // every member walks to the station of what it does.
-    let mut hall = Agent::new(HALL_ID, "claude", status, &name, &activity, &cwd);
-    let _ = (&mine, &crew);
-    hall.crew = rooms.iter().map(|(m, a)| crate::herdr::CrewMember { name: m.name.clone(), harness: m.harness.as_str().to_string(), status: a.status.clone(), action: a.action.clone() }).collect();
+    // The orchestrator's room in its own state (at the desk while it
+    // answers, else free); the band says the guild's most pressing, and the
+    // others walk to the station of what they do.
+    let mut hall = Agent::new(HALL_ID, lead.harness.as_str(), status, &name, &activity, &cwd);
+    hall.hero_status = Some(if snap.orchestrator_busy { "working".into() } else { "idle".into() });
+    let _ = &mine;
+    hall.crew = crew.iter().map(|(m, _)| crew_member(snap, m)).collect();
+    hall.guild_room = true;
     Some(hall)
+}
+
+fn crew_member(snap: &Snapshot, m: &Member) -> crate::herdr::CrewMember {
+    let a = member_agent(snap, m);
+    crate::herdr::CrewMember { name: m.name.clone(), harness: m.harness.as_str().to_string(), status: a.status, action: a.action }
 }
 
 #[allow(non_snake_case)]

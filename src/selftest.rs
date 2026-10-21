@@ -99,6 +99,16 @@ pub fn run() {
     shells_watch.apply(vec![brewing]);
     shells_watch.apply(vec![ended]);
     assert_eq!(shells_watch.alerts.iter().map(|a| (a.kind, a.shell.clone())).collect::<Vec<_>>(), vec![(AlertKind::NeedsHelp, Some(("Wait a while".to_string(), "Background command \"Wait a while\" failed (exit code 1)".to_string())))], "A failed shell did not ring");
+    // The orchestrator waiting on the guild in the background: its end is logged, never rung.
+    let wait = crate::shells::Shell { pid: 8, command: "'/A/Contents/MacOS/agents-pixel-dungeon-guild' tool guild_wait '{}'".into(), label: "Wait for the quest".into(), started: 0, task: Some("b124".into()), last_line: None, output: None };
+    let mut waiting = agent("o", "claude", "idle", "p", "a", "~");
+    waiting.shells = vec![wait];
+    let mut woke = agent("o", "claude", "idle", "p", "a", "~");
+    woke.shell_results = vec![crate::shells::ShellResult { task: "b124".into(), ok: true, summary: "completed".into() }];
+    let mut guild_watch = Monitor::new("default".into(), StatusFilter::All);
+    guild_watch.apply(vec![waiting]);
+    guild_watch.apply(vec![woke]);
+    assert!(guild_watch.alerts.is_empty(), "The guild's wait rang when it ended");
     watcher.select(Some("demo:1".into()));
     watcher.apply(vec![]);
     assert!(watcher.selected.is_none());
