@@ -79,7 +79,8 @@ fn tools() -> Value {
                 "role": {"type": "string", "description": "A role some member holds; defaults to implementer"},
                 "member": {"type": "string", "description": "A member's name or id, to pin the task to it"},
                 "dependsOn": {"type": "array", "items": {"type": "string"}},
-                "candidates": {"type": "integer", "description": "Run a race of this many members (default 1)"}}}}}}},
+                "candidates": {"type": "integer", "description": "Run a race of this many members (default 1)"},
+                "timeoutMinutes": {"type": "integer", "description": "How long an attempt may work on it (default the guild's, 30)"}}}}}}},
         {"name": "guild_wait", "description": "Block until a task of the quest needs you (candidate ready, permission asked, failed, blocked) or the quest ends, or until the timeout. Returns the quest's status.",
          "inputSchema": {"type": "object", "required": ["questId"], "properties": {"questId": {"type": "string"}, "timeoutSeconds": {"type": "integer", "description": "Default 300, at most 540"}}}},
         {"name": "guild_task", "description": "One task in full: instructions, attempts, summaries, failures, verifier results, candidate size, pending permission and the end of the member's transcript.",
@@ -117,7 +118,7 @@ fn needs(snap: &Snapshot, t: &Task) -> Option<&'static str> {
     }
 }
 
-fn task_line(snap: &Snapshot, t: &Task) -> String {
+pub fn task_line(snap: &Snapshot, t: &Task) -> String {
     let a = latest_attempt(snap, &t.id);
     let who = a.and_then(|a| snap.members.iter().find(|m| m.id == a.member_id)).map(|m| format!(" · {} ({})", m.name, m.harness)).unwrap_or_default();
     let mut s = format!("- {} [{}] {:?}{who}: {}", t.id, t.role, t.state, t.title);
@@ -133,6 +134,10 @@ fn task_line(snap: &Snapshot, t: &Task) -> String {
         if let Some(secs) = waited { s.push_str(&format!(" (waiting {}m{:02}s: {})", secs / 60, secs % 60, p.title.lines().next().unwrap_or("").chars().take(80).collect::<String>())); }
     }
     if let Some(a) = a {
+        // Past two thirds of its time: split the task, or let it be.
+        if a.state.is_active() && a.limit_seconds > 0 && a.worked_seconds * 3 >= a.limit_seconds * 2 {
+            s.push_str(&format!("  ⚠ worked {}m of its {}m", a.worked_seconds / 60, a.limit_seconds / 60));
+        }
         if a.deciding { s.push_str("  (the guild's orchestrator is deciding)"); }
         if let Some(why) = &a.escalation { s.push_str(&format!(" — escalated by the orchestrator: {why}")); }
     }
@@ -191,6 +196,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 let role = t["role"].as_str().map(str::to_string).or_else(|| member.as_ref().and_then(|m| find_member(&snap, m)).and_then(|m| m.roles.first().cloned()));
                 if let Some(role) = role { params["role"] = json!(role); }
                 if let Some(n) = t["candidates"].as_u64().filter(|n| *n > 1) { params["candidates"] = json!(n); }
+                if let Some(m) = t["timeoutMinutes"].as_u64() { params["timeoutMinutes"] = json!(m); }
                 call("task.create", params)?;
             }
             call("quest.start", json!({"questId": quest_id}))?;
