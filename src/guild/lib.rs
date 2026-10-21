@@ -10,6 +10,7 @@ pub mod api;
 pub mod config;
 pub mod design;
 pub mod experiment;
+pub mod feedback;
 pub mod domain;
 pub mod harness;
 pub mod ipc;

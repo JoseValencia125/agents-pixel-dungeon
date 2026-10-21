@@ -1121,6 +1121,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         playtests: demo_playtests(&t),
         observations: demo_observations(&t),
         findings: demo_findings(&t),
+        feedback: vec![],
         designs: vec![guild::design::template("verbrawl", "Verbrawl", "videogame")],
         roles: guild::config::role_catalog(),
         quests: vec![Quest { id: "q1".into(), project_id: "verbrawl".into(), title: tr("Efectos de estado"), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some("490acd6".into()), plan_version: 1, created_at: t.clone(), updated_at: t.clone() }],

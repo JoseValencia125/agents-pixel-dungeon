@@ -544,6 +544,9 @@ pub struct Snapshot {
     pub observations: Vec<crate::experiment::Observation>,
     #[serde(default)]
     pub findings: Vec<crate::aiplay::Finding>,
+    /// What helped and what got in the way, for improving the guild itself.
+    #[serde(default)]
+    pub feedback: Vec<crate::feedback::Feedback>,
     #[serde(default)]
     pub designs: Vec<crate::design::GameDesign>,
     #[serde(default)]

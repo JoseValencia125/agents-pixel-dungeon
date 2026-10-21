@@ -1418,6 +1418,78 @@ impl Service {
         Ok(serde_json::to_value(f).unwrap())
     }
 
+    /// Note what helped or got in the way while orchestrating: one
+    /// observation with its evidence and its cause (see `feedback`).
+    fn feedback_create(&self, params: &Value) -> ApiResult {
+        use crate::feedback::{Feedback, FEEDBACK_CAUSES, FEEDBACK_KINDS};
+        let kind = p_str(params, "kind")?;
+        if !FEEDBACK_KINDS.contains(&kind) { return Err(ApiError::invalid(format!("kind must be one of {}", FEEDBACK_KINDS.join(", ")))); }
+        let cause = p_str(params, "cause")?;
+        if !FEEDBACK_CAUSES.contains(&cause) { return Err(ApiError::invalid(format!("cause must be one of {}", FEEDBACK_CAUSES.join(", ")))); }
+        let title = p_str(params, "title")?.trim();
+        let evidence = p_str(params, "evidence")?.trim();
+        if title.is_empty() || evidence.is_empty() { return Err(ApiError::invalid("title and evidence must not be empty")); }
+        let project_id = p_opt(params, "projectId").filter(|p| !p.is_empty());
+        let refs: Vec<String> = params.get("refs").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        let store = self.store.lock().unwrap();
+        if let Some(pid) = &project_id { store.project(pid)?.ok_or_else(|| ApiError::not_found(format!("project {pid}")))?; }
+        let f = Feedback {
+            id: crate::design::next_id("FB", store.feedback_all()?.into_iter().map(|f| f.id)),
+            project_id, kind: kind.into(), cause: cause.into(), title: title.into(), evidence: evidence.into(),
+            cost: p_opt(params, "cost").filter(|s| !s.trim().is_empty()),
+            proposal: p_opt(params, "proposal").filter(|s| !s.trim().is_empty()),
+            refs, status: "open".into(), notes: vec![], commit: None,
+            author: p_opt(params, "author").unwrap_or_else(|| "orchestrator".into()),
+            created_at: now(), updated_at: None,
+        };
+        self.atomic(&store, || {
+            store.put_feedback(&f)?;
+            self.emit_locked(&store, Event::new("feedback.created", "user").with(json!({"feedbackId": f.id, "projectId": f.project_id, "kind": f.kind, "cause": f.cause})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(f).unwrap())
+    }
+
+    /// The entries, filtered by status, cause, kind or project; as JSON, or as
+    /// Markdown (`format: "markdown"`) for an agent's prompt.
+    fn feedback_list(&self, params: &Value) -> ApiResult {
+        let mut items = self.store.lock().unwrap().feedback_all()?;
+        for (key, field) in [("status", 0), ("cause", 1), ("kind", 2), ("projectId", 3)] {
+            if let Some(want) = p_opt(params, key) {
+                items.retain(|f| match field { 0 => f.status == want, 1 => f.cause == want, 2 => f.kind == want, _ => f.project_id.as_deref() == Some(want.as_str()) });
+            }
+        }
+        if p_opt(params, "format").as_deref() == Some("markdown") {
+            return Ok(json!({"markdown": crate::feedback::to_markdown(&items), "count": items.len()}));
+        }
+        Ok(serde_json::to_value(items).unwrap())
+    }
+
+    /// Move an entry along (open → proposed → applied | discarded), with a
+    /// note, a proposal or the commit that applied it.
+    fn feedback_set(&self, params: &Value) -> ApiResult {
+        use crate::feedback::FEEDBACK_STATUSES;
+        let fid = p_str(params, "feedbackId")?;
+        let store = self.store.lock().unwrap();
+        let mut f = store.feedback(fid)?.ok_or_else(|| ApiError::not_found(format!("feedback {fid}")))?;
+        if let Some(status) = p_opt(params, "status") {
+            if !FEEDBACK_STATUSES.contains(&status.as_str()) { return Err(ApiError::invalid(format!("status must be one of {}", FEEDBACK_STATUSES.join(", ")))); }
+            if status == "applied" && p_opt(params, "commit").is_none() && f.commit.is_none() { return Err(ApiError::invalid("applied needs the commit that applied it")); }
+            if status == "discarded" && p_opt(params, "note").is_none() { return Err(ApiError::invalid("discarded needs a note saying why")); }
+            f.status = status;
+        }
+        if let Some(p) = p_opt(params, "proposal").filter(|s| !s.trim().is_empty()) { f.proposal = Some(p); }
+        if let Some(c) = p_opt(params, "commit").filter(|s| !s.trim().is_empty()) { f.commit = Some(c); }
+        if let Some(n) = p_opt(params, "note").filter(|s| !s.trim().is_empty()) { f.notes.push(n); }
+        f.updated_at = Some(now());
+        self.atomic(&store, || {
+            store.put_feedback(&f)?;
+            self.emit_locked(&store, Event::new("feedback.updated", "user").with(json!({"feedbackId": f.id, "status": f.status})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(f).unwrap())
+    }
+
     /// Note what a human noticed. Inside a session it is tied to the
     /// build, the design version, the experiment's variant, and the run,
     /// round and moment the game's telemetry was at.
@@ -2424,6 +2496,9 @@ impl Service {
             "finding.verify" => self.finding_verify(params),
             "finding.promote" => self.finding_promote(params),
             "finding.set" => self.finding_set(params),
+            "feedback.create" => self.feedback_create(params),
+            "feedback.list" => self.feedback_list(params),
+            "feedback.set" => self.feedback_set(params),
             "question.create" => self.question_create(params),
             "question.resolve" => self.question_resolve(params),
             "decision.create" => self.decision_create(params),
@@ -4420,5 +4495,54 @@ mod tests {
         let second = service.handle("task.create", &json!({"questId": quest_id, "title": "Once", "idempotencyKey": "k1"})).unwrap();
         assert_eq!(first, second);
         assert_eq!(service.snapshot().unwrap().tasks.len(), 1);
+    }
+
+    #[test]
+    fn feedback_is_written_filtered_moved_along_and_survives_the_snapshot() {
+        let (_home, service, _quest) = setup(MockBehaviour::Fail("unused".into()));
+        // A failure of the guild, from a project, pointing at its evidence.
+        let f = service.handle("feedback.create", &json!({"projectId": "p", "kind": "fails", "cause": "guild", "title": "Pending tasks cannot be edited", "evidence": "cancelled and recreated six times", "refs": ["t1", "t2"], "proposal": "guild task set"})).unwrap();
+        assert_eq!(f["id"], "FB-001");
+        assert_eq!(f["status"], "open");
+        assert_eq!(f["author"], "orchestrator");
+        assert_eq!(f["refs"], json!(["t1", "t2"]));
+        // Something that worked, from no project in particular.
+        let g = service.handle("feedback.create", &json!({"kind": "works", "cause": "role", "title": "Tests that fail first", "evidence": "every member showed the test failing on the old code", "author": "user"})).unwrap();
+        assert_eq!(g["id"], "FB-002");
+        assert!(g["project_id"].is_null());
+        // What it refuses: unknown kind, cause or project, empty evidence.
+        assert!(service.handle("feedback.create", &json!({"kind": "meh", "cause": "guild", "title": "x", "evidence": "y"})).is_err());
+        assert!(service.handle("feedback.create", &json!({"kind": "fails", "cause": "luck", "title": "x", "evidence": "y"})).is_err());
+        assert!(service.handle("feedback.create", &json!({"projectId": "nope", "kind": "fails", "cause": "guild", "title": "x", "evidence": "y"})).is_err());
+        assert!(service.handle("feedback.create", &json!({"kind": "fails", "cause": "guild", "title": "x", "evidence": "  "})).is_err());
+        // Filters.
+        let open = service.handle("feedback.list", &json!({"status": "open"})).unwrap();
+        assert_eq!(open.as_array().unwrap().len(), 2);
+        let guild = service.handle("feedback.list", &json!({"cause": "guild"})).unwrap();
+        assert_eq!(guild.as_array().unwrap().len(), 1);
+        assert_eq!(service.handle("feedback.list", &json!({"projectId": "p"})).unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(service.handle("feedback.list", &json!({"kind": "works"})).unwrap()[0]["id"], "FB-002");
+        // Markdown for an agent's prompt.
+        let md = service.handle("feedback.list", &json!({"status": "open", "format": "markdown"})).unwrap();
+        assert_eq!(md["count"], 2);
+        assert!(md["markdown"].as_str().unwrap().contains("## FB-001"));
+        // Along the way: applied needs its commit, discarded needs why.
+        assert!(service.handle("feedback.set", &json!({"feedbackId": "FB-001", "status": "applied"})).is_err());
+        assert!(service.handle("feedback.set", &json!({"feedbackId": "FB-002", "status": "discarded"})).is_err());
+        assert!(service.handle("feedback.set", &json!({"feedbackId": "FB-001", "status": "done"})).is_err());
+        let p = service.handle("feedback.set", &json!({"feedbackId": "FB-001", "status": "proposed", "proposal": "guild task set <id> --instructions"})).unwrap();
+        assert_eq!(p["status"], "proposed");
+        assert_eq!(p["proposal"], "guild task set <id> --instructions");
+        let a = service.handle("feedback.set", &json!({"feedbackId": "FB-001", "status": "applied", "commit": "abc1234", "note": "checked with the mock harness"})).unwrap();
+        assert_eq!(a["status"], "applied");
+        assert_eq!(a["commit"], "abc1234");
+        assert_eq!(a["notes"], json!(["checked with the mock harness"]));
+        assert!(a["updated_at"].is_string());
+        assert!(service.handle("feedback.set", &json!({"feedbackId": "FB-404", "status": "open"})).is_err());
+        // In the snapshot, and the next id keeps counting.
+        let snap = service.snapshot().unwrap();
+        assert_eq!(snap.feedback.len(), 2);
+        assert_eq!(snap.feedback[0].status, "applied");
+        assert_eq!(service.handle("feedback.create", &json!({"kind": "fails", "cause": "harness", "title": "z", "evidence": "w"})).unwrap()["id"], "FB-003");
     }
 }
