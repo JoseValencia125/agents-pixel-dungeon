@@ -23,6 +23,16 @@ pub struct GuildFile {
     pub play: Option<PlaytestSection>,
     #[serde(default)]
     pub ai_play: Option<PlaytestSection>,
+    #[serde(default)]
+    pub permissions: PermissionsSection,
+}
+
+/// What members may run without asking, beyond the guild's routine list
+/// and the project's own commands: the user's choice, never an agent's.
+#[derive(Debug, Default, Deserialize)]
+pub struct PermissionsSection {
+    #[serde(default)]
+    pub programs: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

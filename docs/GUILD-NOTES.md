@@ -82,3 +82,14 @@ One entry per milestone: what changed, what was decided, and how it was checked.
 - Why: orchestrating harness-directive left fourteen lessons (pending tasks cannot be edited, a duplicated permission killed an attempt, every read-only command asks for permission…) that only lived in a chat. An agent improving this repository now starts from `guild feedback export --status open`. The cause is required because several of those lessons were the orchestrator's own spec mistakes, not the members'.
 - The orchestrator's brief tells it to note feedback as it happens and never to change the guild while a quest runs.
 - Checked: `feedback_is_written_filtered_moved_along_and_survives_the_snapshot` and the Markdown test; the CLI against an isolated service (`HPD_GUILD_HOME`, a short `HPD_GUILD_SOCKET`: a long socket path fails with "path must be shorter than SUN_LEN").
+
+## M14 — Permissions that do not wait for the orchestrator (2026-10-21)
+
+From the guild's own feedback on harness-directive (F-HD-03, F-HD-04, F-HD-13): about 150 permissions in one session, most of them `godot --headless …`, reads and loops the policy did not know, each waiting 10–35 s for an orchestrator busy talking to the user; one attempt of ~900 lines died of its time limit while a permission waited.
+
+- **The project's own programs go through.** `policy::project_programs`: the first program of each part of the project's setup, verifiers and play commands (inside `sh -c` too), plus `[permissions] programs` in `.guild/guild.toml` — the user's list, never an agent's; never one of the always refused. `decide(title, programs)`.
+- **Shell syntax** the policy now reads: loops and conditions (`for`, `do`, `done`, `if`, `time`…), assignments, `sh -c '…'` judged by its script, `sh script.sh` in the worktree, `$(…)` and backticks judged by what they run, harmless builtins (`exit`, `sleep`, `set`…).
+- **The temporary folder** counts as inside: writing and deleting there are routine. Each attempt gets `paths::scratch_dir` (`guild-<attempt>` in it), named in its task's rules and deleted when the attempt ends.
+- **Waiting is not working.** `Running::working_time` leaves out the time a permission waited, so the time limit only counts work; `guild_status`/`guild_wait` show how long each member has waited.
+- Checked: policy tests with the commands that actually waited on 2026-10-21 (Orin's `/tmp` script and Godot run, Lira's edit and test run, the project's verifier script), allowed with the project's programs and asked without them, and what must stay refused or asked; a service test where an attempt with a 2 s limit waits 3 s for a permission and lives (it failed before the change), with its wait shown in `guild_status` and its scratch folder created and then removed.
+
