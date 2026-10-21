@@ -4049,14 +4049,16 @@ mod tests {
         service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
         service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"]})).unwrap();
         let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
-        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Core", "maxAttempts": 2})).unwrap();
+        // One attempt, so nothing retries before the test says so.
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Core", "maxAttempts": 1})).unwrap();
         service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
         // The first attempt stops with its work in the worktree: kept, not lost.
-        let snap = wait_for(&service, "first stopped", |s| s.attempts.iter().any(|a| a.partial.is_some()));
+        let snap = wait_for(&service, "first stopped", |s| s.tasks[0].state == TaskState::Failed && s.attempts.iter().any(|a| a.partial.is_some()));
         let first = snap.attempts.iter().find(|a| a.partial.is_some()).unwrap().clone();
         assert_eq!(first.partial.as_ref().unwrap().files_changed, 1);
         // The retry starts from it and is told so.
         mock.set_behaviour(MockBehaviour::Succeed { file: "tests.gd".into(), content: "# tests\n".into() });
+        service.handle("task.retry", &json!({"taskId": "t1"})).unwrap();
         let snap = wait_for(&service, "second submitted", |s| s.attempts.iter().any(|a| a.id != first.id && a.state == AttemptState::Submitted));
         let second = snap.attempts.iter().find(|a| a.id != first.id).unwrap();
         assert!(mock.prompts().iter().any(|p| p.contains("stopped before it finished")), "the retry knows where it starts");
@@ -4459,7 +4461,8 @@ mod tests {
         assert_eq!(task.state, TaskState::Completed);
         let winner = task.winner_attempt_id.clone().expect("a winner");
         assert_eq!(snap.attempts.iter().filter(|a| a.state == AttemptState::Passed).count(), 1);
-        assert!(snap.attempts.iter().filter(|a| a.id != winner).all(|a| a.state == AttemptState::Failed && a.failure.as_deref().unwrap().starts_with("not selected")));
+        let losers: Vec<(AttemptState, Option<String>)> = snap.attempts.iter().filter(|a| a.id != winner).map(|a| (a.state, a.failure.clone())).collect();
+        assert!(losers.iter().all(|(state, failure)| *state == AttemptState::Failed && failure.as_deref().is_some_and(|f| f.starts_with("not selected"))), "every loser rejected as not selected: {losers:?}");
         assert!(snap.attempts.iter().all(|a| a.candidate.is_some()), "every runner left a candidate");
         let kinds: Vec<String> = service.store.lock().unwrap().events_after(0, 2000).unwrap().into_iter().map(|e| e.kind).collect();
         assert_eq!(kinds.iter().filter(|k| *k == "merge.completed").count(), 1, "one merge");

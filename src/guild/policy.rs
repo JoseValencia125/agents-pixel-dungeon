@@ -93,12 +93,19 @@ fn command_words(part: &str) -> Option<Vec<&str>> {
 fn temporary(path: &str) -> bool {
     let tmp = std::env::temp_dir().display().to_string();
     let tmp = tmp.trim_end_matches('/');
-    ["/tmp/", "/private/tmp/", "/var/folders/"].iter().any(|t| path.starts_with(t) || path == t.trim_end_matches('/')) || (!tmp.is_empty() && path.starts_with(tmp))
+    ["/tmp/", "/private/tmp/", "/var/folders/"].iter().any(|t| path.starts_with(t) || path == t.trim_end_matches('/')) || (!tmp.is_empty() && std::path::Path::new(path).starts_with(tmp))
+}
+
+/// A path that does not depend on where the command runs: `/…`, and on
+/// Windows `C:\…`, `C:/…` or `\\server\…`.
+fn absolute(path: &str) -> bool {
+    let b = path.as_bytes();
+    path.starts_with('/') || path.starts_with("\\\\") || (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
 }
 
 /// A path in the guild's visual direction: the game's reference images,
 /// for members to look at (never to delete).
-fn visual(path: &str) -> bool { path.starts_with(&crate::paths::home().join("visual").display().to_string()) }
+fn visual(path: &str) -> bool { std::path::Path::new(path).starts_with(crate::paths::home().join("visual")) }
 
 /// Decide a permission asked for in a worktree. File tools are allowed (the
 /// worktree is the member's own); a command is allowed when each of its parts
@@ -179,10 +186,10 @@ fn command(cmd: &str, programs: &[String]) -> Verdict {
             }
         }
         if REFUSED.contains(&name.as_str()) { return Verdict::Refuse; }
-        if name == "rm" { if words.iter().any(|w| { let w = w.trim_matches(|c| c == '\'' || c == '"'); (w.starts_with('/') && (!temporary(w) || visual(w))) || w.starts_with('~') || w.contains("..") }) { return Verdict::Refuse; } continue; }
+        if name == "rm" { if words.iter().any(|w| { let w = w.trim_matches(|c| c == '\'' || c == '"'); (absolute(w) && (!temporary(w) || visual(w))) || w.starts_with('~') || w.contains("..") }) { return Verdict::Refuse; } continue; }
         if name == "git" && words.get(1).is_some_and(|w| ["push", "commit", "reset", "rebase", "merge", "worktree", "clean", "remote", "config", "tag"].contains(w)) { return Verdict::Refuse; }
         // Out of the worktree: absolute paths (but the temporary folder), the home folder, climbing up.
-        if words.iter().skip(1).any(|w| { let w = w.trim_matches(|c| c == '\'' || c == '"'); w.starts_with('/') && !w.starts_with("/dev/null") && !temporary(w) && !visual(w) || w.starts_with('~') || w.starts_with("../") || w == ".." }) { return Verdict::Ask; }
+        if words.iter().skip(1).any(|w| { let w = w.trim_matches(|c| c == '\'' || c == '"'); absolute(w) && !w.starts_with("/dev/null") && !temporary(w) && !visual(w) || w.starts_with('~') || w.starts_with("../") || w == ".." }) { return Verdict::Ask; }
         if name.is_empty() { continue; }
         if programs.iter().any(|p| *p == name) { continue; }
         let Some((_, subs)) = PROGRAMS.iter().find(|(p, _)| *p == name) else { return Verdict::Ask };
@@ -271,6 +278,14 @@ mod tests {
         for t in ["godot --headless --path /Users/me/other", "sh /usr/local/bin/x.sh", "cat ~/.ssh/id_rsa", "make", "echo $(whoami)"] {
             assert_eq!(decide(t, &programs), Verdict::Ask, "{t}");
         }
+    }
+
+    #[test]
+    fn windows_paths_are_absolute_too() {
+        for p in ["C:\\Users\\me\\game", "c:/Users/me", "\\\\server\\share\\x", "/etc/passwd"] { assert!(absolute(p), "{p}"); }
+        for p in ["src\\main.gd", "tools/run.gd", "./x", ":x", "C:relative"] { assert!(!absolute(p), "{p}"); }
+        assert_eq!(decide("rm -rf C:\\Users\\me\\Documents", &[]), Verdict::Refuse);
+        assert_eq!(decide("cat C:\\Users\\me\\.ssh\\id_rsa", &[]), Verdict::Ask);
     }
 
     #[test]
