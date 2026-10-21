@@ -277,7 +277,8 @@ impl Monitor {
     pub fn set_lead(&mut self, lead: Option<(String, Vec<CrewMember>)>) {
         if self.lead == lead { return; }
         self.lead = lead;
-        let base: Vec<Agent> = self.agents.iter().filter(|a| !a.id.starts_with("guild:")).cloned().collect();
+        // The last lead's decoration goes with it; `apply` puts it on the new one.
+        let base: Vec<Agent> = self.agents.iter().filter(|a| !a.id.starts_with("guild:")).cloned().map(|mut a| { a.crew.clear(); a.guild_room = false; a }).collect();
         self.apply(base);
     }
 
@@ -968,5 +969,36 @@ fn prompt_failure(session: &str, target: &str, text: &str) -> Option<String> {
         Err(e) if matches!(e.code(), Some("agent_prompt_stalled" | "agent_prompt_unverifiable")) => None,
         Err(e) if e.code() == Some("agent_blocked") => Some(tr("El agente está esperando una respuesta; contéstale primero.")),
         Err(_) => Some(tr("Herdr rechazó la acción. Revisa el panel del agente.")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_agent_in_guild_mode_takes_the_crew_and_the_guilds_own_room_goes() {
+        let mut monitor = Monitor::new("default".into(), StatusFilter::All);
+        let hall = Agent::new(crate::guild_view::HALL_ID, "claude", "working", "Game", "", "/r");
+        monitor.set_extra(vec![hall]);
+        monitor.apply(vec![Agent::new("w1:p1", "claude", "idle", "Game", "", "/r"), Agent::new("w2:p1", "codex", "idle", "Other", "", "/o")]);
+        let crew = vec![CrewMember { name: "Orin".into(), harness: "kiro".into(), status: "working".into(), action: Some("read".into()) }];
+        let ids = |m: &Monitor| { let mut v: Vec<String> = m.agents.iter().map(|a| a.id.clone()).collect(); v.sort(); v };
+        assert_eq!(ids(&monitor), vec!["guild:hall", "w1:p1", "w2:p1"]);
+        monitor.set_lead(Some(("w1:p1".into(), crew.clone())));
+        assert_eq!(ids(&monitor), vec!["w1:p1", "w2:p1"], "the lead's room stands for the guild's");
+        let lead = monitor.agents.iter().find(|a| a.id == "w1:p1").unwrap();
+        assert!(lead.guild_room && lead.crew == crew);
+        assert!(monitor.agents.iter().find(|a| a.id == "w2:p1").unwrap().crew.is_empty(), "only the lead");
+        // Herdr's next refresh keeps it so.
+        monitor.apply(vec![Agent::new("w1:p1", "claude", "working", "Game", "", "/r"), Agent::new("w2:p1", "codex", "idle", "Other", "", "/o")]);
+        assert!(monitor.agents.iter().any(|a| a.id == "w1:p1" && a.guild_room) && !monitor.agents.iter().any(|a| a.id == crate::guild_view::HALL_ID));
+        // A lead that is not there (its pane closed) leaves the guild its own room.
+        monitor.set_lead(Some(("w9:p1".into(), crew)));
+        assert!(monitor.agents.iter().any(|a| a.id == crate::guild_view::HALL_ID));
+        // Leaving guild mode: the hall is back, the agent's room is its own.
+        monitor.set_lead(None);
+        assert!(monitor.agents.iter().any(|a| a.id == crate::guild_view::HALL_ID));
+        assert!(!monitor.agents.iter().find(|a| a.id == "w1:p1").unwrap().guild_room);
     }
 }

@@ -2291,9 +2291,11 @@ mod tests {
         let at = |name: &str| room.crew.iter().find(|c| c.name == name).unwrap().target;
         assert_eq!(at("Aria"), station("read").unwrap().0, "reading: at the bookshelf");
         assert_eq!(at("Bo"), station("brew").unwrap().0, "running commands: at the potions");
-        assert_eq!(at("Lira"), pos2(32.0, 40.0), "writing: at the anvil");
-        assert_eq!(at("Orin"), pos2(60.0, 72.0), "asking: before the director's desk");
-        assert!(at("Kael").y > 80.0, "free: on the floor");
+        let spot = |status: &str, action: &str, k: usize| Room::crew_spot(status, action, k).0;
+        assert_eq!(at("Lira"), spot("working", "forge", 0), "writing: at the anvil");
+        assert_eq!(at("Orin"), spot("blocked", "", 0), "asking: before the director's desk");
+        assert_eq!(at("Kael"), spot("idle", "", 0), "free: on the floor");
+        assert!(spot("blocked", "", 0).y > room.style.spot.y, "the asker stands in front of the director, not behind");
         // They walked in by the door; given time, they reach their spots, and the busy ones throw sparks.
         let room = scene.rooms.get_mut("w1:p1").unwrap();
         for _ in 0..200 { room.advance(0.05); }
@@ -2302,7 +2304,7 @@ mod tests {
         // Asking for a permission: up and before the director; answered, back to its station.
         lead.crew[3].status = "blocked".into();
         scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
-        assert_eq!(scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Bo").unwrap().target, pos2(84.0, 72.0));
+        assert_eq!(scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Bo").unwrap().target, Room::crew_spot("blocked", "", 1).0, "the second asker, beside the first");
         lead.crew[3].status = "working".into();
         scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
         assert_eq!(scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Bo").unwrap().target, station("brew").unwrap().0);

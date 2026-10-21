@@ -192,18 +192,26 @@ mod tests {
     }
 
     #[test]
-    fn the_brief_leads_with_opinions_and_names_every_command_and_role() {
+    fn the_brief_names_every_role_real_tools_and_the_guild_as_it_is() {
         let project = Project { id: "ember".into(), name: "Ember".into(), repo_path: "/r/ember".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, created_at: String::new() };
-        let m = Member { id: "ada".into(), name: "Ada".into(), roles: vec!["systems-designer".into()], harness: HarnessId::named("claude"), model_id: Some("opus".into()), mode: None, role_prompt: String::new(), enabled: true };
+        let m = Member { id: "ada".into(), name: "Ada".into(), roles: vec!["systems-designer".into()], harness: HarnessId::named("claude"), model_id: None, mode: None, role_prompt: String::new(), enabled: true };
         let snap = Snapshot { projects: vec![project.clone()], members: vec![m], roles: crate::config::role_catalog(), concurrency: 3, ..Default::default() };
         let b = brief(&snap, Some(&project), "/Applications/A B.app/guild");
-        for needle in ["Have an opinion", "Pitch before you plan", "three pillars", "Hire for the slice", "`guild` below is `'/Applications/A B.app/guild'`",
-            "guild design ember set", "guild tool guild_start_quest", "guild member add", "guild concurrency", "Concurrency: 3 at once", "Ada (`ada`) — systems-designer on claude · opus", "Design: none yet", TASK_RULES] {
-            assert!(b.contains(needle), "the brief lacks {needle:?}:\n{b}");
-        }
+        // Structure, not wording: the binary quoted once, the shared task rules, a line per role.
+        assert!(b.contains("'/Applications/A B.app/guild'"), "a path with spaces is quoted");
+        assert!(b.contains(TASK_RULES));
         for r in crate::config::role_catalog() {
             assert!(b.contains(&format!("- `{}`", r.id)) && !hire_when(&r.id).is_empty(), "role {} has no line", r.id);
         }
+        // Every MCP tool it tells the agent to run exists.
+        let call: crate::mcp::Call = &|_, _| Err("no service".into());
+        let list = crate::mcp::handle(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}), call, &|_| {}).unwrap();
+        let tools: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+        let named: Vec<&str> = b.split("tool ").skip(1).filter_map(|rest| rest.split(|c: char| !(c.is_alphanumeric() || c == '_')).next()).filter(|n| n.starts_with("guild_")).collect();
+        assert!(!named.is_empty());
+        for n in named { assert!(tools.contains(&n), "the brief names {n}, which the MCP server does not have"); }
+        // The guild as it is: its project, members and concurrency.
+        assert!(b.contains("/r/ember") && b.contains("`ada`") && b.contains("3 at once"));
     }
 
     #[test]
