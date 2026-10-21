@@ -90,6 +90,9 @@ pub struct Monitor {
     pub herdr: HerdrState,
     /// Rooms that are not Herdr panes: the guild's members.
     extra: Vec<Agent>,
+    /// The agent in guild mode and the guild's members it shows in its
+    /// room, which then stands for the guild's own.
+    lead: Option<(String, Vec<CrewMember>)>,
     next_herdr_try: Instant,
 
     inbox: Receiver<Inbox>,
@@ -142,6 +145,7 @@ impl Monitor {
             changed: false,
             herdr: HerdrState::Unknown,
             extra: vec![],
+            lead: None,
             next_herdr_try: Instant::now(),
             inbox,
             outbox,
@@ -268,9 +272,24 @@ impl Monitor {
         self.apply(base);
     }
 
+    /// The agent in guild mode, with the members to draw in its room; the
+    /// guild's own room goes while that agent is there.
+    pub fn set_lead(&mut self, lead: Option<(String, Vec<CrewMember>)>) {
+        if self.lead == lead { return; }
+        self.lead = lead;
+        let base: Vec<Agent> = self.agents.iter().filter(|a| !a.id.starts_with("guild:")).cloned().collect();
+        self.apply(base);
+    }
+
     pub fn apply(&mut self, next: Vec<Agent>) {
         let mut next = next;
         next.extend(self.extra.iter().cloned());
+        if let Some((id, crew)) = &self.lead {
+            if next.iter().any(|a| &a.id == id) {
+                next.retain(|a| a.id != crate::guild_view::HALL_ID);
+                for a in next.iter_mut().filter(|a| &a.id == id) { a.crew = crew.clone(); }
+            }
+        }
         // Sort last: background jobs and subagents can change a status after
         // Herdr's, and whoever needs attention must lead the grid.
         let next = sort_agents(next);

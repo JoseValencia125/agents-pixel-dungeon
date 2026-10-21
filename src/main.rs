@@ -865,6 +865,8 @@ impl eframe::App for App {
             self.monitor.set_extra(self.guild.agents());
             needs_fit = true;
         }
+        // An agent in guild mode shows the members in its own room.
+        self.monitor.set_lead(self.prefs.guild_lead.clone().map(|id| (id, self.guild.crew())));
         for (text, tone) in std::mem::take(&mut self.guild.notes) { self.monitor.log(text, tone); }
         if ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::G)) { self.show_studio = !self.show_studio; }
         else if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::G)) { self.show_board = !self.show_board; }
