@@ -101,3 +101,14 @@ From the guild's own feedback on harness-directive (F-HD-03, F-HD-04, F-HD-13): 
 - **Roles** (F-HD-12): to measure against the code before a change, `git stash` or `git show HEAD:<path>` into a scratch file, never files copied back by hand.
 - Checked: a service test creating tasks with a null strategy (it fails with the exact error of F-HD-02 before the change), editing one, refusing a cycle, an unknown dependency and a task already started, and keeping the edited task waiting for its new dependency.
 
+## M16 — The delegate and the guild's orchestrator (2026-10-21)
+
+Decided with the user: the agent you talk to is not the one that answers the members. One agent doing both kept members waiting for minutes while it answered the user (F-HD-03, F-HD-04).
+
+- **The `orchestrator` role**: a member the service wakes per decision (`DecisionKind`: a permission the policy left open, a candidate on a task with user selection, a task whose attempts ran out), never a chat. `Service::ask_orchestrator` marks the attempt `deciding` and queues it; the tick hands each to a thread that runs one turn outside any worktree (`one_turn`, shared with the hall's chat) with `decision_prompt` (`## Decision needed`, the task, acceptance, design, what to decide, `ORCHESTRATOR_BOUNDS`) and reads a `Ruling` (`{decision, reason}`, one of the kind's choices).
+- **Carried out through the user's own commands**: `permission.respond` (`by: orchestrator`), `task.accept` (integrating, the decision recorded `by: orchestrator`) or `task.reject` with its reason, `task.retry` with its instructions appended to the failure the next attempt reads — once per task. A decision someone took meanwhile is left alone. `escalate`, an answer without a ruling or a failed turn leave `escalation` with the reason; `guild_status` shows it as NEEDS YOU, and nothing while it decides.
+- **The delegate**: with an orchestrator hired, the brief says so (only escalations reach it); without one, it says to hire one first. The hall's chat never speaks through it. The Guild tab and the hall leave a deciding member out of what needs the user, and show the escalation's reason.
+- Opt-in: a guild without an orchestrator behaves as before.
+- Also: the guide's "Claude Code as the orchestrator" heading, lost when the guild mode section went in, is back.
+- Checked: service tests where nobody but the orchestrator answers (a non-routine permission allowed, then the candidate accepted and integrated, both prompts carrying the bounds and what to decide), an escalation reaching `guild_status` with its reason and going away when answered, and a failed task retried once with the orchestrator's instructions in the next prompt and then left alone; unit tests of the ruling, the brief with and without an orchestrator, and the chat's speaker; an app test of what needs the user while it decides and once it escalates.
+
