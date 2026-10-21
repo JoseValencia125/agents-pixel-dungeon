@@ -66,6 +66,13 @@ USAGE
   guild observations <project>       what humans noticed, and the questions it raised
   guild observation promote <project> <OBS-id> [--question T] [--system ID]
   guild signals <project> [--experiment E] [--variant V] [--kind human|synthetic]
+  guild feedback new --kind works|fails --cause role|brief|orchestrator|guild|harness|project --title T --evidence T
+                     [--project P] [--cost T] [--proposal T] [--ref ID]... [--author orchestrator|user|<member>]
+                                     what helped or got in the way, for improving the guild itself
+  guild feedback list|export [--status open|proposed|applied|discarded] [--cause C] [--kind K] [--project P] [--json]
+                                     export prints Markdown for an agent's prompt
+  guild feedback set <FB-id> [--status S] [--note T] [--proposal T] [--commit SHA]
+                                     applied needs the commit; discarded needs a note
   guild ai-play <project> <member> [--persona player|novice|optimizer|explorer|exploit_hunter|<free text>]
                 [--seed N] [--turns N] [--experiment E --variant V] [--ref REF] [--detach]
                                      a member plays the build through the game's agent protocol ([ai_play])
@@ -604,6 +611,40 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
         "observe" => {
             let r = call(&ensure_running()?, "observation.create", json!({"projectId": a.pos(0, "project")?, "kind": a.flag("kind").unwrap_or("comment"), "text": a.flag("text"), "playtestId": a.flag("playtest")}))?;
             println!("{} [{}] {}{}", r["id"].as_str().unwrap_or(""), r["kind"].as_str().unwrap_or(""), r["text"].as_str().unwrap_or(""), r["round"].as_u64().map(|n| format!(" · round {n}")).unwrap_or_default());
+            Ok(())
+        }
+        "feedback" => {
+            let socket = ensure_running()?;
+            let filters = |extra: Value| -> Value {
+                let mut v = json!({"status": a.flag("status"), "cause": a.flag("cause"), "kind": a.flag("kind"), "projectId": a.flag("project")});
+                if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) { o.extend(e.clone()); }
+                v
+            };
+            match a.pos(0, "subcommand")? {
+                "new" => {
+                    let r = call(&socket, "feedback.create", json!({"projectId": a.flag("project"), "kind": a.flag("kind"), "cause": a.flag("cause"), "title": a.flag("title"), "evidence": a.flag("evidence"),
+                        "cost": a.flag("cost"), "proposal": a.flag("proposal"), "refs": a.all("ref"), "author": a.flag("author")}))?;
+                    println!("{} · {} · {} · {}", r["id"].as_str().unwrap_or(""), r["kind"].as_str().unwrap_or(""), r["cause"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""));
+                }
+                "list" => {
+                    let r = call(&socket, "feedback.list", filters(json!({})))?;
+                    if a.has("json") { println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default()); return Ok(()); }
+                    for f in r.as_array().into_iter().flatten() {
+                        let sign = if f["kind"] == "works" { "+" } else { "−" };
+                        println!("{} {sign} [{}] {} · {}{}", f["id"].as_str().unwrap_or(""), f["cause"].as_str().unwrap_or(""), f["status"].as_str().unwrap_or(""), f["title"].as_str().unwrap_or(""),
+                            f["project_id"].as_str().map(|p| format!(" · {p}")).unwrap_or_default());
+                    }
+                }
+                "export" => {
+                    let r = call(&socket, "feedback.list", filters(json!({"format": "markdown"})))?;
+                    print!("{}", r["markdown"].as_str().unwrap_or(""));
+                }
+                "set" => {
+                    let r = call(&socket, "feedback.set", json!({"feedbackId": a.pos(1, "feedback id")?, "status": a.flag("status"), "note": a.flag("note"), "proposal": a.flag("proposal"), "commit": a.flag("commit")}))?;
+                    println!("{} · {}{}", r["id"].as_str().unwrap_or(""), r["status"].as_str().unwrap_or(""), r["commit"].as_str().map(|c| format!(" · {c}")).unwrap_or_default());
+                }
+                _ => return Err(USAGE.into()),
+            }
             Ok(())
         }
         "observations" => {
