@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn the_brief_names_every_role_real_tools_and_the_guild_as_it_is() {
-        let project = Project { id: "ember".into(), name: "Ember".into(), repo_path: "/r/ember".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, created_at: String::new() };
+        let project = Project { id: "ember".into(), name: "Ember".into(), repo_path: "/r/ember".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], created_at: String::new() };
         let m = Member { id: "ada".into(), name: "Ada".into(), roles: vec!["systems-designer".into()], harness: HarnessId::named("claude"), model_id: None, mode: None, role_prompt: String::new(), enabled: true };
         let snap = Snapshot { projects: vec![project.clone()], members: vec![m], roles: crate::config::role_catalog(), concurrency: 3, ..Default::default() };
         let b = brief(&snap, Some(&project), "/Applications/A B.app/guild");

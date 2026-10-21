@@ -73,6 +73,10 @@ pub struct Project {
     /// its stdio (see `aiplay`); `{seed}` is filled in.
     #[serde(default)]
     pub ai_play: Option<PlaytestRunner>,
+    /// Programs its members may run without asking, from `.guild/guild.toml`
+    /// (`[permissions] programs`); the ones its own commands run count too.
+    #[serde(default)]
+    pub permitted_programs: Vec<String>,
     pub created_at: String,
 }
 

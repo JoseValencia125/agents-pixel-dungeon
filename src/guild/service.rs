@@ -42,6 +42,18 @@ struct Running {
     /// becomes the candidate.
     interrupt_requested: bool,
     started: Instant,
+    /// Time spent waiting for someone to answer a permission, which the
+    /// attempt's time limit does not count: the member was not working.
+    waited: Duration,
+    waiting_since: Option<Instant>,
+}
+
+impl Running {
+    /// How long the member has worked: its time less what it waited for.
+    fn working_time(&self) -> Duration {
+        let waiting = self.waiting_since.map(|w| w.elapsed()).unwrap_or_default();
+        self.started.elapsed().saturating_sub(self.waited + waiting)
+    }
 }
 
 pub struct Service {
@@ -246,6 +258,7 @@ impl Service {
         };
         self.emit_locked(&store, Event::new(kind, "guild").about_attempt(&a).with(json!({"state": to, "failure": a.failure})));
         if to.is_terminal() {
+            let _ = std::fs::remove_dir_all(crate::paths::scratch_dir(&a.id));
             // One row per finished attempt, so routing can learn from history later.
             let task = store.task(&a.task_id)?;
             let member = store.member(&a.member_id)?;
@@ -1864,7 +1877,7 @@ impl Service {
         // Reserve the slot before the thread starts, so the next tick counts it.
         self.running.lock().unwrap().insert(
             attempt_id.clone(),
-            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now() },
+            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None },
         );
         let service = self.clone();
         std::thread::Builder::new()
@@ -1887,7 +1900,7 @@ impl Service {
     fn spawn_resumer(self: &Arc<Service>, attempt_id: String, native_id: String) {
         self.running.lock().unwrap().insert(
             attempt_id.clone(),
-            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now() },
+            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None },
         );
         let service = self.clone();
         std::thread::Builder::new()
@@ -1960,6 +1973,7 @@ impl Service {
         let adapter = self.adapter(member.harness.clone())?;
         let role_for_prompt = match attempt.kind { AttemptKind::Judge => "judge".to_string(), AttemptKind::Analysis => "design-analyst".to_string(), AttemptKind::Work => task.role.clone() };
         let role_prompt = if member.role_prompt.trim().is_empty() || attempt.kind != AttemptKind::Work { config::default_role_prompt(&role_for_prompt) } else { member.role_prompt.clone() };
+        let _ = std::fs::create_dir_all(crate::paths::scratch_dir(attempt_id));
         let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_requested.clone(), mode: member.mode.clone(), role_prompt: role_prompt.clone() };
         let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
         let design = self.store.lock().unwrap().design(&project.id)?;
@@ -2014,7 +2028,7 @@ impl Service {
         let attempt = &attempt;
         {
             let mut running = self.running.lock().unwrap();
-            let slot = running.entry(attempt_id.to_string()).or_insert(Running { session: session.clone(), harness: member.harness.clone(), cancel_requested: false, interrupt_requested: false, started: Instant::now() });
+            let slot = running.entry(attempt_id.to_string()).or_insert(Running { session: session.clone(), harness: member.harness.clone(), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None });
             slot.session = session.clone();
             slot.harness = member.harness.clone();
         }
@@ -2103,11 +2117,11 @@ impl Service {
                 }
             }
             if last_flush.elapsed() > Duration::from_secs(2) { flush(&mut text, self); last_flush = Instant::now(); }
-            let (cancel, interrupt, started) = {
+            let (cancel, interrupt, worked) = {
                 let running = self.running.lock().unwrap();
-                running.get(attempt_id).map(|r| (r.cancel_requested, r.interrupt_requested, r.started)).unwrap_or((true, false, Instant::now()))
+                running.get(attempt_id).map(|r| (r.cancel_requested, r.interrupt_requested, r.working_time())).unwrap_or((true, false, Duration::ZERO))
             };
-            if !timed_out && started.elapsed() > self.settings.attempt_timeout {
+            if !timed_out && worked > self.settings.attempt_timeout {
                 timed_out = true;
                 self.emit(Event::new("attempt.timeout", "guild").about_attempt(attempt).with(json!({"afterSeconds": self.settings.attempt_timeout.as_secs()})));
             }
@@ -2179,9 +2193,11 @@ impl Service {
                 let request = PermissionRequest { request_id: request_id.clone(), title: title.clone(), detail: detail.clone(), options: options.clone(), asked_at: now() };
                 let _ = self.update_attempt(attempt_id, |a| a.pending_permission = Some(request.clone()));
                 let _ = self.move_attempt(attempt_id, AttemptState::WaitingInput, None);
+                if let Some(r) = self.running.lock().unwrap().get_mut(attempt_id) { r.waiting_since.get_or_insert_with(Instant::now); }
                 self.emit(Event::new("permission.requested", "harness").about_attempt(attempt).with(json!({"requestId": request_id, "title": title, "detail": detail, "options": options})));
                 // Routine work in the worktree is answered at once; only the unusual waits.
-                let verdict = crate::policy::decide(&title);
+                let programs = self.project_of_attempt(attempt).map(|p| crate::policy::project_programs(&p)).unwrap_or_default();
+                let verdict = crate::policy::decide(&title, &programs);
                 if let Some(option) = crate::policy::option_for(&verdict, &title, &options) {
                     let by = if verdict == crate::policy::Verdict::Allow { "policy" } else { "policy-refused" };
                     if let Err(e) = self.permission_respond(&json!({"attemptId": attempt_id, "requestId": request_id, "optionId": option, "by": by})) {
@@ -2597,6 +2613,7 @@ impl Service {
             playtest: file.as_ref().and_then(|f| f.playtest.as_ref()).map(|p| p.to_runner()),
             play: file.as_ref().and_then(|f| f.play.as_ref()).map(|p| p.to_runner()),
             ai_play: file.as_ref().and_then(|f| f.ai_play.as_ref()).map(|p| p.to_runner()),
+            permitted_programs: file.as_ref().map(|f| f.permissions.programs.clone()).unwrap_or_default(),
             created_at: existing.map(|p| p.created_at).unwrap_or_else(now),
         };
         store.put_project(&project)?;
@@ -2867,6 +2884,14 @@ impl Service {
         Ok(json!({"concurrency": n}))
     }
 
+    /// The project an attempt works in: its task's quest's.
+    fn project_of_attempt(&self, attempt: &Attempt) -> Option<Project> {
+        let store = self.store.lock().unwrap();
+        let task = store.task(&attempt.task_id).ok()??;
+        let quest = store.quest(&task.quest_id).ok()??;
+        store.project(&quest.project_id).ok()?
+    }
+
     fn member_add(&self, params: &Value) -> ApiResult {
         let harness = HarnessKind::parse(p_str(params, "harness")?).ok_or_else(|| ApiError::invalid("unknown harness"))?;
         let id = p_str(params, "id")?.to_string();
@@ -3117,8 +3142,9 @@ impl Service {
         let request_id = p_str(params, "requestId")?;
         let option = p_opt(params, "optionId");
         let (session, harness) = {
-            let running = self.running.lock().unwrap();
-            let r = running.get(attempt_id).ok_or_else(|| ApiError::conflict("the attempt is not running"))?;
+            let mut running = self.running.lock().unwrap();
+            let r = running.get_mut(attempt_id).ok_or_else(|| ApiError::conflict("the attempt is not running"))?;
+            if let Some(since) = r.waiting_since.take() { r.waited += since.elapsed(); }
             (r.session.clone(), r.harness.clone())
         };
         let adapter = self.adapter(harness)?;
@@ -3316,8 +3342,8 @@ fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design:
         }
     }
     s.push_str(&format!(
-        "\n## Rules\n- Your working directory is a dedicated git worktree on branch `{}`. Work only inside it.\n- Do not commit, push or switch branches; the guild commits your work when you finish.\n- Do not ask whether to proceed: do the work, then reply with a short summary of what changed, how you verified it, and anything left undone.\n",
-        workspace.branch
+        "\n## Rules\n- Your working directory is a dedicated git worktree on branch `{}`. Work only inside it.\n- Do not commit, push or switch branches; the guild commits your work when you finish.\n- Do not ask whether to proceed: do the work, then reply with a short summary of what changed, how you verified it, and anything left undone.\n- Scratch files (throwaway scripts, logs, data) go in `{}`, never in /tmp: it is yours and the guild deletes it when you finish.\n",
+        workspace.branch, crate::paths::scratch_dir(&workspace.attempt_id).display()
     ));
     if !feedback.is_empty() {
         s.push_str("\n## Earlier attempts were turned down\n");
@@ -3532,6 +3558,39 @@ mod tests {
         service.handle("permission.respond", &json!({"attemptId": a.id, "requestId": perm.request_id, "optionId": "allow"})).unwrap();
         let snap = wait_for(&service, "submitted", |s| s.attempts[0].state == AttemptState::Submitted);
         assert!(snap.attempts[0].pending_permission.is_none());
+    }
+
+    #[test]
+    fn waiting_for_a_permission_does_not_count_against_the_time_limit() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(2), cancel_timeout: Duration::from_millis(500), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        service.register(Arc::new(MockHarness::new(MockBehaviour::AskPermission { file: "x.txt".into(), content: "x".into() })));
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Ask first"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "waiting", |s| s.attempts.first().map(|a| a.state == AttemptState::WaitingInput).unwrap_or(false));
+        // Nobody answers for longer than the attempt may work: it keeps waiting.
+        std::thread::sleep(Duration::from_secs(3));
+        let a = service.snapshot().unwrap().attempts[0].clone();
+        assert_eq!(a.state, AttemptState::WaitingInput, "timed out while waiting for someone");
+        // The orchestrator sees for how long, to answer the oldest first.
+        let call = |m: &str, p: Value| service.handle(m, &p).map_err(|e| e.message);
+        let status = crate::mcp::run_tool("guild_status", &json!({}), &call, &|_| {}).unwrap();
+        assert!(status.contains("NEEDS YOU: permission") && status.contains("(waiting 0m0"), "{status}");
+        let perm = snap.attempts[0].pending_permission.clone().unwrap();
+        // Its own scratch folder, for what it would have left in /tmp; gone when the attempt ends.
+        let scratch = crate::paths::scratch_dir(&a.id);
+        assert!(scratch.is_dir());
+        service.handle("permission.respond", &json!({"attemptId": a.id, "requestId": perm.request_id, "optionId": "allow"})).unwrap();
+        wait_for(&service, "submitted", |s| s.attempts[0].state == AttemptState::Submitted);
+        service.handle("task.accept", &json!({"taskId": "t1"})).unwrap();
+        wait_for(&service, "passed", |s| s.attempts[0].state.is_terminal());
+        assert!(!scratch.exists(), "the scratch folder outlived its attempt");
     }
 
     #[test]

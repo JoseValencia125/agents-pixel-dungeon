@@ -125,6 +125,11 @@ fn task_line(snap: &Snapshot, t: &Task) -> String {
     }
     if let Some(r) = &t.block_reason { s.push_str(&format!(" — {r}")); }
     if let Some(n) = needs(snap, t) { s.push_str(&format!("  ⟵ NEEDS YOU: {n}")); }
+    // How long a member has been kept waiting, so the oldest is answered first.
+    if let Some(p) = a.and_then(|a| a.pending_permission.as_ref()) {
+        let waited = chrono::DateTime::parse_from_rfc3339(&p.asked_at).ok().map(|at| (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds().max(0));
+        if let Some(secs) = waited { s.push_str(&format!(" (waiting {}m{:02}s: {})", secs / 60, secs % 60, p.title.lines().next().unwrap_or("").chars().take(80).collect::<String>())); }
+    }
     s
 }
 

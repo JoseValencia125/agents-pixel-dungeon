@@ -47,3 +47,8 @@ pub fn ensure_home() -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(artifacts_dir())?;
     Ok(h)
 }
+
+/// An attempt's own folder for scratch files (scripts, logs, data), in the
+/// system's temporary folder so the permission policy lets members use it;
+/// the guild deletes it when the attempt ends.
+pub fn scratch_dir(attempt_id: &str) -> PathBuf { std::env::temp_dir().join(format!("guild-{attempt_id}")) }

@@ -16,13 +16,13 @@ Lira, Kai, Teo (Kiro), Vesna (Claude). Orquestador: Claude Code (Opus 5.5).
 - propuesta: estrategia `single` / selección `user` por defecto, como en `guild_start_quest`.
 
 ### F-HD-03 · Un permiso duplicado sin responder mata el intento
-- tipo: − · causa: guild + harness · estado: abierta
+- tipo: − · causa: guild + harness · estado: propuesta (rama fix/guild-permissions: (a) y (b); (c) pendiente)
 - evidencia: intento `01m5fbykcz5yx1exjwvwprpzvz` (core): la misma verificación pidió permiso dos veces; respondí la primera, la segunda quedó en espera 20 min y el intento murió por el límite de 30 min. El trabajo (≈900 líneas) se perdió: el reintento partió de cero.
 - costo: ≈30 min y un intento.
 - propuesta: (a) no contar el tiempo en `waiting_input` contra el límite del intento; (b) avisar en `guild_wait` cuántos minutos lleva esperando un permiso; (c) que un reintento por timeout parta del worktree del intento anterior.
 
 ### F-HD-04 · Cada lectura de solo lectura pide permiso
-- tipo: − · causa: harness (Kiro) · estado: abierta
+- tipo: − · causa: harness (Kiro) · estado: propuesta (rama fix/guild-permissions)
 - evidencia: ≈150 permisos respondidos en la sesión; la mayoría `cat`, `grep`, `sed -n`, `git status`, `godot --headless … tools/test_*.gd`. Cada uno espera 10–35 s al orquestador.
 - costo: horas de espera acumuladas; el orquestador no puede hacer otra cosa.
 - propuesta: una lista de comandos seguros por proyecto en `.guild/guild.toml` (`[permissions] allow = ["godot --headless --path . -s tools/*", "git status", …]`) que la guild responda sola; lo demás sigue llegando al orquestador. Ojo: «always-accept» desde el orquestador fue bloqueado por el clasificador de Claude Code (Create Unsafe Agents); la lista tiene que venir del usuario, no del orquestador.
@@ -72,7 +72,7 @@ Lira, Kai, Teo (Kiro), Vesna (Claude). Orquestador: Claude Code (Opus 5.5).
 - propuesta: en el prompt del rol, para comparar con el código anterior usar `git stash` o `git worktree add` en un directorio temporal, no copiar archivos a mano.
 
 ### F-HD-13 · Archivos temporales fuera del worktree
-- tipo: − · causa: rol + guild · estado: abierta
+- tipo: − · causa: rol + guild · estado: propuesta (rama fix/guild-permissions)
 - evidencia: scripts y CSV en `/tmp` (`/tmp/econfix2`, `/tmp/refuge0` ≈ 500 MB); un `rm -rf` fue rechazado por la política y quedaron sin borrar.
 - propuesta: que la guild dé a cada intento un `$GUILD_TMP` propio y lo borre al cerrar; el prompt del rol lo usa en vez de `/tmp`.
 
