@@ -13,20 +13,12 @@ use egui::{pos2, vec2, Align2, Color32, CornerRadius, FontId, Mesh, Painter, Pos
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const ART: Vec2 = vec2(144.0, 100.0);
-/// The guild hall's art: a room's width, twice its height (less the wall
-/// two rooms would share).
-pub const HALL_ART: Vec2 = vec2(144.0, 192.0);
 pub const FOOTER: f32 = 36.0; // caption band under the room: chat title + folder · branch
 pub const HEADER: f32 = 28.0; // the repo's band over the room: its emblem and name
 pub const ROW_H: f32 = 158.0 + HEADER + FOOTER; // room art 100 px at 1.5 pt/px + 8 pt frame, plus header and footer
 pub const ROW_W: f32 = 220.0; // room art 144 px at 1.5 pt/px + 4 pt frame
 pub const HERO: f32 = 32.0; // 16 px sprite at 2 pt/px
 pub const GAP: f32 = 6.0;
-/// The guild hall's cell: frame, band, its art at 1.5 pt/px, footer.
-pub const HALL_H: f32 = 8.0 + HEADER + HALL_ART.y * 1.5 + FOOTER;
-/// A room's side wall in points (8 art pixels): a double room hides the
-/// two that would stand between its halves.
-pub const SIDE_WALL: f32 = 12.0;
 pub const LINE_H: f32 = 30.0; // full screen's spare room, as a line
 /// Between full screen's rooms: their cells already leave 4 pt above and
 /// below the frame, so this brings two frames 6 pt apart.
@@ -205,11 +197,6 @@ impl RoomSize {
     /// The room art's height in pixels (all are 144 wide).
     pub fn art_h(self) -> f32 {
         match self { RoomSize::Large => ART.y, RoomSize::Medium => 64.0, RoomSize::Small => 40.0 }
-    }
-
-    /// The bottom wall in points, which a hall's upper half drops.
-    pub fn bottom_wall(self) -> f32 {
-        match self { RoomSize::Small => 6.0, _ => 12.0 }
     }
 
     /// A room's whole cell: frame, repo band, art at 1.5 pt/px, footer.
@@ -487,10 +474,6 @@ pub struct Room {
     shuffle_period: f32,
     rng: Rng,
     subagent_harnesses: Vec<String>,
-    /// A double room's other half, with its own heroes and state.
-    annex: Option<Box<Room>>,
-    /// Whether the other half stands beside this one (else under it).
-    pub beside: bool,
     /// The state the band shows when it is not the hero's room.
     band: Option<RoomStyle>,
     /// The guild's members, when this is the orchestrator's room.
@@ -557,8 +540,6 @@ impl Room {
             shuffle_period: 9.0,
             rng: Rng::new(seed),
             subagent_harnesses: vec![],
-            annex: None,
-            beside: false,
             band: None,
             training: false,
             crew: vec![],
@@ -669,11 +650,6 @@ impl Room {
         if self.training {
             self.band = Some(style_for(&agent.status));
             self.set_crew(&agent.crew, animated);
-        }
-        match (&agent.annex, &mut self.annex) {
-            (Some(other), Some(annex)) => annex.update(other, animated),
-            (Some(other), None) => self.annex = Some(Box::new(Room::new(other, self.rng.0.wrapping_add(17)))),
-            (None, _) => self.annex = None,
         }
     }
 
@@ -940,7 +916,6 @@ impl Room {
 
     pub fn advance(&mut self, dt: f32) {
         if dt <= 0.0 { return; }
-        if let Some(annex) = &mut self.annex { annex.size = self.size; annex.advance(dt); }
         for t in &mut self.crew {
             let d = t.target - t.pos;
             let dist = d.length();
@@ -1310,33 +1285,14 @@ impl Room {
         }
     }
 
-    /// Draw the room at `origin` (the cell's top-left corner).
-    /// Where a double room's other half is drawn, from this half's origin:
-    /// beside it, or under it in a column too narrow for two.
-    pub fn annex_offset(&self) -> Vec2 {
-        if self.beside { vec2(ROW_W - 4.0 - 2.0 * SIDE_WALL, 0.0) } else { vec2(0.0, self.size.art_h() * 1.5 - self.size.bottom_wall()) }
-    }
-
-    /// How much of each half's frame the joint hides, (left, right,
-    /// bottom): the walls between them, so the halves read as one hall.
-    fn trims(&self) -> ((f32, f32, f32), (f32, f32, f32)) {
-        if self.beside { ((0.0, SIDE_WALL, 0.0), (SIDE_WALL, 0.0, 0.0)) } else { ((0.0, 0.0, self.size.bottom_wall()), (0.0, 0.0, 0.0)) }
-    }
-
-    /// The whole room: its art, and the band around it (the repo's header,
-    /// the footer). A double room draws both halves' art in one frame.
+    /// The whole room at `origin` (the cell's top-left corner): its art,
+    /// and the band around it (the repo's header, the footer).
     pub fn draw(&self, painter: &Painter, origin: Pos2, assets: &Assets, selected: bool) {
-        let trim = |f: Rect, (l, r, b): (f32, f32, f32)| Rect::from_min_max(pos2(f.min.x + l, f.min.y), pos2(f.max.x - r, f.max.y - b));
-        let (mine, theirs) = if self.annex.is_some() { self.trims() } else { ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)) };
-        let mut art = trim(self.drawn_frame().translate(origin.to_vec2()), mine);
-        let other = origin + self.annex_offset();
-        let annex_art = self.annex.as_ref().map(|a| trim(a.drawn_frame().translate(other.to_vec2()), theirs));
-        if let Some(a) = annex_art { art = art.union(a); }
+        let art = self.drawn_frame().translate(origin.to_vec2());
         let cell = Rect::from_min_max(pos2(art.min.x, art.min.y - HEADER), pos2(art.max.x, art.max.y + FOOTER));
         // Footer band under the room.
         painter.rect_filled(cell, CornerRadius::same(6), Color32::from_rgb(18, 15, 23));
-        self.draw_art(painter, origin, assets, trim(self.drawn_frame().translate(origin.to_vec2()), mine));
-        if let (Some(annex), Some(clip)) = (&self.annex, annex_art) { annex.draw_art(painter, other, assets, clip); }
+        self.draw_art(painter, origin, assets, art);
         self.draw_band(painter, origin, art, selected);
     }
 
@@ -2044,11 +2000,6 @@ impl Scene {
     #[cfg(test)]
     fn content_height(&self, width: f32) -> f32 { self.layout(width).1 }
 
-    /// A double room takes two places.
-    fn is_double(&self, index: usize) -> bool {
-        self.order.get(index).and_then(|id| self.rooms.get(id)).is_some_and(|r| r.annex.is_some())
-    }
-
     /// How tall the rooms are drawn: the menu's size in full screen's
     /// column, large in the widget.
     pub fn size(&self) -> RoomSize {
@@ -2063,8 +2014,8 @@ impl Scene {
         if self.compact {
             let x = ((width - ROW_W) / 2.0).max(GAP);
             let mut y = TOP_PAD;
-            for index in 0..self.order.len() {
-                let h = if self.is_double(index) { HALL_H } else { self.room_size.cell_h() };
+            let h = self.room_size.cell_h();
+            for _ in 0..self.order.len() {
                 slots.push(Rect::from_min_size(pos2(x, y), vec2(ROW_W, h)));
                 y += h + COLUMN_GAP;
             }
@@ -2076,13 +2027,12 @@ impl Scene {
             return (slots, y - COLUMN_GAP + BOTTOM_PAD);
         }
         // Each room goes to the shortest column (the leftmost on a tie): a
-        // grid of rows while every room is as tall, and no hole beside the
-        // guild hall, which is a room's width and twice its height.
+        // grid of rows, every room being as tall.
         let columns = columns_fitting(width);
         let gap = GAP.max((width - columns as f32 * ROW_W) / (columns + 1) as f32);
         let mut tops = vec![TOP_PAD; columns];
-        for index in 0..self.slots() {
-            let h = if self.is_double(index) { HALL_H } else { ROW_H };
+        let h = ROW_H;
+        for _ in 0..self.slots() {
             let column = (0..columns).min_by(|&a, &b| tops[a].total_cmp(&tops[b]).then(a.cmp(&b))).unwrap_or(0);
             slots.push(Rect::from_min_size(pos2(gap + column as f32 * (ROW_W + gap), tops[column]), vec2(ROW_W, h)));
             tops[column] += h + GAP;
@@ -2157,7 +2107,6 @@ impl Scene {
                     }
                     // Only what shows is drawn; the dragged room is drawn last, over the others.
                     room.size = size;
-                    room.beside = slot.width() > ROW_W + 1.0;
                     if ui.is_rect_visible(rect) && !dragged {
                         room.draw(ui.painter(), rect.min, assets, self.selected.as_deref() == Some(id));
                     }
@@ -2333,7 +2282,6 @@ mod tests {
         lead.status = "done".into();
         lead.crew = vec![member("Orin", "blocked", None), member("Aria", "working", Some("read")), member("Kael", "idle", None), member("Bo", "working", Some("brew")), member("Lira", "working", Some("forge"))];
         scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
-        assert!(!scene.is_double(1));
         for columns in [1, 2, 3] {
             let (slots, _) = scene.layout(width_for(columns));
             assert_eq!(slots[1].size(), slots[0].size(), "{columns} columns: a room like the others");
@@ -2343,9 +2291,11 @@ mod tests {
         let at = |name: &str| room.crew.iter().find(|c| c.name == name).unwrap().target;
         assert_eq!(at("Aria"), station("read").unwrap().0, "reading: at the bookshelf");
         assert_eq!(at("Bo"), station("brew").unwrap().0, "running commands: at the potions");
-        assert_eq!(at("Lira"), pos2(32.0, 40.0), "writing: at the anvil");
-        assert_eq!(at("Orin"), pos2(60.0, 72.0), "asking: before the director's desk");
-        assert!(at("Kael").y > 80.0, "free: on the floor");
+        let spot = |status: &str, action: &str, k: usize| Room::crew_spot(status, action, k).0;
+        assert_eq!(at("Lira"), spot("working", "forge", 0), "writing: at the anvil");
+        assert_eq!(at("Orin"), spot("blocked", "", 0), "asking: before the director's desk");
+        assert_eq!(at("Kael"), spot("idle", "", 0), "free: on the floor");
+        assert!(spot("blocked", "", 0).y > room.style.spot.y, "the asker stands in front of the director, not behind");
         // They walked in by the door; given time, they reach their spots, and the busy ones throw sparks.
         let room = scene.rooms.get_mut("w1:p1").unwrap();
         for _ in 0..200 { room.advance(0.05); }
@@ -2354,7 +2304,7 @@ mod tests {
         // Asking for a permission: up and before the director; answered, back to its station.
         lead.crew[3].status = "blocked".into();
         scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
-        assert_eq!(scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Bo").unwrap().target, pos2(84.0, 72.0));
+        assert_eq!(scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Bo").unwrap().target, Room::crew_spot("blocked", "", 1).0, "the second asker, beside the first");
         lead.crew[3].status = "working".into();
         scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
         assert_eq!(scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Bo").unwrap().target, station("brew").unwrap().0);

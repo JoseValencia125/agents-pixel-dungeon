@@ -423,7 +423,6 @@ fn hall_agent(snap: &Snapshot) -> Option<Agent> {
     let project = snap.projects.first();
     let cwd = project.map(|p| p.repo_path.clone()).unwrap_or_default();
     let name = project.map(|p| p.name.clone()).unwrap_or_else(|| "Guild".into());
-    let mine = rooms.iter().find(|(m, _)| m.id == lead.id).map(|(_, a)| a.clone());
     let working = rooms.iter().filter(|(_, a)| a.status == "working").count();
     let activity = if snap.orchestrator_busy {
         trf("{} piensa…", &[&lead.name])
@@ -440,7 +439,6 @@ fn hall_agent(snap: &Snapshot) -> Option<Agent> {
     // others walk to the station of what they do.
     let mut hall = Agent::new(HALL_ID, lead.harness.as_str(), status, &name, &activity, &cwd);
     hall.hero_status = Some(if snap.orchestrator_busy { "working".into() } else { "idle".into() });
-    let _ = &mine;
     hall.crew = crew.iter().map(|(m, _)| crew_member(snap, m)).collect();
     hall.guild_room = true;
     Some(hall)
