@@ -835,7 +835,7 @@ impl eframe::App for App {
         if let Ok(v) = std::env::var("HPD_TEST_GUILD") {
             if now > 1.3 && now < 1.5 {
                 if let Some(id) = self.monitor.selected.clone() { self.prefs.guild_lead = Some(id); }
-                self.guild_tab = match v.as_str() { "guild" => guild_mode::Tab::Guild, "quests" => guild_mode::Tab::Quests, "design" => guild_mode::Tab::Design, _ => guild_mode::Tab::Chat };
+                self.guild_tab = match v.as_str() { "guild" => guild_mode::Tab::Guild, "quests" => guild_mode::Tab::Quests, "design" => guild_mode::Tab::Design, "visual" => guild_mode::Tab::Visual, _ => guild_mode::Tab::Chat };
             }
         }
         // HPD_TEST_SHOT=<file.png>: save what the window shows after 3 s (or

@@ -2630,6 +2630,11 @@ impl Service {
                 Ok(serde_json::to_value(self.store.lock().unwrap().design(id)?).unwrap())
             }
             "design.set" => self.design_set(params),
+            "visual.add" => self.visual_add(params),
+            "visual.palette" => self.visual_palette(params),
+            "visual.update" => self.visual_update(params),
+            "visual.remove" => self.visual_remove(params),
+            "visual.notes" => self.visual_notes(params),
             "play.start" => self.play_start(params),
             "play.finish" => self.play_finish(p_str(params, "playtestId")?),
             "observation.create" => self.observation_create(params),
@@ -3026,6 +3031,103 @@ impl Service {
         let task = store.task(&attempt.task_id).ok()??;
         let quest = store.quest(&task.quest_id).ok()??;
         store.project(&quest.project_id).ok()?
+    }
+
+    // ----- the visual direction
+
+    /// Change a project's design in place (one made if it has none yet),
+    /// as a new version, and say so.
+    fn change_design(&self, project_id: &str, f: impl FnOnce(&mut crate::design::GameDesign) -> Res<Value>) -> ApiResult {
+        let store = self.store.lock().unwrap();
+        let project = store.project(project_id)?.ok_or_else(|| ApiError::not_found(format!("project {project_id}")))?;
+        let mut d = store.design(project_id)?.unwrap_or_else(|| crate::design::LivingGameDesign { project_id: project_id.into(), title: project.name.clone(), ..Default::default() });
+        let out = f(&mut d)?;
+        d.version += 1;
+        d.updated_at = now();
+        store.put_design(&d)?;
+        self.emit_locked(&store, Event::new("design.updated", "user").with(json!({"projectId": project_id, "version": d.version, "visual": true})));
+        Ok(out)
+    }
+
+    /// Add a file to the visual direction: an image (the guild keeps a copy
+    /// and its dominant colours) or a palette file (`.gpl`, `.hex`, `.pal`).
+    fn visual_add(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?.to_string();
+        let path = PathBuf::from(p_str(params, "path")?);
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| name.clone());
+        if crate::design::PALETTE_EXTENSIONS.contains(&ext.as_str()) {
+            let text = std::fs::read_to_string(&path).map_err(|e| ApiError::invalid(format!("{}: {e}", path.display())))?;
+            let colors = crate::design::parse_palette(&text);
+            if colors.is_empty() { return Err(ApiError::invalid(format!("{name} has no colours"))); }
+            return self.visual_palette(&json!({"projectId": project_id, "name": p_opt(params, "caption").unwrap_or(stem), "colors": colors}));
+        }
+        if !crate::design::IMAGE_EXTENSIONS.contains(&ext.as_str()) { return Err(ApiError::invalid(format!("{name}: not an image nor a palette"))); }
+        let bytes = std::fs::read(&path).map_err(|e| ApiError::invalid(format!("{}: {e}", path.display())))?;
+        let decoded = image::load_from_memory(&bytes).map_err(|e| ApiError::invalid(format!("{name}: {e}")))?.to_rgba8();
+        let colors = crate::design::dominant_colors(&decoded, 6);
+        let caption = p_opt(params, "caption").unwrap_or_default();
+        let kind = p_opt(params, "kind").unwrap_or_else(|| "reference".into());
+        self.change_design(&project_id, |d| {
+            let id = crate::design::next_id("IMG", d.visual.images.iter().map(|i| i.id.clone()));
+            let dir = crate::paths::visual_dir(&d.project_id);
+            std::fs::create_dir_all(&dir).map_err(|e| ApiError::internal(e.to_string()))?;
+            let file = dir.join(format!("{}.{ext}", id.to_lowercase()));
+            std::fs::write(&file, &bytes).map_err(|e| ApiError::internal(e.to_string()))?;
+            let image = crate::design::VisualImage { id, file: file.display().to_string(), name, caption, kind, colors };
+            d.visual.images.push(image.clone());
+            Ok(serde_json::to_value(image).unwrap())
+        })
+    }
+
+    /// Add a palette, or replace the one with that id.
+    fn visual_palette(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?.to_string();
+        let name = p_str(params, "name")?.to_string();
+        let colors: Vec<String> = p_list(params, "colors").iter().flat_map(|c| crate::design::parse_palette(c)).collect();
+        if colors.is_empty() { return Err(ApiError::invalid("a palette needs colours (#rrggbb)")); }
+        let id = p_opt(params, "id");
+        self.change_design(&project_id, |d| {
+            let palette = crate::design::Palette { id: id.clone().unwrap_or_else(|| crate::design::next_id("PAL", d.visual.palettes.iter().map(|p| p.id.clone()))), name, colors };
+            match d.visual.palettes.iter_mut().find(|p| p.id == palette.id) { Some(p) => *p = palette.clone(), None => d.visual.palettes.push(palette.clone()) }
+            Ok(serde_json::to_value(palette).unwrap())
+        })
+    }
+
+    /// An image's caption or kind.
+    fn visual_update(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?.to_string();
+        let id = p_str(params, "id")?.to_string();
+        self.change_design(&project_id, |d| {
+            let image = d.visual.images.iter_mut().find(|i| i.id == id).ok_or_else(|| ApiError::not_found(format!("image {id}")))?;
+            if let Some(c) = params.get("caption").and_then(Value::as_str) { image.caption = c.trim().into(); }
+            if let Some(k) = p_opt(params, "kind") { image.kind = k; }
+            Ok(serde_json::to_value(image.clone()).unwrap())
+        })
+    }
+
+    /// Take an image (and the guild's copy of it) or a palette out.
+    fn visual_remove(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?.to_string();
+        let id = p_str(params, "id")?.to_string();
+        self.change_design(&project_id, |d| {
+            if let Some(i) = d.visual.images.iter().position(|i| i.id == id) {
+                let image = d.visual.images.remove(i);
+                if Path::new(&image.file).starts_with(crate::paths::visual_dir(&d.project_id)) { let _ = std::fs::remove_file(&image.file); }
+            } else if let Some(i) = d.visual.palettes.iter().position(|p| p.id == id) {
+                d.visual.palettes.remove(i);
+            } else {
+                return Err(ApiError::not_found(format!("{id} in the visual direction")));
+            }
+            Ok(json!({"removed": id}))
+        })
+    }
+
+    fn visual_notes(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?.to_string();
+        let notes = params.get("notes").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        self.change_design(&project_id, |d| { d.visual.notes = notes; Ok(json!({"notes": d.visual.notes})) })
     }
 
     fn member_add(&self, params: &Value) -> ApiResult {
@@ -3816,6 +3918,43 @@ mod tests {
         let t2 = snap.tasks.iter().find(|t| t.id == "t2").unwrap();
         assert_eq!(t2.state, TaskState::Pending, "waits for its new dependency");
         assert!(snap.attempts.iter().all(|a| a.task_id == "t1"), "t2 does not start before t1");
+    }
+
+    #[test]
+    fn the_visual_direction_keeps_images_palettes_and_notes_and_reaches_the_members() {
+        let (home, service, _quest) = setup(MockBehaviour::Hang);
+        let dir = home.0.join("drop");
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("hero sheet.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([239, 125, 87, 255])).save(&png).unwrap();
+        let gpl = dir.join("Sweetie.gpl");
+        std::fs::write(&gpl, "GIMP Palette\nName: Sweetie\n 26 28 44 black\n177 62 83 red\n").unwrap();
+        let img = service.handle("visual.add", &json!({"projectId": "p", "path": png.display().to_string(), "caption": "The hero"})).unwrap();
+        assert_eq!((img["id"].as_str(), img["colors"].clone()), (Some("IMG-001"), json!(["#ef7d57"])));
+        let copy = std::path::PathBuf::from(img["file"].as_str().unwrap());
+        assert!(copy.starts_with(crate::paths::visual_dir("p")) && copy.exists(), "the guild keeps its own copy");
+        let pal = service.handle("visual.add", &json!({"projectId": "p", "path": gpl.display().to_string()})).unwrap();
+        assert_eq!((pal["name"].as_str(), pal["colors"].clone()), (Some("Sweetie"), json!(["#1a1c2c", "#b13e53"])));
+        assert!(service.handle("visual.add", &json!({"projectId": "p", "path": dir.join("notes.doc").display().to_string()})).is_err());
+        service.handle("visual.update", &json!({"projectId": "p", "id": "IMG-001", "caption": "The hero, idle"})).unwrap();
+        service.handle("visual.notes", &json!({"projectId": "p", "notes": "One-pixel dark outline."})).unwrap();
+        let d = service.store.lock().unwrap().design("p").unwrap().unwrap();
+        assert_eq!((d.visual.images[0].caption.as_str(), d.visual.notes.as_str()), ("The hero, idle", "One-pixel dark outline."));
+        // The members are told, in every task's design context.
+        let context = crate::design::prompt_context(&d);
+        assert!(context.contains("Palette Sweetie: #1a1c2c #b13e53") && context.contains("The hero, idle") && context.contains("One-pixel dark outline."), "{context}");
+        // The repository copy carries the images and a page for them.
+        let out = home.0.join("export");
+        let written = crate::design::export(&out, &crate::design::DesignBundle { design: d.clone(), ..Default::default() }).unwrap();
+        assert!(out.join("game-design/visual/visual.md").exists() && out.join("game-design/visual/img-001.png").exists(), "{written:?}");
+        // Taking an image out deletes the guild's copy; a palette goes by its id.
+        service.handle("visual.remove", &json!({"projectId": "p", "id": "IMG-001"})).unwrap();
+        service.handle("visual.remove", &json!({"projectId": "p", "id": "PAL-001"})).unwrap();
+        let d = service.store.lock().unwrap().design("p").unwrap().unwrap();
+        assert!(d.visual.images.is_empty() && d.visual.palettes.is_empty() && !copy.exists());
+        // The members may look at the guild's images without asking.
+        assert_eq!(crate::policy::decide(&format!("cat {}", copy.display()), &[]), crate::policy::Verdict::Allow);
+        assert_eq!(crate::policy::decide(&format!("rm {}", copy.display()), &[]), crate::policy::Verdict::Refuse, "never delete them");
     }
 
     #[test]

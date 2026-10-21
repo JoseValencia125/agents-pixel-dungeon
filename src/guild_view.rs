@@ -91,6 +91,10 @@ pub struct GuildView {
     pub draft: String,
     /// The demo's conversation, as the user types to it.
     demo_chat: Vec<guild::orchestrator::ChatLine>,
+    /// The visual direction tab: its thumbnails and what is being typed.
+    pub visual: crate::guild_mode::VisualState,
+    /// What the demo was asked to do, since it has no service (for tests).
+    pub demo_commands: Vec<(String, Value)>,
 }
 
 impl GuildView {
@@ -119,6 +123,8 @@ impl GuildView {
             hall_member: None,
             draft: String::new(),
             demo_chat: vec![],
+            visual: Default::default(),
+            demo_commands: vec![],
         }
     }
 
@@ -204,6 +210,7 @@ impl GuildView {
 
     pub fn command(&mut self, method: &str, params: Value) {
         if self.demo {
+            self.demo_commands.push((method.to_string(), params.clone()));
             if method == "orchestrator.say" {
                 let line = |author: &str, text: String| guild::orchestrator::ChatLine { author: author.into(), text, quest_id: None, at: now() };
                 self.demo_chat.push(line("user", params["text"].as_str().unwrap_or("").into()));
@@ -1129,7 +1136,24 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         observations: demo_observations(&t),
         findings: demo_findings(&t),
         feedback: vec![],
-        designs: vec![guild::design::template("verbrawl", "Verbrawl", "videogame")],
+        designs: vec![{
+            let mut d = guild::design::template("verbrawl", "Verbrawl", "videogame");
+            // The app's own rooms stand in for the game's references.
+            let room = |id: &str, name: &str, caption: &str, kind: &str| {
+                let file = format!("{}/Resources/Sprites/rooms/{name}", env!("CARGO_MANIFEST_DIR"));
+                let colors = std::fs::read(&file).ok().and_then(|b| image::load_from_memory(&b).ok()).map(|i| guild::design::dominant_colors(&i.to_rgba8(), 6)).unwrap_or_default();
+                guild::design::VisualImage { id: id.into(), file, name: name.into(), caption: tr(caption), kind: kind.into(), colors }
+            };
+            d.visual = guild::design::VisualDirection {
+                notes: tr("Pixel art a 1.5 pt por píxel, contorno oscuro de un píxel, luz cálida desde arriba a la izquierda; el jugador en tonos de papel, los enemigos en fríos."),
+                palettes: vec![
+                    guild::design::Palette { id: "PAL-001".into(), name: "Papel y tinta".into(), colors: ["#1a1c2c", "#5d275d", "#b13e53", "#ef7d57", "#ffcd75", "#f4f4f4"].map(String::from).to_vec() },
+                    guild::design::Palette { id: "PAL-002".into(), name: tr("Enemigos fríos"), colors: ["#29366f", "#3b5dc9", "#41a6f6", "#73eff7", "#94b0c2"].map(String::from).to_vec() },
+                ],
+                images: vec![room("IMG-001", "room_working.png", "El taller: así se ve trabajar", "reference"), room("IMG-002", "room_done.png", "La cámara del tesoro", "concept")],
+            };
+            d
+        }],
         roles: guild::config::role_catalog(),
         quests: vec![Quest { id: "q1".into(), project_id: "verbrawl".into(), title: tr("Efectos de estado"), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some("490acd6".into()), plan_version: 1, created_at: t.clone(), updated_at: t.clone() }],
         tasks: vec![
