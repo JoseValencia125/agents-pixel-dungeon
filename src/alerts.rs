@@ -43,6 +43,9 @@ pub fn alerts_for(previous: &HashMap<String, Agent>, next: &[Agent]) -> Vec<Agen
             if agent.id.starts_with(crate::guild_view::ID_PREFIX) { continue; }
             alerts.push(AgentAlert { kind: AlertKind::NeedsHelp, agent: agent.clone(), shell: None });
         } else if now == "done" || (was == "working" && now == "idle") {
+            // An orchestrator ending a turn while it still waits on the guild
+            // in the background is not done: it is between two looks.
+            if agent.guild_room && agent.shells.iter().any(|s| s.is_guild()) { continue; }
             alerts.push(AgentAlert { kind: AlertKind::Finished, agent: agent.clone(), shell: None });
         }
     }
@@ -255,6 +258,12 @@ mod tests {
         let lead = |status: &str, member: &str| { let mut a = Agent::new("w1:p1", "claude", status, "Game", "", "/r"); a.guild_room = true; a.crew = vec![crate::herdr::CrewMember { name: "Orin".into(), harness: "kiro".into(), status: member.into(), action: None }]; a };
         assert!(alerts_for(&by_id(&[lead("working", "working")]), &[lead("working", "blocked")]).is_empty());
         assert_eq!(alerts_for(&by_id(&[lead("working", "idle")]), &[lead("blocked", "idle")])[0].kind, AlertKind::NeedsHelp);
+        // Ending a turn while it waits on the guild in the background is not finishing.
+        let waiting = |status: &str| { let mut a = lead(status, "working"); a.shells = vec![crate::shells::Shell { pid: 7, command: "'/A P D.app/Contents/MacOS/agents-pixel-dungeon-guild' tool guild_wait '{}'".into(), label: "Wait for the quest".into(), started: 0, task: None, last_line: None, output: None }]; a };
+        assert!(alerts_for(&by_id(&[waiting("working")]), &[waiting("idle")]).is_empty());
+        assert!(alerts_for(&by_id(&[waiting("working")]), &[waiting("done")]).is_empty());
+        assert_eq!(alerts_for(&by_id(&[waiting("working")]), &[waiting("blocked")])[0].kind, AlertKind::NeedsHelp, "asking always rings");
+        assert_eq!(alerts_for(&by_id(&[lead("working", "working")]), &[lead("idle", "working")])[0].kind, AlertKind::Finished, "done for real: nothing left waiting");
         // Any other agent rings as before.
         let plain = |status: &str| Agent::new("w2:p1", "codex", status, "Other", "", "/o");
         assert_eq!(alerts_for(&by_id(&[plain("working")]), &[plain("done")])[0].kind, AlertKind::Finished);

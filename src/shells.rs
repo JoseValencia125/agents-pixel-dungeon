@@ -31,6 +31,12 @@ pub struct Shell {
     pub output: Option<String>,
 }
 
+impl Shell {
+    /// A call to the guild's command line (an orchestrator waiting on its
+    /// quest): the guild's own work, which never rings.
+    pub fn is_guild(&self) -> bool { self.command.contains("agents-pixel-dungeon-guild") }
+}
+
 /// How a background shell ended, from Claude Code's notification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShellResult {

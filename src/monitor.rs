@@ -351,6 +351,8 @@ impl Monitor {
             let ok = result.as_ref().map(|r| r.ok).unwrap_or(true);
             let how = result.map(|r| r.summary).unwrap_or_else(|| tr("Terminó."));
             self.log(trf("{} · shell {}: {}", &[&agent.project, &shell.label, &how]), if ok { "done" } else { "blocked" });
+            // The orchestrator waiting on the guild: its next turn says what it found.
+            if shell.is_guild() { continue; }
             let kind = if ok { crate::alerts::AlertKind::Finished } else { crate::alerts::AlertKind::NeedsHelp };
             self.alerts.push(AgentAlert { kind, agent, shell: Some((shell.label.clone(), how)) });
         }
