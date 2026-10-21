@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 
 pub const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// How the orchestrator's instructions follow a failure, for the retry to read.
+const ORCHESTRATOR_RETRY: &str = " — the orchestrator, retrying: ";
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub concurrency: usize,
@@ -70,6 +73,9 @@ pub struct Service {
     ai_stops: Mutex<Vec<String>>,
     /// The member answering the user right now, if one is.
     orchestrating: Mutex<Option<String>>,
+    /// Decisions waiting for the guild's orchestrator (attempt, what about);
+    /// the scheduler's tick hands each to a thread of its own.
+    decisions: Mutex<Vec<(String, crate::orchestrator::DecisionKind)>>,
     /// How many attempts run at once: the settings' until the orchestrator
     /// or the user changes it (`guild.concurrency`), then kept in the store.
     concurrency: AtomicUsize,
@@ -117,6 +123,7 @@ impl Service {
             playtesting: Mutex::new(vec![]),
             ai_stops: Mutex::new(vec![]),
             orchestrating: Mutex::new(None),
+            decisions: Mutex::new(vec![]),
             running: Mutex::new(HashMap::new()),
             settings,
             stop: Arc::new(AtomicBool::new(false)),
@@ -356,6 +363,11 @@ impl Service {
     }
 
     fn tick_inner(self: &Arc<Service>) -> Res<()> {
+        // Decisions the orchestrator was asked for since the last tick.
+        for (attempt_id, kind) in std::mem::take(&mut *self.decisions.lock().unwrap()) {
+            let service = self.clone();
+            std::thread::Builder::new().name("decision".into()).spawn(move || service.decide(&attempt_id, kind)).ok();
+        }
         // Readiness and quest completion.
         let (quests, tasks) = {
             let store = self.store.lock().unwrap();
@@ -437,7 +449,7 @@ impl Service {
                     failure: None,
                     verifier_results: vec![],
                     turns: 0,
-                    resumed: 0,
+                    resumed: 0, deciding: false, escalation: None,
                     started_at: Some(now()),
                     finished_at: None,
                     created_at: now(),
@@ -847,7 +859,7 @@ impl Service {
             let attempt = Attempt {
                 id: new_id(), task_id: task.id.clone(), task_version: task.version, quest_id: quest.id.clone(), project_id: quest.project_id.clone(), member_id: member.id.clone(),
                 harness: member.harness.clone(), model_requested: member.model_id.clone(), model_effective: None, kind: AttemptKind::Analysis, state: AttemptState::Queued, workspace_id: None, session_id: None,
-                generation: 0, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 0, resumed: 0,
+                generation: 0, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 0, resumed: 0, deciding: false, escalation: None,
                 started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
             };
             self.atomic(&store, || {
@@ -1734,7 +1746,7 @@ impl Service {
             let attempt = Attempt {
                 id: new_id(), task_id: task.id.clone(), task_version: task.version, quest_id: quest.id.clone(), project_id: quest.project_id.clone(), member_id: member.id.clone(),
                 harness: member.harness.clone(), model_requested: member.model_id.clone(), model_effective: None, kind: AttemptKind::Judge, state: AttemptState::Queued, workspace_id: None, session_id: None,
-                generation: 0, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 0, resumed: 0,
+                generation: 0, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 0, resumed: 0, deciding: false, escalation: None,
                 started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
             };
             self.atomic(&store, || {
@@ -2203,6 +2215,9 @@ impl Service {
                     if let Err(e) = self.permission_respond(&json!({"attemptId": attempt_id, "requestId": request_id, "optionId": option, "by": by})) {
                         self.log(&format!("attempt {attempt_id}: the policy could not answer {title:?}: {}", e.message));
                     }
+                } else {
+                    // What the policy leaves open goes to the guild's orchestrator, if it has one.
+                    self.ask_orchestrator(attempt_id, crate::orchestrator::DecisionKind::Permission);
                 }
             }
             HarnessEvent::Raw(_) => {}
@@ -2282,6 +2297,8 @@ impl Service {
                         })?;
                     }
                 }
+                // A choice left to the user goes to the orchestrator first, if the guild has one.
+                if candidate.is_some() && task.candidates <= 1 && task.strategy.selection() == Selection::User { self.ask_orchestrator(attempt_id, crate::orchestrator::DecisionKind::Candidate); }
                 self.settle_task(&task.id)
             }
             TurnOutcome::Failed { reason } => {
@@ -2310,6 +2327,117 @@ impl Service {
             self.move_task(&task.id, TaskState::Ready, None)?;
         } else {
             self.move_task(&task.id, TaskState::Failed, Some(format!("{} attempts failed; last: {reason}", fresh.attempts_made)))?;
+            let attempts: Vec<Attempt> = self.store.lock().unwrap().attempts_of_task(&task.id)?.into_iter().filter(|a| a.kind == AttemptKind::Work).collect();
+            // The orchestrator retries a task once; failing again, it is the delegate's.
+            let retried = attempts.iter().any(|a| a.failure.as_deref().is_some_and(|f| f.contains(ORCHESTRATOR_RETRY)));
+            if let (false, Some(a)) = (retried, attempts.iter().max_by(|a, b| a.created_at.cmp(&b.created_at))) { self.ask_orchestrator(&a.id, crate::orchestrator::DecisionKind::Failure); }
+        }
+        Ok(())
+    }
+
+    // ----- the guild's orchestrator
+
+    /// An artifact's text (a diff, a log).
+    fn artifact_text(&self, id: &str) -> Res<String> {
+        let a = self.store.lock().unwrap().artifact(id)?.ok_or_else(|| ApiError::not_found(format!("artifact {id}")))?;
+        std::fs::read_to_string(&a.path).map_err(|e| ApiError::internal(e.to_string()))
+    }
+
+    /// The member that decides for the guild while the delegate talks to
+    /// the user: enabled, with the orchestrator role, on an available harness.
+    fn steward(&self) -> Option<Member> {
+        let available = self.available_harnesses();
+        self.store.lock().unwrap().members().ok()?.into_iter().find(|m| m.enabled && m.roles.iter().any(|r| r == "orchestrator") && available.contains(&m.harness))
+    }
+
+    /// Leave a decision to the guild's orchestrator, when it has one: the
+    /// attempt is marked as being decided, so nobody else needs to.
+    fn ask_orchestrator(&self, attempt_id: &str, kind: crate::orchestrator::DecisionKind) -> bool {
+        if self.steward().is_none() { return false; }
+        {
+            let mut queue = self.decisions.lock().unwrap();
+            if queue.iter().any(|(id, k)| id == attempt_id && *k == kind) { return true; }
+            queue.push((attempt_id.to_string(), kind));
+        }
+        if let Ok(a) = self.update_attempt(attempt_id, |a| { a.deciding = true; a.escalation = None; }) {
+            self.emit(Event::new("orchestrator.deciding", "guild").about_attempt(&a).with(json!({"kind": kind})));
+        }
+        true
+    }
+
+    /// Wake the orchestrator for one decision and carry it out; whatever it
+    /// cannot settle (or says to escalate) is left to the delegate or the user.
+    fn decide(self: &Arc<Service>, attempt_id: &str, kind: crate::orchestrator::DecisionKind) {
+        let done = self.rule(attempt_id, kind).and_then(|r| { self.apply_ruling(attempt_id, kind, &r)?; Ok(r) });
+        let escalation = match &done {
+            Ok(r) if r.decision == "escalate" => Some(r.reason.clone()),
+            Ok(_) => None,
+            Err(e) => Some(format!("the orchestrator could not decide: {}", e.message)),
+        };
+        let Ok(a) = self.update_attempt(attempt_id, |a| { a.deciding = false; a.escalation = escalation.clone(); }) else { return };
+        let (decision, reason) = done.map(|r| (r.decision, r.reason)).unwrap_or_else(|e| ("escalate".into(), e.message));
+        let kind_name = if escalation.is_some() { "orchestrator.escalated" } else { "orchestrator.decided" };
+        self.emit(Event::new(kind_name, "orchestrator").about_attempt(&a).with(json!({"kind": kind, "decision": decision, "reason": reason})));
+    }
+
+    /// The orchestrator's ruling on one decision, from a turn of its own.
+    fn rule(&self, attempt_id: &str, kind: crate::orchestrator::DecisionKind) -> Res<crate::orchestrator::Ruling> {
+        use crate::orchestrator::DecisionKind::*;
+        let steward = self.steward().ok_or_else(|| ApiError::conflict("the guild has no orchestrator"))?;
+        let (attempt, task, project, design, worker, workspace) = {
+            let store = self.store.lock().unwrap();
+            let attempt = store.attempt(attempt_id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
+            let task = store.task(&attempt.task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
+            let project = store.project(&attempt.project_id)?.ok_or_else(|| ApiError::not_found("project"))?;
+            let design = store.design(&project.id)?;
+            let worker = store.member(&attempt.member_id)?.map(|m| m.name).unwrap_or_else(|| attempt.member_id.clone());
+            let workspace = attempt.workspace_id.as_deref().and_then(|w| store.workspace(w).ok().flatten());
+            (attempt, task, project, design, worker, workspace)
+        };
+        let context = match kind {
+            Permission => {
+                let p = attempt.pending_permission.clone().ok_or_else(|| ApiError::conflict("the permission was answered already"))?;
+                let options: Vec<String> = p.options.iter().map(|o| format!("{} ({})", o.name, o.kind)).collect();
+                format!("{worker} asks for a permission while working in its worktree {}:\n\n```\n{}\n```\n{}\n\nIts harness offers: {}.", workspace.map(|w| w.path).unwrap_or_default(), p.title.trim(), p.detail.trim(), options.join(", "))
+            }
+            Candidate => {
+                let mut diff = attempt.candidate.as_ref().and_then(|c| c.diff_artifact_id.clone()).and_then(|id| self.artifact_text(&id).ok()).unwrap_or_default();
+                if crate::domain::cut(&mut diff, 40_000) { diff.push_str("\n… (cut)"); }
+                let verifiers: Vec<String> = attempt.verifier_results.iter().map(|v| format!("- {} {}{}", v.id, v.status, v.tail.lines().last().map(|l| format!(": {l}")).unwrap_or_default())).collect();
+                format!("{worker} left this candidate. Its summary: {}\n\nVerifiers:\n{}\n\nDiff:\n```diff\n{diff}\n```", attempt.summary.trim(), if verifiers.is_empty() { "- none".into() } else { verifiers.join("\n") })
+            }
+            Failure => format!("The task ran out of attempts ({} of {}). The last one, by {worker}, failed: {}\n\nIts last words: {}", task.attempts_made, task.max_attempts, attempt.failure.clone().unwrap_or_default(), attempt.summary.trim()),
+        };
+        let prompt = crate::orchestrator::decision_prompt(kind, &task, &worker, &context, design.as_ref());
+        let text = self.one_turn(&project, &steward, &config::default_role_prompt("orchestrator"), &prompt, Duration::from_secs(300))?;
+        crate::orchestrator::parse_ruling(&text, kind).ok_or_else(|| ApiError::new("orchestrator", "its answer had no decision"))
+    }
+
+    /// Carry out a ruling through the same commands the user has; a
+    /// decision someone took meanwhile is left alone.
+    fn apply_ruling(self: &Arc<Service>, attempt_id: &str, kind: crate::orchestrator::DecisionKind, r: &crate::orchestrator::Ruling) -> Res<()> {
+        use crate::orchestrator::DecisionKind::*;
+        let a = self.store.lock().unwrap().attempt(attempt_id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
+        match (kind, r.decision.as_str()) {
+            (_, "escalate") => {}
+            (Permission, decision) => {
+                let Some(p) = a.pending_permission.clone() else { return Ok(()) };
+                let verdict = if decision == "allow" { crate::policy::Verdict::Allow } else { crate::policy::Verdict::Refuse };
+                let option = crate::policy::option_for(&verdict, &p.title, &p.options).ok_or_else(|| ApiError::invalid("the harness offers no such option"))?;
+                self.permission_respond(&json!({"attemptId": a.id, "requestId": p.request_id, "optionId": option, "by": "orchestrator"}))?;
+            }
+            (Candidate, decision) => {
+                if a.state != AttemptState::Submitted { return Ok(()); }
+                if decision == "accept" { self.task_accept(&json!({"taskId": a.task_id, "attemptId": a.id, "integrate": true, "by": "orchestrator"}))?; }
+                else { self.task_reject(&json!({"taskId": a.task_id, "attemptId": a.id, "reason": format!("the orchestrator: {}", r.reason)}))?; }
+            }
+            (Failure, _) => {
+                let task = self.store.lock().unwrap().task(&a.task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
+                if task.state != TaskState::Failed { return Ok(()); }
+                // The next attempt reads the last failures: the orchestrator's instructions go with this one.
+                self.update_attempt(&a.id, |x| x.failure = Some(format!("{}{ORCHESTRATOR_RETRY}{}", x.failure.clone().unwrap_or_default(), r.reason)))?;
+                self.task_retry(&json!({"taskId": a.task_id}))?;
+            }
         }
         Ok(())
     }
@@ -2730,21 +2858,15 @@ impl Service {
         Ok(json!({"orchestrator": who}))
     }
 
-    /// One turn of the orchestrator, outside any worktree: it reads the
-    /// repository but works in a scratch folder of its own.
-    fn orchestrate(self: &Arc<Service>, project: &Project, member: &Member, history: &[crate::orchestrator::ChatLine], message: &str) -> Res<(String, Option<String>)> {
-        let (members, design) = {
-            let store = self.store.lock().unwrap();
-            (store.members()?, store.design(&project.id)?)
-        };
-        let snap = self.snapshot()?;
-        let prompt = crate::orchestrator::compose(project, &members, &snap, design.as_ref(), history, message);
+    /// One turn of a member outside any worktree, in a scratch folder of the
+    /// project's (it may read the repository): its whole answer.
+    fn one_turn(&self, project: &Project, member: &Member, role_prompt: &str, prompt: &str, limit: Duration) -> Res<String> {
         let cwd = crate::paths::home().join("orchestrator").join(&project.id);
         std::fs::create_dir_all(&cwd).map_err(|e| ApiError::internal(e.to_string()))?;
         let adapter = self.adapter(member.harness.clone())?;
-        let options = SessionOptions { cwd, model_id: member.model_id.clone(), mode: member.mode.clone(), role_prompt: crate::orchestrator::ROLE_PROMPT.into() };
+        let options = SessionOptions { cwd, model_id: member.model_id.clone(), mode: member.mode.clone(), role_prompt: role_prompt.into() };
         let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
-        let handle = adapter.prompt(&session, &new_id(), &prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
+        let handle = adapter.prompt(&session, &new_id(), prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
         let started = Instant::now();
         let mut text = String::new();
         let outcome = loop {
@@ -2752,7 +2874,7 @@ impl Service {
             match handle.result.recv_timeout(Duration::from_millis(200)) {
                 Ok(outcome) => break outcome,
                 Err(RecvTimeoutError::Disconnected) => break TurnOutcome::Failed { reason: "the harness ended without a result".into() },
-                Err(RecvTimeoutError::Timeout) if started.elapsed() > self.settings.attempt_timeout => {
+                Err(RecvTimeoutError::Timeout) if started.elapsed() > limit => {
                     let _ = adapter.interrupt(&session);
                     break TurnOutcome::Failed { reason: "timed out".into() };
                 }
@@ -2762,6 +2884,19 @@ impl Service {
         while let Ok(ev) = handle.events.try_recv() { if let HarnessEvent::Text(t) = ev { text.push_str(&t); } }
         let _ = adapter.stop(&session);
         if let TurnOutcome::Failed { reason } = outcome { return Err(ApiError::new("harness", reason)); }
+        Ok(text)
+    }
+
+    /// One turn of the orchestrator, outside any worktree: it reads the
+    /// repository but works in a scratch folder of its own.
+    fn orchestrate(self: &Arc<Service>, project: &Project, member: &Member, history: &[crate::orchestrator::ChatLine], message: &str) -> Res<(String, Option<String>)> {
+        let (members, design) = {
+            let store = self.store.lock().unwrap();
+            (store.members()?, store.design(&project.id)?)
+        };
+        let snap = self.snapshot()?;
+        let prompt = crate::orchestrator::compose(project, &members, &snap, design.as_ref(), history, message);
+        let text = self.one_turn(project, member, crate::orchestrator::ROLE_PROMPT, &prompt, self.settings.attempt_timeout)?;
         let (reply, plan) = crate::orchestrator::parse(&text);
         let Some(plan) = plan else { return Ok((reply, None)) };
         let quest = self.quest_create(&json!({"projectId": project.id, "title": plan.title, "description": plan.description}))?;
@@ -3179,11 +3314,12 @@ impl Service {
         self.atomic(&store, || {
             let mut a = store.attempt(attempt_id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
             a.pending_permission = None;
+            a.escalation = None;
             a.updated_at = now();
             store.put_attempt(&a)?;
             let _ = self.move_attempt_locked(&store, attempt_id, AttemptState::Running, None);
             let by = p_opt(params, "by").unwrap_or_else(|| "user".into());
-            self.emit_locked(&store, Event::new("permission.resolved", if by.starts_with("policy") { "policy" } else { "user" }).about_attempt(&a).with(json!({"requestId": request_id, "optionId": option, "by": by})));
+            self.emit_locked(&store, Event::new("permission.resolved", if by.starts_with("policy") { "policy" } else if by == "orchestrator" { "orchestrator" } else { "user" }).about_attempt(&a).with(json!({"requestId": request_id, "optionId": option, "by": by})));
             Ok(())
         })?;
         Ok(json!({"responded": request_id}))
@@ -3210,7 +3346,7 @@ impl Service {
             let earlier = store.decisions_of_task(task_id)?;
             let override_ = earlier.iter().any(|d| d.winner_attempt_id.as_deref() != Some(attempt.as_str()));
             if let Some(w) = submitted.iter().find(|a| a.id == attempt) {
-                let d = RaceDecision { id: new_id(), task_id: task_id.into(), quest_id: task.quest_id.clone(), project_id: w.project_id.clone(), by: "user".into(), judge_attempt_id: None,
+                let d = RaceDecision { id: new_id(), task_id: task_id.into(), quest_id: task.quest_id.clone(), project_id: w.project_id.clone(), by: p_opt(params, "by").unwrap_or_else(|| "user".into()), judge_attempt_id: None,
                     candidates: submitted.iter().map(|a| decision_candidate(a, &label_for(&refs, a))).collect(), scores: json!({}), findings: json!({}), tradeoffs: String::new(),
                     winner_attempt_id: Some(w.id.clone()), confidence: None, reason: p_opt(params, "reason").unwrap_or_else(|| "chosen by the user".into()), human_override: override_, created_at: now() };
                 drop(store);
@@ -3584,6 +3720,79 @@ mod tests {
         service.handle("task.retry", &json!({"taskId": "t1"})).unwrap();
         let snap = wait_for(&service, "third attempt", |s| s.attempts.len() == 3);
         assert_eq!(snap.tasks[0].max_attempts, 3);
+    }
+
+    /// A guild with a worker that asks for a non-routine permission and an
+    /// orchestrator member ruling through `decide`.
+    fn with_orchestrator(decide: impl Fn(&str) -> String + Send + Sync + 'static) -> (TempHome, Arc<Service>, String, Arc<MockHarness>) {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), cancel_timeout: Duration::from_millis(500), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        let mock = Arc::new(MockHarness::new(MockBehaviour::AskPermission { file: "x.txt".into(), content: "x".into() }));
+        mock.set_decider(decide);
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        service.handle("member.add", &json!({"id": "orin", "harness": "mock", "roles": ["orchestrator"]})).unwrap();
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Write x", "acceptance": ["x.txt exists"]})).unwrap();
+        (home, service, quest_id, mock)
+    }
+
+    #[test]
+    fn the_guilds_orchestrator_answers_the_members_while_nobody_else_does() {
+        let (_home, service, quest_id, mock) = with_orchestrator(|prompt| {
+            let decision = if prompt.contains("Decision needed: permission") { "allow" } else { "accept" };
+            format!("```json\n{{\"decision\": \"{decision}\", \"reason\": \"inside its worktree, what the task asks\"}}\n```")
+        });
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        // Nobody answers the permission nor accepts the candidate: the orchestrator does both.
+        let snap = wait_for(&service, "integrated", |s| s.tasks.iter().find(|t| t.id == "t1").is_some_and(|t| t.state == TaskState::Completed));
+        assert!(snap.attempts.iter().all(|a| !a.deciding && a.escalation.is_none()));
+        assert!(snap.decisions.iter().any(|d| d.by == "orchestrator"), "the acceptance says who took it");
+        let prompts = mock.prompts();
+        let permission = prompts.iter().find(|p| p.contains("Decision needed: permission")).expect("woken for the permission");
+        assert!(permission.contains("mock-install x.txt") && permission.contains(crate::orchestrator::ORCHESTRATOR_BOUNDS) && permission.contains("x.txt exists"));
+        let candidate = prompts.iter().find(|p| p.contains("Decision needed: candidate")).expect("woken for the candidate");
+        assert!(candidate.contains("Diff:") && candidate.contains("x.txt"));
+        let events = service.handle("events.after", &json!({"after": 0, "limit": 10_000})).unwrap();
+        let kinds: Vec<&str> = events.as_array().unwrap().iter().filter_map(|e| e["type"].as_str()).collect();
+        assert_eq!(kinds.iter().filter(|k| **k == "orchestrator.decided").count(), 2);
+    }
+
+    #[test]
+    fn what_the_orchestrator_escalates_reaches_the_delegate_with_its_reason() {
+        let (_home, service, quest_id, _mock) = with_orchestrator(|_| "```json\n{\"decision\": \"escalate\", \"reason\": \"it installs software\"}\n```".into());
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "escalated", |s| s.attempts.first().is_some_and(|a| a.escalation.is_some()));
+        let a = &snap.attempts[0];
+        assert_eq!((a.state, a.deciding, a.escalation.as_deref()), (AttemptState::WaitingInput, false, Some("it installs software")));
+        let call = |m: &str, p: Value| service.handle(m, &p).map_err(|e| e.message);
+        let status = crate::mcp::run_tool("guild_status", &json!({}), &call, &|_| {}).unwrap();
+        assert!(status.contains("NEEDS YOU: permission") && status.contains("escalated by the orchestrator: it installs software"), "{status}");
+        // The delegate answers; the escalation is settled.
+        let perm = a.pending_permission.clone().unwrap();
+        service.handle("permission.respond", &json!({"attemptId": a.id, "requestId": perm.request_id, "optionId": "allow"})).unwrap();
+        let snap = wait_for(&service, "submitted", |s| s.attempts[0].state == AttemptState::Submitted);
+        assert!(snap.attempts[0].escalation.is_none() || snap.attempts[0].deciding, "the permission's escalation went with it");
+    }
+
+    #[test]
+    fn the_orchestrator_retries_a_failed_task_once_with_instructions_then_leaves_it() {
+        let (_home, service, quest_id, mock) = with_orchestrator(|_| "```json\n{\"decision\": \"retry\", \"reason\": \"read the error first, then change only parser.gd\"}\n```".into());
+        mock.set_behaviour(MockBehaviour::Fail("parse error in parser.gd".into()));
+        let mut t = service.store.lock().unwrap().task("t1").unwrap().unwrap();
+        t.max_attempts = 1;
+        service.store.lock().unwrap().put_task(&t).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        // Fails, the orchestrator retries once with its instructions, it fails again: the delegate's.
+        let snap = wait_for(&service, "failed twice", |s| s.attempts.len() == 2 && s.tasks[0].state == TaskState::Failed && s.attempts.iter().all(|a| !a.deciding));
+        assert!(mock.prompts().iter().any(|p| p.contains("read the error first, then change only parser.gd") && !p.contains("## Decision needed")), "the retry carries the instructions");
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(service.snapshot().unwrap().attempts.len(), 2, "no third attempt: one retry by the orchestrator");
+        let _ = snap;
     }
 
     #[test]
@@ -4055,7 +4264,7 @@ mod tests {
             harness: HarnessId::named("mock"), model_requested: Some("mock-fast".into()), model_effective: Some("mock-fast".into()), kind: AttemptKind::Work, state, workspace_id: Some(ws.id.clone()),
             session_id, generation, candidate, summary: String::new(), action: None, pending_permission: None, failure: None,
             verifier_results: if verified { vec![VerifierResult { id: "v".into(), required: true, status: "passed".into(), exit_code: Some(0), duration_ms: 1, log_artifact_id: None, tail: String::new(), evidence: vec![] }] } else { vec![] },
-            turns: 1, resumed: 0, started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
+            turns: 1, resumed: 0, deciding: false, escalation: None, started_at: Some(now()), finished_at: None, created_at: now(), updated_at: now(),
         };
         store.put_attempt(&attempt).unwrap();
         let mut t = task;

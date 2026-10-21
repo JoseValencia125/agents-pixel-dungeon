@@ -43,7 +43,8 @@ pub struct Plan {
 /// The member who orchestrates: the enabled planner, else the first
 /// enabled member, on a harness that is available.
 pub fn pick(members: &[Member], available: &[HarnessKind]) -> Option<Member> {
-    let usable = |m: &&Member| m.enabled && available.contains(&m.harness);
+    // The guild's orchestrator decides for the members; it never talks to the user.
+    let usable = |m: &&Member| m.enabled && available.contains(&m.harness) && !m.roles.iter().all(|r| r == "orchestrator");
     members.iter().filter(usable).find(|m| m.roles.iter().any(|r| r == "planner")).or_else(|| members.iter().find(usable)).cloned()
 }
 
@@ -104,11 +105,71 @@ pub fn role_for(planned: &str, members: &[Member]) -> String {
     members.iter().find(|m| m.enabled).and_then(|m| m.roles.first().cloned()).unwrap_or_else(|| "implementer".into())
 }
 
+/// What the guild wakes its orchestrator for: a member waiting on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionKind {
+    /// A permission the policy left to someone.
+    Permission,
+    /// A candidate that went through its verifiers, waiting for a choice.
+    Candidate,
+    /// A task whose attempts ran out.
+    Failure,
+}
+
+impl DecisionKind {
+    pub fn as_str(self) -> &'static str { match self { DecisionKind::Permission => "permission", DecisionKind::Candidate => "candidate", DecisionKind::Failure => "failure" } }
+    /// The answers it may give; `escalate` leaves it to the delegate or the user.
+    pub fn choices(self) -> &'static [&'static str] {
+        match self { DecisionKind::Permission => &["allow", "refuse", "escalate"], DecisionKind::Candidate => &["accept", "reject", "escalate"], DecisionKind::Failure => &["retry", "escalate"] }
+    }
+}
+
+/// The orchestrator's answer: one of its kind's choices and why.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Ruling {
+    pub decision: String,
+    pub reason: String,
+}
+
+/// What the guild's orchestrator may decide alone; anything else goes up.
+pub const ORCHESTRATOR_BOUNDS: &str = "Decide alone only what keeps a member's work inside its worktree and the system's temporary folder and is plainly what its task asks for. Escalate, never allow, what reaches outside: the network, credentials, the user's files, git history (push, commit, reset), installing software, deleting work. Accept a candidate only when every required verifier passed and the diff shows each acceptance criterion met; reject with a reason the member can act on (what is missing, where); escalate when the criteria are ambiguous or the change departs from the design. Retry a failed task only with instructions that change what the member does; escalate when the task itself looks wrong. When unsure, escalate: a wrong yes costs more than a short wait.";
+
+/// The prompt that wakes the orchestrator for one decision. `context` is
+/// what the decision is about: the permission asked, the candidate's diff
+/// and verifiers, the failure and the member's last words.
+pub fn decision_prompt(kind: DecisionKind, task: &Task, member: &str, context: &str, design: Option<&crate::design::GameDesign>) -> String {
+    let mut s = format!("## Decision needed: {}\n\n{ORCHESTRATOR_BOUNDS}\n\n", kind.as_str());
+    s.push_str(&format!("## The task\n\n**{}** (role {}, member {member})\n\n", task.title, task.role));
+    let mut instructions = task.instructions.trim().to_string();
+    if crate::domain::cut(&mut instructions, 6000) { instructions.push_str("\n… (cut)"); }
+    s.push_str(&instructions);
+    if !task.acceptance.is_empty() {
+        s.push_str("\n\nAcceptance:\n");
+        for ac in &task.acceptance { s.push_str(&format!("- {}: {}\n", ac.id, ac.text)); }
+    }
+    if let Some(d) = design { s.push_str(&crate::design::prompt_context(d)); }
+    s.push_str(&format!("\n## What to decide\n\n{}\n\n", context.trim()));
+    s.push_str(&format!("Answer with one fenced ```json block and nothing after it: {{\"decision\": \"{}\", \"reason\": \"one or two sentences\"}}.\n", kind.choices().join("\" | \"")));
+    s
+}
+
+/// The ruling in the orchestrator's answer, if it gave one of its choices.
+pub fn parse_ruling(text: &str, kind: DecisionKind) -> Option<Ruling> {
+    let start = text.rfind("```json")?;
+    let body = &text[start + 7..];
+    let end = body.find("```")?;
+    let ruling: Ruling = serde_json::from_str(body[..end].trim()).ok()?;
+    kind.choices().contains(&ruling.decision.as_str()).then_some(ruling)
+}
+
 /// When to hire each role of the catalogue, for an orchestrator sizing
 /// its studio.
 fn hire_when(role: &str) -> &'static str {
     match role {
         "planner" => "you are the planner; hire another only to plan a second project",
+        "orchestrator" => "first, as soon as there are members: answers their permissions, candidates and failures within its bounds while you talk to the user, and leaves you only what it escalates; a fast model is enough",
         "implementer" => "any code that is not game rules: tooling, build, scaffolding, UI plumbing",
         "systems-designer" => "from the first day of a game: turns the concept into loops, systems, numbers with safe ranges and questions",
         "gameplay-engineer" => "the core of a game's build: rules exactly as designed, data apart from logic, tests that saw the bug fail; two when parts are independent",
@@ -138,12 +199,16 @@ pub fn brief(snap: &Snapshot, project: Option<&Project>, bin: &str) -> String {
     let mut s = String::new();
     s.push_str("# You are the guild's orchestrator\n\n");
     s.push_str("The user switched this session to guild mode. You keep talking with the user here, in their language, as before; you now also run a guild of agents (its members: Claude, Codex, Kiro… each in its own git worktree) that do the building. The user's dungeon shows your room with tabs — Guild (members and what each does), Quests (the work and what waits for a decision), Design (the game design document) — and every tab reads the guild's state. Change them with the commands below; never write the guild's files by hand. Members never hear from the user: everything they know is in the task you write. Use your own subagents for reading and research if your harness has them; the members are for work that lands in the repository.\n\n");
+    match snap.members.iter().find(|m| m.enabled && m.roles.iter().any(|r| r == "orchestrator")) {
+        Some(o) => s.push_str(&format!("## You are the delegate, not the orchestrator\n\n{} (`{}`), the guild's orchestrator, answers the members' permissions, candidates and failures within its bounds, so nobody waits while you talk with the user. You see only what it escalates: the NEEDS YOU lines of `guild tool guild_status`, each with its reason. Settle those before and after each answer to the user.\n\n", o.name, o.id)),
+        None => s.push_str(&format!("## Hire an orchestrator first\n\nWhile you talk with the user nobody answers the members, and they wait. Before the first quest hire the guild's orchestrator: `{g} member add orchestrator --harness claude --model haiku --role orchestrator` (any harness; a fast model is enough). It decides what it can within its bounds and leaves you the rest. Until it is there, look at `{g} tool guild_status` before and after each answer and settle what waits.\n\n")),
+    }
     s.push_str("## Have an opinion\n\nYou are the studio's lead, not a form. Recommend one option and say why in a line; give the alternative only when the trade-off is real. When a request contradicts the design's pillars, say so and propose what would serve them. Ask only the questions whose answer changes the plan, and put your default next to each one, so silence means yes.\n\n");
     s.push_str(&format!("## Members wait while you talk\n\nWhile you answer the user nobody answers the members. Before each answer, and again when you finish it, run `{g} tool guild_status` and settle what waits: permissions first, the oldest first (each line says how long it has waited), then candidates to decide.\n\n"));
     s.push_str("## When the user wants to make a game\n\n");
     s.push_str("1. **Pitch before you plan.** In your first answer propose: a working title, the game in one sentence, three pillars in priority order (each with the yes/no test a choice must pass), the core loop in three to five steps, the first playable slice (one loop, one screen, a few minutes of play, no menus), the stack (what the repository already uses; for an empty one, TypeScript + Vite + Canvas for a 2D web game, or the engine the user names) and the studio you would hire. At most two questions, typically the feeling they want and the platform, each with your default.\n");
     s.push_str(&format!("2. **Write it down at once.** No design yet: `{g} design {pid} template`. Then put the pitch in it: `{g} design {pid} get > /tmp/design.json`, edit, `{g} design {pid} set /tmp/design.json` (title, concept, pillars, anti-pillars, experience, the core loop, each system at maturity `concept` with what is known and unknown). Every unknown becomes `question new`; never invent a number silently — a number needs a safe range or it is a question.\n"));
-    s.push_str("3. **Hire for the slice, not for the dream.** Start with a systems designer, one or two gameplay engineers and a reviewer; an art director when the slice shows anything; the exploit hunter and AI players once there is something to play. Add members when tasks are truly independent, remove them when work is a chain: parallel parts that share seams are where guild work goes wrong. Raise concurrency to the number of members that should work at once.\n");
+    s.push_str("3. **Hire for the slice, not for the dream.** Start with the orchestrator, a systems designer, one or two gameplay engineers and a reviewer; an art director when the slice shows anything; the exploit hunter and AI players once there is something to play. Add members when tasks are truly independent, remove them when work is a chain: parallel parts that share seams are where guild work goes wrong. Raise concurrency to the number of members that should work at once.\n");
     s.push_str("4. **The first quest is the slice.** Scaffold, the core loop playable, tests as the verifier, and `[play]` (and `[ai_play]` when it can speak the agent protocol) in `.guild/guild.toml`, so the user can press Play. Decisions you take go to `decision new`; systems move up in maturity as they are built.\n");
     s.push_str("5. **Then loop.** Wait, read each candidate's diff against its acceptance and the design, accept or reject with a reason the member can act on. As soon as something is integrated, run a read-only reviewer on it in parallel with the next work, not only at the end: it finds the accounting and seam errors before you build on them. After every playable build ask the user to play it; turn what they notice into questions, questions into hypotheses, hypotheses into experiments.\n\n");
     s.push_str(&format!("## Writing tasks\n\nA member sees only its task: instructions, acceptance, role. {TASK_RULES} Pin a task to a member with `member`, or race several with `candidates`. A task has about 30 minutes of work: keep a long analysis and its write-up in separate tasks. Before the first quest of a system with flows (money, resources, an economy), start with a read-only review of its specification with a conservation check written by hand — for each resource, what enters, what leaves, who holds it — or its errors come back later as the members' rejections. To change a task nobody has started, edit it (`task set`) instead of cancelling and recreating it.\n\n"));
@@ -214,6 +279,29 @@ mod tests {
         for n in named { assert!(tools.contains(&n), "the brief names {n}, which the MCP server does not have"); }
         // The guild as it is: its project, members and concurrency.
         assert!(b.contains("/r/ember") && b.contains("`ada`") && b.contains("3 at once"));
+    }
+
+    #[test]
+    fn a_ruling_is_one_of_its_kinds_choices() {
+        let r = parse_ruling("Looks fine.\n```json\n{\"decision\": \"allow\", \"reason\": \"inside its worktree\"}\n```", DecisionKind::Permission).unwrap();
+        assert_eq!((r.decision.as_str(), r.reason.as_str()), ("allow", "inside its worktree"));
+        assert!(parse_ruling("```json\n{\"decision\": \"accept\"}\n```", DecisionKind::Permission).is_none(), "accept is not a permission's answer");
+        assert!(parse_ruling("I would allow it.", DecisionKind::Permission).is_none(), "no block, no ruling");
+        assert_eq!(DecisionKind::Failure.choices(), &["retry", "escalate"], "a failure is never accepted");
+    }
+
+    #[test]
+    fn the_brief_makes_the_agent_a_delegate_once_the_guild_has_an_orchestrator() {
+        let member = |id: &str, role: &str| Member { id: id.into(), name: id.to_uppercase(), roles: vec![role.into()], harness: HarnessId::named("claude"), model_id: None, mode: None, role_prompt: String::new(), enabled: true };
+        let without = Snapshot { members: vec![member("ada", "gameplay-engineer")], roles: crate::config::role_catalog(), ..Default::default() };
+        let b = brief(&without, None, "guild");
+        assert!(b.contains("Hire an orchestrator first") && b.contains("--role orchestrator"));
+        let with = Snapshot { members: vec![member("ada", "gameplay-engineer"), member("orin", "orchestrator")], roles: crate::config::role_catalog(), ..Default::default() };
+        let b = brief(&with, None, "guild");
+        assert!(b.contains("You are the delegate") && b.contains("ORIN (`orin`)") && !b.contains("Hire an orchestrator first"));
+        // The hall's chat never makes the orchestrator its speaker.
+        let available = vec![HarnessId::named("claude")];
+        assert_eq!(pick(&[member("orin", "orchestrator"), member("ada", "gameplay-engineer")], &available).map(|m| m.id), Some("ada".into()));
     }
 
     #[test]

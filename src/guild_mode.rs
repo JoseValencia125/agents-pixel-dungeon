@@ -48,7 +48,8 @@ pub fn project_for<'a>(snap: &'a Snapshot, cwd: &str) -> Option<&'a Project> {
 
 /// Members waiting for the user: a permission, or a candidate to decide.
 fn asking(snap: &Snapshot) -> Vec<(Member, Agent)> {
-    snap.members.iter().filter(|m| m.enabled).map(|m| (m.clone(), guild_view::member_agent(snap, m))).filter(|(_, a)| a.status == "blocked" || a.status == "done").collect()
+    // What the guild's orchestrator is deciding is not the user's yet.
+    snap.members.iter().filter(|m| m.enabled && !guild_view::deciding(snap, m)).map(|m| (m.clone(), guild_view::member_agent(snap, m))).filter(|(_, a)| a.status == "blocked" || a.status == "done").collect()
 }
 
 /// The tabs over the room's panel, and a way out of guild mode. Returns
@@ -430,6 +431,25 @@ mod tests {
         for needle in ["Verbrawl".to_string(), tr("Concepto"), tr("Experiencia del jugador"), tr("Sistemas"), trf("Preguntas abiertas ({})", &[&1]), tr("Editar en la cámara")] {
             assert!(design.contains(needle.as_str()), "design lacks {needle:?}:\n{design}");
         }
+    }
+
+    #[test]
+    fn what_the_orchestrator_decides_is_not_the_users_and_what_it_escalates_is() {
+        let mut view = GuildView::new(std::sync::Arc::new(|| {}));
+        view.set_demo(true);
+        view.poll();
+        let mut snap = view.snapshot.clone().unwrap();
+        let orin = snap.members.iter().find(|m| m.name == "Orin").unwrap().clone();
+        assert!(asking(&snap).iter().any(|(m, _)| m.id == orin.id), "the demo's Orin asks for a permission");
+        let a = snap.attempts.iter_mut().find(|a| a.member_id == orin.id && a.pending_permission.is_some()).unwrap();
+        a.deciding = true;
+        assert!(!asking(&snap).iter().any(|(m, _)| m.id == orin.id), "the orchestrator is on it");
+        assert!(guild_view::member_agent(&snap, &orin).activity.contains(&trf("{} · el orquestador decide", &[&""]).trim_start_matches(" · ").to_string()));
+        let a = snap.attempts.iter_mut().find(|a| a.member_id == orin.id && a.pending_permission.is_some()).unwrap();
+        a.deciding = false;
+        a.escalation = Some("it installs software".into());
+        assert!(asking(&snap).iter().any(|(m, _)| m.id == orin.id), "escalated: the user's");
+        assert!(guild_view::member_agent(&snap, &orin).activity.contains("it installs software"));
     }
 
     #[test]

@@ -371,6 +371,9 @@ fn current_attempt<'a>(snap: &'a Snapshot, member: &Member) -> Option<&'a Attemp
         .or_else(|| mine.iter().copied().filter(|a| a.state == AttemptState::Passed && snap.tasks.iter().any(|t| t.id == a.task_id && matches!(t.state, TaskState::Accepted | TaskState::Integrating))).max_by(|a, b| a.created_at.cmp(&b.created_at)))
 }
 
+/// Whether the guild's orchestrator is deciding on this member's work.
+pub fn deciding(snap: &Snapshot, m: &Member) -> bool { current_attempt(snap, m).is_some_and(|a| a.deciding) }
+
 pub fn member_agent(snap: &Snapshot, m: &Member) -> Agent {
     let attempt = current_attempt(snap, m);
     let task = attempt.and_then(|a| snap.tasks.iter().find(|t| t.id == a.task_id));
@@ -396,6 +399,12 @@ pub fn member_agent(snap: &Snapshot, m: &Member) -> Agent {
         ("done", _) => trf("{} · candidato listo · {}", &[&m.name, &title]),
         ("blocked", _) => trf("{} · bloqueado · {}", &[&m.name, &task.and_then(|t| t.block_reason.clone()).unwrap_or(title.clone())]),
         _ => trf("{} · libre · {}", &[&m.name, &m.roles.join(", ")]),
+    };
+    // The guild's orchestrator on it, or what it left to the user.
+    let activity = match attempt {
+        Some(a) if a.deciding => trf("{} · el orquestador decide", &[&activity]),
+        Some(a) => match &a.escalation { Some(why) => trf("{} · escalado: {}", &[&activity, why]), None => activity },
+        None => activity,
     };
     // The room carries the project's emblem and name; the worktree is where the terminal opens.
     let cwd = project.map(|p| p.repo_path.clone()).or_else(|| workspace.map(|w| w.path.clone())).unwrap_or_default();
@@ -617,7 +626,7 @@ pub fn hall_panel(ui: &mut Ui, view: &mut GuildView, now: f64, wide: bool) -> Pa
     // What only the user can decide: a permission, a candidate to accept.
     let members: Vec<&Member> = snap.members.iter().filter(|m| m.enabled).collect();
     let crew: Vec<(&Member, Agent)> = members.iter().map(|m| (*m, member_agent(&snap, m))).collect();
-    let asking: Vec<&(&Member, Agent)> = crew.iter().filter(|(_, a)| a.status == "blocked" || a.status == "done").collect();
+    let asking: Vec<&(&Member, Agent)> = crew.iter().filter(|(m, a)| (a.status == "blocked" || a.status == "done") && !deciding(&snap, m)).collect();
     if !asking.is_empty() {
         ui.label(mono(&tr("Necesita tu atención"), 10.5).strong().color(Color32::from_rgb(254, 174, 52)));
         for (m, a) in asking {
@@ -1084,7 +1093,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
     };
     let attempt = |id: &str, task: &str, member: &str, harness: HarnessKind, model: &str, state: AttemptState| Attempt {
         id: id.into(), task_id: task.into(), task_version: 1, quest_id: "q1".into(), project_id: "verbrawl".into(), member_id: member.into(), harness, model_requested: Some(model.into()), model_effective: Some(model.into()),
-        kind: AttemptKind::Work, state, workspace_id: Some(format!("w-{id}")), session_id: None, generation: 1, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 1, resumed: 0,
+        kind: AttemptKind::Work, state, workspace_id: Some(format!("w-{id}")), session_id: None, generation: 1, candidate: None, summary: String::new(), action: None, pending_permission: None, failure: None, verifier_results: vec![], turns: 1, resumed: 0, deciding: false, escalation: None,
         started_at: Some(t.clone()), finished_at: None, created_at: t.clone(), updated_at: t.clone(),
     };
     let workspace = |id: &str, branch: &str| Workspace { id: format!("w-{id}"), project_id: "verbrawl".into(), attempt_id: id.into(), path: format!("~/demo/verbrawl/worktrees/{id}"), branch: branch.into(), base_sha: "490acd6".into(), state: WorkspaceState::Active, created_at: t.clone(), updated_at: t.clone() };
