@@ -40,9 +40,6 @@ pub struct Agent {
     pub shell_results: Vec<crate::shells::ShellResult>,
     /// Each subagent's own harness (its sprite), when it is not the lead's.
     pub subagent_harnesses: Vec<String>,
-    /// The other half of a double room (the guild's hall): drawn beside or
-    /// under this one, inside the same frame.
-    pub annex: Option<Box<Agent>>,
     /// What the room's hero is doing when it is not what the room shows as
     /// a whole: the hall's orchestrator, free while the members work.
     pub hero_status: Option<String>,
@@ -83,7 +80,6 @@ impl Agent {
             shells: vec![],
             shell_results: vec![],
             subagent_harnesses: vec![],
-            annex: None,
             hero_status: None,
             guild_room: false,
             crew: vec![],
