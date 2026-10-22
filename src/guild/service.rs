@@ -3218,7 +3218,7 @@ impl Service {
         if let Some(u) = &url { if !crate::design::is_doc_url(u) { return Err(ApiError::invalid(format!("not a Claude Doc link: {u}"))); } }
         let by = p_opt(params, "by").unwrap_or_else(|| "user".into());
         self.change_design(&project_id, |d| {
-            d.doc = url.map(|url| crate::design::DesignDoc { url, linked_by: by, linked_at: now(), synced_rev: None, synced_at: None });
+            d.doc = url.map(|url| crate::design::DesignDoc { url, linked_by: by, linked_at: now(), synced_rev: None, synced_at: None, synced_version: None });
             Ok(json!({"doc": d.doc}))
         })
     }
@@ -3231,6 +3231,8 @@ impl Service {
             let doc = d.doc.as_mut().ok_or_else(|| ApiError::conflict("the design has no doc: link it first"))?;
             doc.synced_rev = Some(rev);
             doc.synced_at = Some(now());
+            // This change is the sync itself: the version it makes is the doc's.
+            doc.synced_version = Some(d.version + 1);
             Ok(json!({"doc": d.doc}))
         })
     }
@@ -4176,6 +4178,16 @@ mod tests {
         let doc = d.doc.unwrap();
         assert_eq!((doc.url.as_str(), doc.linked_by.as_str(), doc.synced_rev), (url, "delegate", Some(308)));
         assert_eq!(d.concept.statement, "Words fight");
+        // Only what the guild settled since the sync makes the doc behind.
+        let call = |m: &str, p: Value| service.handle(m, &p).map_err(|e| e.message);
+        let status = || crate::mcp::run_tool("guild_status", &json!({}), &call, &|_| {}).unwrap();
+        assert!(status().contains("the design doc https://claude.ai/artifact/VzVmi9VGcK1FLEStcbm4e6 is behind the guild: design v"), "the set above came after the sync");
+        service.handle("design.synced", &json!({"projectId": "p", "rev": 309})).unwrap();
+        assert!(!status().contains("is behind"), "{}", status());
+        std::thread::sleep(Duration::from_millis(5));
+        let q = service.handle("question.create", &json!({"projectId": "p", "question": "How long is a round?"})).unwrap();
+        let text = status();
+        assert!(text.contains(&format!("questions raised {}", q["id"].as_str().unwrap())) && !text.contains("design v"), "{text}");
         service.handle("design.link", &json!({"projectId": "p"})).unwrap();
         assert!(service.snapshot().unwrap().designs[0].doc.is_none(), "edited in the guild again");
     }

@@ -264,8 +264,10 @@ When your session has Claude Docs tools (a docs connector), the user edits the g
         None => s.push_str(&format!("- Not made yet: make it once, each tab filled from `{g} design {pid} doc` and `{g} visual {pid}` (upload the guild's images), then `{g} design {pid} link <its url>`. From then on the app's Design and Visual tabs point to it.
 ")),
     }
-    s.push_str(&format!("- Change the doc first, then bring the change into the guild, whose copy is all the members see: `design set`, `design system set`, `question new|resolve`, `decision new`, `visual {pid} notes|palette|add`. Then `{g} design {pid} synced <the doc's rev>`.
-- Before each quest, and whenever the user says they changed it, read the doc since that rev and bring their edits, answers and comments in the same way; an image they put in the doc is downloaded and added with `visual {pid} add`.
+    s.push_str(&format!("- Only what is settled crosses, either way. In the doc, give each section, decision and question a status the user picks (a dropdown: draft or final); a question is settled when its answer is picked.
+- Doc → guild: every time `guild_wait` returns, and before each quest, read the doc since that rev; bring in only what the user made final — a picked answer, a decision or a section marked final — with `design set`, `design system set`, `question resolve`, `decision new`, `visual {pid} notes|palette|add` (an image they put in the doc: download it, then `add`). Drafts stay in the doc; never bring in half an edit.
+- Guild → doc: when `guild_status` or `guild_wait` says the doc is behind (a new design version, questions raised or answered, decisions taken — only what the guild settled), write those into the doc.
+- Either way, end with `{g} design {pid} synced <the doc's rev>`: the members see only the guild's copy.
 - Without Claude Docs tools, the guild's tabs are where the design is edited, as below.
 
 "));

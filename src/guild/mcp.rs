@@ -151,7 +151,18 @@ fn quest_report(snap: &Snapshot, q: &Quest) -> String {
     let done = tasks.iter().filter(|t| t.state == TaskState::Completed).count();
     let mut s = format!("quest {} {:?} · {}/{} done · branch {} · {}\n", q.id, q.state, done, tasks.len(), q.integration_ref.trim_start_matches("refs/heads/"), q.title);
     for t in tasks { s.push_str(&task_line(snap, t)); s.push('\n'); }
+    s.push_str(&doc_line(snap, &q.project_id));
     s
+}
+
+/// What the guild settled that the design's Claude Doc does not show yet.
+fn doc_line(snap: &Snapshot, project_id: &str) -> String {
+    let Some(d) = snap.designs.iter().find(|d| d.project_id == project_id) else { return String::new() };
+    let behind = crate::design::doc_behind(d, &snap.questions, &snap.design_decisions);
+    match (&d.doc, behind.is_empty()) {
+        (Some(doc), false) => format!("the design doc {} is behind the guild: {} — write them into the doc, then `design {project_id} synced <rev>`\n", doc.url, behind.join("; ")),
+        _ => String::new(),
+    }
 }
 
 fn find_member<'a>(snap: &'a Snapshot, who: &str) -> Option<&'a Member> {
@@ -166,7 +177,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
         "guild_status" => {
             let snap = snapshot(call)?;
             let mut out = String::new();
-            for p in &snap.projects { out.push_str(&format!("project {} · {} · {}\n", p.id, p.name, p.repo_path)); }
+            for p in &snap.projects { out.push_str(&format!("project {} · {} · {}\n", p.id, p.name, p.repo_path)); out.push_str(&doc_line(&snap, &p.id)); }
             let busy: Vec<&str> = snap.attempts.iter().filter(|a| a.state.is_active()).map(|a| a.member_id.as_str()).collect();
             out.push_str("members:\n");
             for m in snap.members.iter().filter(|m| m.enabled) {
