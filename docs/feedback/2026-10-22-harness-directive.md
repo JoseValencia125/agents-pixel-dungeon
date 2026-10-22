@@ -57,3 +57,9 @@ Orquestador: Claude Code (Opus 5.5). Ids de `guild feedback`: FB-033…FB-041.
 - evidencia: lanzado en segundo plano sin `questId`, salió con `missing questId` recién al terminar, y perdí la espera.
 - costo: una espera perdida sin saberlo.
 - propuesta: sin `questId`, esperar a todas las quests del proyecto; si no, fallar al instante antes de esperar.
+
+### FB-042 · Los verificadores usan el `guild.toml` de la base, no el del candidato
+- tipo: − · causa: guild · estado: propuesta
+- evidencia: `jtcqvq28-cleanup` sacó `tools/capture.sh` y el verificador de capturas de su `guild.toml`, y su `run_tests.sh` ya no lista `test_ui`/`test_learn`; aun así la guild corrió las capturas de la base (`sh: tools/capture.sh: No such file`) y aparecieron `Can't load script test_ui/test_learn`. El orquestador falló dos intentos buenos por eso; hubo que aceptar con override.
+- costo: dos intentos de Tomás perdidos y una verificación a mano.
+- propuesta: si el candidato cambia `.guild/guild.toml`, verificar con el suyo (o mostrar al orquestador la diferencia entre ambos y que el fallo viene de un verificador que el candidato sacó).
