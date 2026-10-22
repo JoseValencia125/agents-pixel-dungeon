@@ -3615,7 +3615,8 @@ impl Service {
         let active = self.store.lock().unwrap().active_attempts()?;
         for a in active.iter().filter(|a| a.task_id == task_id) {
             // A candidate still waiting goes with its task, or its member stays busy (FB-035).
-            if matches!(a.state, AttemptState::Submitted | AttemptState::Verifying) && !self.running.lock().unwrap().contains_key(&a.id) {
+            // Its turn is over even when its driver is still finishing up.
+            if matches!(a.state, AttemptState::Submitted | AttemptState::Verifying) {
                 let _ = self.move_attempt(&a.id, AttemptState::Cancelled, Some("its task was cancelled".into()));
                 continue;
             }
