@@ -225,6 +225,8 @@ pub fn brief(snap: &Snapshot, project: Option<&Project>, bin: &str) -> String {
     s.push_str(&format!("Guild tab — members and how many work at once:\n- `{g} member add <id> --harness claude|codex|kiro --role R [--role R2] [--model M] [--name N]`\n- `{g} member set <id> [--role R]… [--model M] [--harness H] [--enable|--disable]`  ·  `{g} member remove <id>`\n- `{g} concurrency <N>` (1–16)  ·  `{g} roles`  ·  `{g} models <harness>`\n\n"));
     s.push_str(&format!("Quests tab — work for the members (JSON as the argument, or `-` to read it from stdin):\n- `{g} tool guild_start_quest '{{\"title\": \"…\", \"tasks\": [{{\"id\": \"t1\", \"title\": \"…\", \"instructions\": \"…\", \"acceptance\": [\"…\"], \"role\": \"gameplay-engineer\", \"dependsOn\": []}}]}}'`\n- `{g} tool guild_wait '{{\"questId\": \"…\"}}'` blocks until something needs you (up to 9 min; run it in the background if your harness can and keep talking to the user)\n- `{g} tool guild_task '{{\"taskId\": \"…\"}}'` (`\"full\": true` for the member's whole reply and every verifier's whole output)  ·  `{g} tool guild_diff '{{\"taskId\": \"…\"}}'`  ·  `{g} tool guild_note '{{\"taskId\": \"…\", \"text\": \"…\"}}'`\n- `{g} tool guild_decide '{{\"taskId\": \"…\", \"decision\": \"accept|reject|retry|cancel\", \"reason\": \"…\"}}'` (accept with `\"attemptId\"` and `\"override\": true` takes a verified attempt the orchestrator failed)  ·  `{g} tool guild_permission '{{\"taskId\": \"…\", \"optionId\": \"…\"}}'`\n- `{g} tool guild_status` the guild at a glance\n- `{g} task set <task> [--instructions …] [--accept …]… [--depends t1,t2 | --no-depends] [--role R] [--member ID]` changes a task nobody has started yet  ·  `[--timeout MIN]` on it or on `task new`\n- `{g} quest sync <quest> [--from REF]` brings the project's branch (a corrected spec) into the quest; later attempts start from it\n\n"));
     s.push_str(&format!("Design tab — the living game design:\n- `{g} design {pid} doc` reads it as the user sees it  ·  `get` as JSON  ·  `set <file|->` replaces it  ·  `template`\n- `{g} design {pid} system set <id> --name N --maturity M --intent … --current … --known … --unknown …`\n- `{g} question new {pid} --question …`  ·  `{g} question resolve {pid} <Q-id> --decision … --why …`  ·  `{g} decision new {pid} --decision … --why …`\n- `{g} design {pid} export` commits game-design/ to the branch guild/design/{pid}, never the checkout\n\nVisual tab — the game's look, which every task's context carries (the user drops images and palettes there):\n- `{g} visual {pid}` reads it  ·  `{g} visual {pid} add <file>… [--caption T] [--kind reference|concept|asset]` an image or a palette file  ·  `{g} visual {pid} palette <name> <#rrggbb>…`  ·  `{g} visual {pid} notes <text>`\n- Write the art direction's rules into its notes and palettes before the first asset task; an art director keeps them, and asset tasks name the palette to use.\n\n"));
+    let doc = project.and_then(|p| snap.designs.iter().find(|d| d.project_id == p.id)).and_then(|d| d.doc.clone());
+    s.push_str(&design_doc_section(doc.as_ref(), &pid));
     s.push_str("Accepting a task merges it into the quest's branch guild/quest/<id>, never into the user's branch; tell the user the branch when a quest completes.\n\n");
     s.push_str(&format!("Feedback on the guild itself — when something about the guild, a role's prompt, this brief, a harness or your own task writing helps or gets in the way, note it as it happens, with its evidence (quest, task, attempt ids) and its cause; an agent improving the guild reads these later:\n- `{g} feedback new --project {pid} --kind works|fails --cause role|brief|orchestrator|guild|harness|project --title … --evidence … [--cost …] [--proposal …] [--ref ID]…`\n- `{g} feedback list --status open`  ·  `{g} feedback export` (Markdown)  ·  `{g} feedback set <FB-id> --status proposed|applied|discarded [--commit SHA] [--note …]`\nBlame the right cause: a mistake in your own spec is `orchestrator`, not `role`. Never change the guild while a quest runs.\n\n"));
     s.push_str("## The guild now\n\n");
@@ -245,6 +247,28 @@ pub fn brief(snap: &Snapshot, project: Option<&Project>, bin: &str) -> String {
         None => s.push_str("Design: none yet.\n"),
     }
     s.push_str("\nNow answer the user: say in one line that you run the guild, and carry on with what they asked. If they had asked for nothing, ask what they want to make.\n");
+    s
+}
+
+/// With a Claude delegate the user edits the design and the visual
+/// direction in a Claude Doc; the guild keeps their mirror for the members.
+fn design_doc_section(doc: Option<&crate::design::DesignDoc>, pid: &str) -> String {
+    let g = "guild";
+    let mut s = String::from("## The design lives in a Claude Doc
+
+When your session has Claude Docs tools (a docs connector), the user edits the game design and its look there, not in the guild: one doc, in their language, with two tabs — the design (concept, pillars and their tests, experience, loops, systems with their maturity, open questions each with your default, decisions) and the visual direction (its notes, each palette as a table of swatches with their hex, the reference and concept images uploaded where they are discussed). Questions for the user go in it as a table with a dropdown per answer, never only in the chat.
+");
+    match doc {
+        Some(d) => s.push_str(&format!("- It is {} (the guild reflects it up to rev {}). The app's Design and Visual tabs show the guild's copy, read-only, with a link to it.
+", d.url, d.synced_rev.map(|r| r.to_string()).unwrap_or_else(|| "none yet".into()))),
+        None => s.push_str(&format!("- Not made yet: make it once, each tab filled from `{g} design {pid} doc` and `{g} visual {pid}` (upload the guild's images), then `{g} design {pid} link <its url>`. From then on the app's Design and Visual tabs point to it.
+")),
+    }
+    s.push_str(&format!("- Change the doc first, then bring the change into the guild, whose copy is all the members see: `design set`, `design system set`, `question new|resolve`, `decision new`, `visual {pid} notes|palette|add`. Then `{g} design {pid} synced <the doc's rev>`.
+- Before each quest, and whenever the user says they changed it, read the doc since that rev and bring their edits, answers and comments in the same way; an image they put in the doc is downloaded and added with `visual {pid} add`.
+- Without Claude Docs tools, the guild's tabs are where the design is edited, as below.
+
+"));
     s
 }
 
@@ -302,6 +326,14 @@ mod tests {
         let with = Snapshot { members: vec![member("ada", "gameplay-engineer"), member("orin", "orchestrator")], roles: crate::config::role_catalog(), ..Default::default() };
         let b = brief(&with, None, "guild");
         assert!(b.contains("You are the delegate") && b.contains("ORIN (`orin`)") && !b.contains("Hire an orchestrator first"));
+        // With Claude Docs the design is edited in a doc: made once, then linked and mirrored.
+        assert!(b.contains("The design lives in a Claude Doc") && b.contains("design <project> link <its url>"));
+        let mut design = crate::design::LivingGameDesign { project_id: "p".into(), ..Default::default() };
+        design.doc = Some(crate::design::DesignDoc { url: "https://claude.ai/artifact/VzVmi9VGcK1FLEStcbm4e6".into(), synced_rev: Some(308), ..Default::default() });
+        let project = Project { id: "p".into(), name: "p".into(), repo_path: "/r/p".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], created_at: String::new() };
+        let linked = Snapshot { designs: vec![design], ..with.clone() };
+        let b = brief(&linked, Some(&project), "guild");
+        assert!(b.contains("It is https://claude.ai/artifact/VzVmi9VGcK1FLEStcbm4e6 (the guild reflects it up to rev 308)") && b.contains("guild design p synced"), "{b}");
         // The hall's chat never makes the orchestrator its speaker.
         let available = vec![HarnessId::named("claude")];
         assert_eq!(pick(&[member("orin", "orchestrator"), member("ada", "gameplay-engineer")], &available).map(|m| m.id), Some("ada".into()));

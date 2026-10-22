@@ -2707,6 +2707,8 @@ impl Service {
             "visual.update" => self.visual_update(params),
             "visual.remove" => self.visual_remove(params),
             "visual.notes" => self.visual_notes(params),
+            "design.link" => self.design_link(params),
+            "design.synced" => self.design_synced(params),
             "play.start" => self.play_start(params),
             "play.finish" => self.play_finish(p_str(params, "playtestId")?),
             "observation.create" => self.observation_create(params),
@@ -3086,7 +3088,10 @@ impl Service {
         let store = self.store.lock().unwrap();
         store.project(id)?.ok_or_else(|| ApiError::not_found(format!("project {id}")))?;
         d.project_id = id.into();
-        d.version = store.design(id)?.map(|x| x.version + 1).unwrap_or(1);
+        let previous = store.design(id)?;
+        // A design sent without its doc keeps the one it had.
+        if d.doc.is_none() { d.doc = previous.as_ref().and_then(|x| x.doc.clone()); }
+        d.version = previous.map(|x| x.version + 1).unwrap_or(1);
         d.updated_at = now();
         for (i, l) in d.loops.iter_mut().enumerate() { if l.id.trim().is_empty() { l.id = format!("loop-{}", i + 1); } }
         for (i, p) in d.parts.iter_mut().enumerate() { if p.id.trim().is_empty() { p.id = format!("part-{}", i + 1); } }
@@ -3202,6 +3207,31 @@ impl Service {
                 return Err(ApiError::not_found(format!("{id} in the visual direction")));
             }
             Ok(json!({"removed": id}))
+        })
+    }
+
+    /// Keep the design in a Claude Doc (its link), or stop (no url): the
+    /// app's Design and Visual tabs then point to it instead of editing.
+    fn design_link(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?.to_string();
+        let url = p_opt(params, "url").map(|u| u.trim().to_string());
+        if let Some(u) = &url { if !crate::design::is_doc_url(u) { return Err(ApiError::invalid(format!("not a Claude Doc link: {u}"))); } }
+        let by = p_opt(params, "by").unwrap_or_else(|| "user".into());
+        self.change_design(&project_id, |d| {
+            d.doc = url.map(|url| crate::design::DesignDoc { url, linked_by: by, linked_at: now(), synced_rev: None, synced_at: None });
+            Ok(json!({"doc": d.doc}))
+        })
+    }
+
+    /// The guild's copy now reflects the doc up to this revision.
+    fn design_synced(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?.to_string();
+        let rev = params.get("rev").and_then(Value::as_u64).ok_or_else(|| ApiError::invalid("missing rev"))?;
+        self.change_design(&project_id, |d| {
+            let doc = d.doc.as_mut().ok_or_else(|| ApiError::conflict("the design has no doc: link it first"))?;
+            doc.synced_rev = Some(rev);
+            doc.synced_at = Some(now());
+            Ok(json!({"doc": d.doc}))
         })
     }
 
@@ -4127,6 +4157,27 @@ mod tests {
         let t2 = snap.tasks.iter().find(|t| t.id == "t2").unwrap();
         assert_eq!(t2.state, TaskState::Pending, "waits for its new dependency");
         assert!(snap.attempts.iter().all(|a| a.task_id == "t1"), "t2 does not start before t1");
+    }
+
+    #[test]
+    fn a_design_kept_in_a_claude_doc_keeps_its_link_and_how_far_it_is_mirrored() {
+        let (_home, service, _quest) = setup(MockBehaviour::Hang);
+        assert!(service.handle("design.link", &json!({"projectId": "p", "url": "https://example.com/doc"})).is_err());
+        assert!(service.handle("design.synced", &json!({"projectId": "p", "rev": 3})).is_err(), "nothing to be synced with");
+        let url = "https://claude.ai/artifact/VzVmi9VGcK1FLEStcbm4e6";
+        service.handle("design.link", &json!({"projectId": "p", "url": url, "by": "delegate"})).unwrap();
+        service.handle("design.synced", &json!({"projectId": "p", "rev": 308})).unwrap();
+        // The delegate mirrors an edit with the design as `get` gives it, or without its doc.
+        let mut d = service.snapshot().unwrap().designs[0].clone();
+        d.doc = None;
+        d.concept.statement = "Words fight".into();
+        service.handle("design.set", &json!({"projectId": "p", "design": d})).unwrap();
+        let d = service.snapshot().unwrap().designs[0].clone();
+        let doc = d.doc.unwrap();
+        assert_eq!((doc.url.as_str(), doc.linked_by.as_str(), doc.synced_rev), (url, "delegate", Some(308)));
+        assert_eq!(d.concept.statement, "Words fight");
+        service.handle("design.link", &json!({"projectId": "p"})).unwrap();
+        assert!(service.snapshot().unwrap().designs[0].doc.is_none(), "edited in the guild again");
     }
 
     #[test]

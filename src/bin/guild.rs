@@ -39,6 +39,8 @@ USAGE
   guild visual <project> palette <name> <#rrggbb>... [--id PAL-001]   add (or replace) a palette
   guild visual <project> caption <id> <text>  |  remove <id>  |  notes <text>
   guild design <project> set <file|->  replace the whole design with this JSON (as `get` prints it)
+  guild design <project> link <claude doc url|off> [--by WHO]  keep the design and visual direction in a Claude Doc: the app's tabs point to it
+  guild design <project> synced <rev>  the guild's copy reflects the doc up to that revision
   guild member add <id> --harness kiro|codex|claude|mock [--role R]... [--model M] [--mode MODE] [--name N]
   guild member set <id> [--role R]... [--model M] [--mode MODE] [--name N] [--harness H] [--enable|--disable]
   guild member remove <id>
@@ -412,6 +414,16 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                     if design.get("design").is_some() { design = design["design"].take(); }
                     let r = call(&ensure_running()?, "design.set", json!({"projectId": project, "design": design}))?;
                     println!("design v{} · {} loops · {} systems", r["version"], r["loops"].as_array().map(Vec::len).unwrap_or(0), r["systems"].as_array().map(Vec::len).unwrap_or(0));
+                }
+                "link" => {
+                    let url = a.positional.get(2).copied().filter(|u| *u != "off");
+                    let r = call(&ensure_running()?, "design.link", json!({"projectId": project, "url": url, "by": a.flag("by")}))?;
+                    match r["doc"]["url"].as_str() { Some(u) => println!("design of {project} kept in {u}: edit it there"), None => println!("design of {project} edited in the guild again") }
+                }
+                "synced" => {
+                    let rev = a.pos(2, "doc revision")?.parse::<u64>().map_err(|_| "the revision is a number")?;
+                    call(&ensure_running()?, "design.synced", json!({"projectId": project, "rev": rev}))?;
+                    println!("design of {project} reflects its doc up to rev {rev}");
                 }
                 "doc" => {
                     let snap: Snapshot = serde_json::from_value(call(&ensure_running()?, "guild.snapshot", json!({}))?).map_err(|e| e.to_string())?;

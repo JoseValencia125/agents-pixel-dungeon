@@ -259,6 +259,11 @@ pub struct LivingGameDesign {
     /// The game's look: reference and concept images, palettes, notes.
     #[serde(default)]
     pub visual: VisualDirection,
+    /// Where the user edits the design and the visual direction, when a
+    /// Claude delegate keeps them in a Claude Doc; the guild's copy is then
+    /// its mirror, for the members.
+    #[serde(default)]
+    pub doc: Option<DesignDoc>,
     /// Maturity of the concept-level sections, set by the human.
     #[serde(default)]
     pub concept_maturity: Maturity,
@@ -270,6 +275,30 @@ pub struct LivingGameDesign {
     pub version: u32,
     #[serde(default)]
     pub updated_at: String,
+}
+
+/// A Claude Doc that holds the design (a tab) and the visual direction
+/// (another), and how far the guild's copy has caught up with it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DesignDoc {
+    pub url: String,
+    #[serde(default)]
+    pub linked_by: String,
+    #[serde(default)]
+    pub linked_at: String,
+    /// The doc's revision the guild's copy reflects.
+    #[serde(default)]
+    pub synced_rev: Option<u64>,
+    #[serde(default)]
+    pub synced_at: Option<String>,
+}
+
+/// A Claude Doc's link, as claude.ai gives it (with or without a title
+/// before the id, a `code/` path, a share key or an anchor).
+pub fn is_doc_url(url: &str) -> bool {
+    let rest = url.strip_prefix("https://claude.ai/").or_else(|| url.strip_prefix("https://preview.claude.ai/")).unwrap_or("");
+    let rest = rest.strip_prefix("code/").unwrap_or(rest);
+    rest.strip_prefix("artifact/").is_some_and(|id| id.split(['?', '#', '/']).next().is_some_and(|id| id.len() >= 22))
 }
 
 /// The game's visual direction: what it should look like, shown rather

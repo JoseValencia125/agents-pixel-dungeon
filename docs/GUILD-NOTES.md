@@ -147,3 +147,11 @@ From FB-015…FB-032 (harness-directive, rounds 2–4) and a lab with real Kiro 
 - **Brief**: a hot file or function splits into modules before the second quest of a system (FB-020); two or three ways out of a design problem are built side by side with the same measurement (FB-021); calibrate once the rules settle (FB-022); ranges measured only for the numbers that decide something (FB-023, also in the systems designer's prompt); the guild's path literally in every command, since permission rules match only it (FB-029); decisions for the user gathered in one document (FB-032); `task note`, `guild_task full`, `override`.
 - **Roles**: the reviewer breaks rules on purpose to see a test fail (FB-030); the exploit hunter fixes in numbers what «dominates» means before searching (FB-031).
 - FB-016's project half was already in harness-directive (d90e5ab: `godot-tests` runs the `test_refuge*` suites); the service picks it up when the project is added again.
+
+## M20 — The design in a Claude Doc (2026-10-22)
+
+A delegate in Claude wrote harness-directive's decisions as a Claude Doc (two tabs, tables with a dropdown per answer, the user answering in place), and the user asked for the design and the visual direction to be edited there when Claude leads.
+
+- **`LivingGameDesign::doc`** (`DesignDoc`: url, who linked it, when, the doc revision the guild's copy reflects). `design.link` (a claude.ai artifact link, `is_doc_url`; none = edit in the guild again) and `design.synced`; `design.set` without a doc keeps the one it had, so the chamber and a delegate's `get`/`set` never drop it. CLI `design <project> link <url|off>` and `synced <rev>`.
+- **The guild cannot reach the doc**: only the delegate's session has the Claude Docs tools. So the brief carries it (`design_doc_section`): with Claude Docs, the doc is made once from `design doc` and `visual`, linked, changed first and then mirrored into the guild (the members read only the guild's copy), and read since its last synced revision before each quest. Without those tools, nothing changes.
+- **The app**: with a doc linked, the Design and Visual tabs show a banner with **Open the doc** and how far the copy is up to date, and draw the guild's copy read-only (no chamber, no palette form, no drop zone, no captions or removing).
