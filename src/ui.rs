@@ -127,11 +127,34 @@ fn drop_hint(ui: &Ui, rect: egui::Rect) {
 
 /// A console line that opens what ⌘ (Ctrl elsewhere) + click lands on: a
 /// URL in the browser, a file or folder (relative to the agent's folder,
-/// `:line` dropped) with its app. Holding ⌘ over one shows the hand.
-fn console_line(ui: &mut Ui, spans: &[Span], size: f32, cwd: &str) {
-    // Without ⌘ it is a plain label, so its text can still be selected.
-    if !ui.input(|i| i.modifiers.command) { ui.add(screen_line(spans, size)); return; }
-    let (pos, galley, response) = screen_line(spans, size).sense(egui::Sense::click()).layout_in_ui(ui);
+/// `:line` dropped) with its app. Holding ⌘ over one shows the hand. A
+/// click on code (a command, a path) copies it, whole and without the
+/// breaks the terminal's wrap put in it.
+fn console_line(ui: &mut Ui, spans: &[Span], codes: &[crate::ansi::Code], size: f32, cwd: &str) {
+    let command = ui.input(|i| i.modifiers.command);
+    // Without ⌘ or code it is a plain label, so its text can still be selected.
+    if !command && codes.is_empty() { ui.add(screen_line(spans, size)); return; }
+    // Dragging still selects text; a click copies.
+    let (pos, galley, response) = screen_line(spans, size).sense(if command { egui::Sense::click() } else { egui::Sense::click_and_drag() }).layout_in_ui(ui);
+    if !command {
+        let code = response.hover_pos().and_then(|pointer| {
+            let index = galley.cursor_from_pos(pointer - pos).ccursor.index;
+            codes.iter().find(|c| (c.start..c.end).contains(&index))
+        });
+        egui::text_selection::LabelSelectionState::label_text_selection(ui, &response, pos, galley, Color32::from_gray(222), Stroke::NONE);
+        if let Some(code) = code {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if response.clicked() {
+                ui.ctx().copy_text(code.text.clone());
+                let at = response.interact_pointer_pos().unwrap_or(response.rect.center());
+                // The time first: input and data share the context's lock.
+                let when = ui.input(|i| i.time);
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("console-copied"), (at, when)));
+            }
+            response.on_hover_text(trf("Clic para copiar: {}", &[&code.text]));
+        }
+        return;
+    }
     let target = response.hover_pos().and_then(|pointer| {
         let index = galley.cursor_from_pos(pointer - pos).ccursor.index;
         crate::herdr::link_at(galley.text(), index).and_then(|link| crate::herdr::resolve_link(&link, cwd))
@@ -145,6 +168,20 @@ fn console_line(ui: &mut Ui, spans: &[Span], size: f32, cwd: &str) {
         let web = target.starts_with("http://") || target.starts_with("https://");
         response.on_hover_text(if web { target.clone() } else { trf("Mostrar en Finder: {}", &[&crate::herdr::abbreviate_home(&target)]) });
     }
+}
+
+/// «¡Copiado!» for a moment where code was clicked.
+fn copied_popup(ctx: &egui::Context) {
+    let Some((at, when)) = ctx.data(|d| d.get_temp::<(egui::Pos2, f64)>(egui::Id::new("console-copied"))) else { return };
+    let age = ctx.input(|i| i.time) - when;
+    if age > 1.2 { ctx.data_mut(|d| d.remove::<(egui::Pos2, f64)>(egui::Id::new("console-copied"))); return; }
+    let fade = (1.0 - ((age - 0.8) / 0.4).max(0.0)) as f32;
+    egui::Area::new(egui::Id::new("console-copied-popup")).order(egui::Order::Tooltip).fixed_pos(at + vec2(10.0, -26.0)).interactable(false).show(ctx, |ui| {
+        Frame::new().fill(alpha(Color32::from_rgb(40, 70, 40), 0.95 * fade)).stroke(Stroke::new(1.0_f32, alpha(Color32::from_rgb(140, 217, 115), fade))).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(8, 3)).show(ui, |ui| {
+            ui.label(RichText::new(tr("¡Copiado!")).monospace().size(fs(11.0)).color(alpha(Color32::from_rgb(200, 245, 190), fade)));
+        });
+    });
+    ctx.request_repaint();
 }
 
 /// One terminal line as a label: each run in its colour, bold as a
@@ -383,6 +420,8 @@ pub struct ChatState {
     next_model: f64,
     /// The terminal with its colours (full screen only), and its refresh.
     screen: Vec<Vec<Span>>,
+    /// The code on each screen line, to copy with a click.
+    codes: Vec<Vec<crate::ansi::Code>>,
     screen_rx: Option<Receiver<String>>,
     next_screen: f64,
     /// The harness's slash commands (read once), and the one highlighted
@@ -417,7 +456,7 @@ pub struct ChatState {
 
 impl ChatState {
     pub fn new(agent_id: &str) -> ChatState {
-        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false, shell_open: None, shell_stop: None, changes: None, changes_rx: None, next_changes: 0.0, diff_path: None, diff: vec![], diff_rx: None, pull: None, pull_rx: None, next_pull: 0.0, model: None, model_rx: None, next_model: 0.0, guild_lead: false }
+        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], codes: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false, shell_open: None, shell_stop: None, changes: None, changes_rx: None, next_changes: 0.0, diff_path: None, diff: vec![], diff_rx: None, pull: None, pull_rx: None, next_pull: 0.0, model: None, model_rx: None, next_model: 0.0, guild_lead: false }
     }
 
     /// Send this message now, as if typed in the box: what is left in the
@@ -666,6 +705,7 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                 // thin column of text.
                 state.cols = parsed.iter().map(|l| l.iter().map(|s| s.text.as_str()).collect::<String>().trim_end().chars().count()).max().unwrap_or(0);
                 state.screen = crate::ansi::reflow(parsed);
+                state.codes = crate::ansi::codes(&state.screen);
             }
             state.screen_rx = None;
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
@@ -849,6 +889,7 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                 let base = if wide { (ui.available_width() / (widest * 0.62)).clamp(7.0, 12.0) } else { 11.0 };
                 let size = (base * console_scale()).round().max(6.0);
                 let screen = state.screen.clone();
+                let codes = state.codes.clone();
                 egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
                     for (index, line) in screen.iter().enumerate() {
@@ -873,10 +914,11 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                             let color = line.iter().find_map(|s| s.fg).unwrap_or(Color32::from_gray(100));
                             ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0_f32, color));
                         } else {
-                            console_line(ui, line, size, &agent.cwd);
+                            console_line(ui, line, codes.get(index).map(Vec::as_slice).unwrap_or(&[]), size, &agent.cwd);
                         }
                     }
                 });
+                copied_popup(ui.ctx());
                 return;
             }
             // A question keeps its lines (the options are picked by line); a
@@ -2073,5 +2115,40 @@ mod codex_hp_tests {
             let (_, selected) = draw(&ctx, &assets, open, click(button, egui::PointerButton::Primary));
             assert!(selected, "Settings action must reach the application (expanded={open})");
         }
+    }
+}
+
+#[cfg(test)]
+mod copy_code_tests {
+    use super::*;
+
+    fn draw(ctx: &Context, lines: &[Vec<Span>], codes: &[Vec<crate::ansi::Code>], events: Vec<egui::Event>) -> egui::FullOutput {
+        ctx.run(egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(320.0, 200.0))), events, ..Default::default() }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                for (line, codes) in lines.iter().zip(codes) { console_line(ui, line, codes, 12.0, "~"); }
+                copied_popup(ui.ctx());
+            });
+        })
+    }
+
+    #[test]
+    fn a_click_on_a_wrapped_command_copies_all_of_it_and_says_so() {
+        // Cut by the terminal's wrap: two lines, one command.
+        let lines = crate::ansi::parse("corre \x1b[38;2;177;185;249m! gh pr merge 68\x1b[0m\n\x1b[38;2;177;185;249m--merge\x1b[0m cuando quieras");
+        let codes = crate::ansi::codes(&lines);
+        let ctx = Context::default();
+        let output = draw(&ctx, &lines, &codes, vec![]);
+        // Where the second line's code is drawn.
+        let at = output.shapes.iter().find_map(|s| match &s.shape {
+            egui::epaint::Shape::Text(t) if t.galley.text().starts_with("--merge") => Some(t.pos + vec2(12.0, t.galley.rect.height() / 2.0)),
+            _ => None,
+        }).expect("the second line is drawn");
+        draw(&ctx, &lines, &codes, vec![egui::Event::PointerMoved(at)]);
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let output = draw(&ctx, &lines, &codes, vec![press(true), press(false)]);
+        assert!(output.platform_output.commands.contains(&egui::OutputCommand::CopyText("! gh pr merge 68 --merge".into())), "{:?}", output.platform_output.commands);
+        let output = draw(&ctx, &lines, &codes, vec![]);
+        let popup = tr("¡Copiado!");
+        assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text() == popup)), "the popup says so");
     }
 }
