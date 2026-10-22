@@ -81,8 +81,8 @@ fn tools() -> Value {
                 "dependsOn": {"type": "array", "items": {"type": "string"}},
                 "candidates": {"type": "integer", "description": "Run a race of this many members (default 1)"},
                 "timeoutMinutes": {"type": "integer", "description": "How long an attempt may work on it (default the guild's, 30)"}}}}}}},
-        {"name": "guild_wait", "description": "Block until a task of the quest needs you (candidate ready, permission asked, failed, blocked) or the quest ends, or until the timeout. Returns the quest's status.",
-         "inputSchema": {"type": "object", "required": ["questId"], "properties": {"questId": {"type": "string"}, "timeoutSeconds": {"type": "integer", "description": "Default 300, at most 540"}}}},
+        {"name": "guild_wait", "description": "Block until a task of the quest (without questId, of any quest under way) needs you (candidate ready, permission asked, failed, blocked) or the quest ends, or until the timeout. Returns the quest's status.",
+         "inputSchema": {"type": "object", "properties": {"questId": {"type": "string", "description": "Without it, every quest under way"}, "timeoutSeconds": {"type": "integer", "description": "Default 300, at most 540"}}}},
         {"name": "guild_task", "description": "One task in full: instructions, notes, attempts, failures, verifier results, candidate size, pending permission (whole command, file and whether it is inside the worktree) and the end of the member's transcript. full: true gives the member's whole last reply and every verifier's whole output.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id, "full": {"type": "boolean"}}}},
         {"name": "guild_note", "description": "Add to a task that already started: the member reads the note when its turn ends (one more turn in the same session); a retry and the orchestrator read it with the instructions.",
@@ -220,17 +220,27 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
             Ok(format!("started. task ids: {}\n{}", local.iter().map(|l| id(l)).collect::<Vec<_>>().join(", "), quest_report(&snapshot(call)?, snapshot(call)?.quests.iter().find(|q| q.id == quest_id).ok_or("quest vanished")?)))
         }
         "guild_wait" => {
-            let quest_id = need("questId")?;
+            // Without a quest, every quest under way (FB-041: it failed only once the wait was over).
+            let wanted = s("questId");
             let timeout = Duration::from_secs(args["timeoutSeconds"].as_u64().unwrap_or(300).clamp(5, 540));
             let started = Instant::now();
+            let mut watched: Vec<String> = vec![];
             loop {
                 let snap = snapshot(call)?;
-                let q = snap.quests.iter().find(|q| q.id == quest_id).ok_or_else(|| format!("no quest {quest_id}"))?;
-                let ended = matches!(q.state, QuestState::Completed | QuestState::Cancelled);
-                let waiting = snap.tasks.iter().any(|t| t.quest_id == quest_id && needs(&snap, t).is_some());
+                if watched.is_empty() {
+                    watched = match &wanted {
+                        Some(id) => vec![snap.quests.iter().find(|q| &q.id == id).ok_or_else(|| format!("no quest {id}"))?.id.clone()],
+                        None => snap.quests.iter().filter(|q| matches!(q.state, QuestState::Running | QuestState::Paused | QuestState::Blocked)).map(|q| q.id.clone()).collect(),
+                    };
+                    if watched.is_empty() { return Err("no quest under way: start one, or name it with questId".into()); }
+                }
+                let quests: Vec<&Quest> = snap.quests.iter().filter(|q| watched.contains(&q.id)).collect();
+                let ended = quests.iter().all(|q| matches!(q.state, QuestState::Completed | QuestState::Cancelled));
+                let waiting = snap.tasks.iter().any(|t| watched.contains(&t.quest_id) && needs(&snap, t).is_some());
                 if ended || waiting || started.elapsed() >= timeout {
-                    let why = if ended { "the quest ended" } else if waiting { "something needs you" } else { "timeout, still working" };
-                    return Ok(format!("{why}\n{}", quest_report(&snap, q)));
+                    let why = if ended { if quests.len() == 1 { "the quest ended" } else { "the quests ended" } } else if waiting { "something needs you" } else { "timeout, still working" };
+                    let report: String = quests.iter().map(|q| quest_report(&snap, q)).collect();
+                    return Ok(format!("{why}\n{report}"));
                 }
                 sleep(Duration::from_secs(3));
             }

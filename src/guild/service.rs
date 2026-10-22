@@ -11,7 +11,7 @@ use crate::experiment::{Experiment, ExperimentDecision, ExperimentResult, Experi
 use crate::{config, scheduler, workspaces};
 use serde_json::{json, Value};
 use sha2::Digest;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender};
@@ -75,6 +75,9 @@ pub struct Service {
     ai_stops: Mutex<Vec<String>>,
     /// The member answering the user right now, if one is.
     orchestrating: Mutex<Option<String>>,
+    /// Tasks being settled, and those asked again meanwhile: two candidates
+    /// finishing together must not start two judges, or a judge and the policy.
+    settling: Mutex<(HashSet<String>, HashSet<String>)>,
     /// Decisions waiting for the guild's orchestrator (attempt, what about);
     /// the scheduler's tick hands each to a thread of its own.
     decisions: Mutex<Vec<(String, crate::orchestrator::DecisionKind)>>,
@@ -125,6 +128,7 @@ impl Service {
             playtesting: Mutex::new(vec![]),
             ai_stops: Mutex::new(vec![]),
             orchestrating: Mutex::new(None),
+            settling: Mutex::new((HashSet::new(), HashSet::new())),
             decisions: Mutex::new(vec![]),
             running: Mutex::new(HashMap::new()),
             settings,
@@ -486,6 +490,22 @@ impl Service {
     /// policy picks (smallest change, then the earliest), a judge is asked,
     /// or the user is left to choose on the board.
     fn settle_task(self: &Arc<Service>, task_id: &str) -> Res<()> {
+        {
+            let mut s = self.settling.lock().unwrap();
+            if !s.0.insert(task_id.to_string()) { s.1.insert(task_id.to_string()); return Ok(()); }
+        }
+        // One at a time per task; a call that came meanwhile runs once more after.
+        let result = loop {
+            let r = self.settle_task_once(task_id);
+            if r.is_err() || !self.settling.lock().unwrap().1.remove(task_id) { break r; }
+        };
+        let mut s = self.settling.lock().unwrap();
+        s.0.remove(task_id);
+        s.1.remove(task_id);
+        result
+    }
+
+    fn settle_task_once(self: &Arc<Service>, task_id: &str) -> Res<()> {
         let (task, attempts) = {
             let store = self.store.lock().unwrap();
             let t = store.task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
@@ -1651,6 +1671,24 @@ impl Service {
         Ok(json!({"question": self.store.lock().unwrap().question(project_id, qid)?, "decision": decided}))
     }
 
+    /// A note on every task started and not yet done, in the project's
+    /// quests, whose instructions or notes cite a decision `d` replaces.
+    fn note_superseded(&self, project_id: &str, d: &crate::design::DesignDecision) -> Res<()> {
+        let tasks: Vec<Task> = {
+            let store = self.store.lock().unwrap();
+            let quests: Vec<String> = store.quests()?.into_iter().filter(|q| q.project_id == project_id).map(|q| q.id).collect();
+            store.tasks()?.into_iter().filter(|t| quests.contains(&t.quest_id) && t.attempts_made > 0 && !matches!(t.state, TaskState::Completed | TaskState::Cancelled | TaskState::Integrating)).collect()
+        };
+        for t in tasks {
+            let text = format!("{}\n{}", t.instructions, t.notes.join("\n"));
+            let cited: Vec<&String> = d.supersedes.iter().filter(|old| text.contains(old.as_str())).collect();
+            if cited.is_empty() { continue; }
+            let note = format!("{} replaces {}: {}", d.id, cited.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", "), d.decision.trim());
+            self.task_note(&json!({"taskId": t.id, "text": note, "by": "guild"}))?;
+        }
+        Ok(())
+    }
+
     /// Undo a resolution (FB-034): the question is open again and its
     /// decision no longer answers it; a decision that answered only it
     /// stays on record, with the reason it no longer holds.
@@ -1685,7 +1723,7 @@ impl Service {
         let design = store.design(project_id)?;
         let id = crate::design::next_id("DEC", store.design_decisions_of(project_id)?.into_iter().map(|d| d.id));
         let d = crate::design::DesignDecision {
-            id: id.clone(), project_id: project_id.into(), decision: p_str(params, "decision")?.into(), why: p_opt(params, "why").unwrap_or_default(),
+            id: id.clone(), project_id: project_id.into(), decision: p_str(params, "decision")?.into(), supersedes: p_list(params, "supersedes"), why: p_opt(params, "why").unwrap_or_default(),
             question_ids: p_list(params, "questionIds"), hypothesis_ids: p_list(params, "hypothesisIds"), experiment_ids: p_list(params, "experimentIds"), playtest_ids: p_list(params, "playtestIds"),
             evidence: p_list(params, "evidence"), rejected_alternatives: p_list(params, "rejectedAlternatives"), system_ids: p_list(params, "systemIds"),
             decided_by: p_opt(params, "decidedBy").unwrap_or_else(|| "human".into()), design_version: design.as_ref().map(|x| x.version).unwrap_or(0), created_at: now(),
@@ -1711,9 +1749,12 @@ impl Service {
                 }
                 if touched { design.updated_at = now(); store.put_design(&design)?; }
             }
-            self.emit_locked(&store, Event::new("decision.created", &d.decided_by).with(json!({"projectId": project_id, "decisionId": d.id, "decision": d.decision, "questions": d.question_ids, "systems": d.system_ids})));
+            self.emit_locked(&store, Event::new("decision.created", &d.decided_by).with(json!({"projectId": project_id, "decisionId": d.id, "decision": d.decision, "questions": d.question_ids, "systems": d.system_ids, "supersedes": d.supersedes})));
             Ok(())
         })?;
+        drop(store);
+        // Work under way that cites a decision this one replaces hears of it (FB-039).
+        if !d.supersedes.is_empty() { self.note_superseded(project_id, &d)?; }
         Ok(serde_json::to_value(d).unwrap())
     }
 
@@ -2352,10 +2393,22 @@ impl Service {
                         Ok(())
                     })?;
                 }
+                // The candidate's own .guild/guild.toml says what to run (the project's
+                // record can be older); one that changes its verifiers is checked with
+                // them, but never accepted without someone reading that change (FB-042).
+                let own_gates = match (&workspace, &candidate) {
+                    (Some(ws), Some(c)) => workspaces::git(Path::new(&ws.path), &["diff", "--name-only", &c.base_sha, &c.head_sha, "--", ".guild/guild.toml"]).is_ok_and(|out| !out.trim().is_empty()),
+                    _ => false,
+                };
                 if let (Some(ws), Some(p), Some(_)) = (&workspace, &project, &candidate) {
-                    if !p.verifiers.is_empty() {
+                    let verifiers = config::load(Path::new(&ws.path)).ok().flatten().map(|f| f.verifiers.iter().map(|v| v.to_verifier()).collect::<Vec<_>>()).unwrap_or_else(|| p.verifiers.clone());
+                    if !verifiers.is_empty() || own_gates {
                         self.move_attempt(attempt_id, AttemptState::Verifying, None)?;
-                        let results = self.run_verifiers(attempt_id, &attempt, p, ws);
+                        let mut results = self.run_verifiers(attempt_id, &attempt, &verifiers, ws);
+                        if own_gates {
+                            results.push(VerifierResult { id: "own-gates".into(), required: true, status: "needs-review".into(), exit_code: None, duration_ms: 0, log_artifact_id: None,
+                                tail: "the candidate changes .guild/guild.toml, so it was checked with its own verifiers: read that change in its diff before accepting it".into(), evidence: vec![] });
+                        }
                         let all_required_pass = results.iter().filter(|r| r.required).all(|r| r.status == "passed");
                         self.update_attempt(attempt_id, |a| a.verifier_results = results.clone())?;
                         // Back to submitted: acceptance is a decision, with the results in view.
@@ -2368,7 +2421,10 @@ impl Service {
                     }
                 }
                 // A choice left to the user goes to the orchestrator first, if the guild has one.
-                if candidate.is_some() && task.candidates <= 1 && task.strategy.selection() == Selection::User { self.ask_orchestrator(attempt_id, crate::orchestrator::DecisionKind::Candidate); }
+                if candidate.is_some() && task.candidates <= 1 && task.strategy.selection() == Selection::User {
+                    if own_gates { self.update_attempt(attempt_id, |a| a.escalation = Some("it changes its own verifiers (.guild/guild.toml): only you or the delegate accept that".into()))?; }
+                    else { self.ask_orchestrator(attempt_id, crate::orchestrator::DecisionKind::Candidate); }
+                }
                 self.settle_task(&task.id)
             }
             TurnOutcome::Failed { reason } => {
@@ -2534,9 +2590,9 @@ impl Service {
         Ok(())
     }
 
-    fn run_verifiers(&self, attempt_id: &str, attempt: &Attempt, project: &Project, workspace: &Workspace) -> Vec<VerifierResult> {
+    fn run_verifiers(&self, attempt_id: &str, attempt: &Attempt, verifiers: &[Verifier], workspace: &Workspace) -> Vec<VerifierResult> {
         let mut results = vec![];
-        for v in &project.verifiers {
+        for v in verifiers {
             self.emit(Event::new("verifier.started", "verifier").about_attempt(attempt).with(json!({"verifierId": v.id, "argv": v.argv})));
             let started = Instant::now();
             // A fresh folder for what the verifier wants seen, not only read:
@@ -4412,6 +4468,72 @@ mod tests {
         assert!(dec.question_ids.is_empty() && dec.why.contains("no longer answers Q-002"), "{dec:?}");
         assert!(service.handle("question.reopen", &json!({"projectId": "p", "questionId": "Q-002"})).is_err(), "already open");
         assert_eq!(service.snapshot().unwrap().questions.iter().filter(|q| q.status == "open").count(), 2);
+    }
+
+    #[test]
+    fn the_candidate_s_guild_toml_says_what_to_check_and_changing_it_needs_a_person() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let commit = |msg: &str| { workspaces::git(&repo, &["add", "-A"]).unwrap(); workspaces::git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg]).unwrap(); };
+        let toml = |id: &str, check: &str| format!("schema_version = 1\n[[verifiers]]\nid = \"{id}\"\nargv = [\"sh\", \"-c\", \"{check}\"]\nrequired = true\n");
+        std::fs::create_dir_all(repo.join(".guild")).unwrap();
+        std::fs::write(repo.join(".guild/guild.toml"), toml("old", "true")).unwrap();
+        commit("guild");
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        let mock = Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() }));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        // The project's verifiers changed in main after it was added (FB-016 needed it added again).
+        std::fs::write(repo.join(".guild/guild.toml"), toml("fresh", "test -f a.txt")).unwrap();
+        commit("fresh verifier");
+        let quest = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": quest, "id": "t1", "title": "A", "memberId": "aria"})).unwrap();
+        service.handle("task.create", &json!({"questId": quest, "id": "t2", "title": "B", "memberId": "aria", "dependsOn": ["t1"]})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest})).unwrap();
+        let snap = wait_for(&service, "t1 verified", |s| s.attempts.iter().any(|a| a.task_id == "t1" && !a.verifier_results.is_empty()));
+        let a = snap.attempts.iter().find(|a| a.task_id == "t1").unwrap();
+        assert_eq!(a.verifier_results.iter().map(|v| (v.id.as_str(), v.status.as_str())).collect::<Vec<_>>(), [("fresh", "passed")]);
+        // A candidate that changes its own verifiers (FB-042: it removed a check with the file it ran).
+        mock.set_behaviour(MockBehaviour::Succeed { file: ".guild/guild.toml".into(), content: toml("lenient", "true") });
+        service.handle("task.accept", &json!({"taskId": "t1", "integrate": true})).unwrap();
+        let snap = wait_for(&service, "t2 verified", |s| s.attempts.iter().any(|a| a.task_id == "t2" && a.verifier_results.len() == 2));
+        let a = snap.attempts.iter().find(|a| a.task_id == "t2").unwrap();
+        assert_eq!(a.verifier_results.iter().map(|v| (v.id.as_str(), v.status.as_str(), v.required)).collect::<Vec<_>>(), [("lenient", "passed", true), ("own-gates", "needs-review", true)]);
+        assert!(!passes_gates(a), "no policy or judge takes it");
+        assert!(a.escalation.as_deref().unwrap().contains("changes its own verifiers") && !a.deciding, "the orchestrator is not asked");
+        assert_eq!(snap.tasks.iter().find(|t| t.id == "t2").unwrap().state, TaskState::Verifying);
+    }
+
+    #[test]
+    fn a_decision_that_replaces_another_reaches_the_work_that_cites_it() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Hang);
+        let old = service.handle("decision.create", &json!({"projectId": "p", "decision": "Rent is paid first."})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "review", "title": "Review", "instructions": format!("Check the economy against {old}.")})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "other", "title": "Other", "instructions": "Nothing about rent."})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "review under way", |s| s.tasks.iter().any(|t| t.id == "review" && t.attempts_made > 0));
+        // FB-039: the reviewer counted the old rule as broken.
+        let new = service.handle("decision.create", &json!({"projectId": "p", "decision": "Food is paid first, then rent.", "supersedes": [old]})).unwrap();
+        let snap = service.snapshot().unwrap();
+        let review = snap.tasks.iter().find(|t| t.id == "review").unwrap();
+        assert_eq!(review.notes, [format!("{} replaces {old}: Food is paid first, then rent.", new["id"].as_str().unwrap())]);
+        assert!(snap.tasks.iter().find(|t| t.id == "other").unwrap().notes.is_empty(), "only what cites it");
+        assert_eq!(snap.design_decisions.iter().find(|d| d.id == new["id"]).unwrap().supersedes, [old]);
+    }
+
+    #[test]
+    fn waiting_without_a_quest_waits_on_every_quest_under_way() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        let call = |m: &str, p: Value| service.handle(m, &p).map_err(|e| e.message);
+        // FB-041: before, no questId failed only once the wait was over.
+        assert!(crate::mcp::run_tool("guild_wait", &json!({"timeoutSeconds": 5}), &call, &|_| {}).unwrap_err().contains("no quest under way"));
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "A"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let text = crate::mcp::run_tool("guild_wait", &json!({"timeoutSeconds": 30}), &call, &std::thread::sleep).unwrap();
+        assert!(text.starts_with("something needs you") && text.contains(&quest_id), "{text}");
     }
 
     #[test]
