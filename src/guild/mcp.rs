@@ -83,12 +83,14 @@ fn tools() -> Value {
                 "timeoutMinutes": {"type": "integer", "description": "How long an attempt may work on it (default the guild's, 30)"}}}}}}},
         {"name": "guild_wait", "description": "Block until a task of the quest needs you (candidate ready, permission asked, failed, blocked) or the quest ends, or until the timeout. Returns the quest's status.",
          "inputSchema": {"type": "object", "required": ["questId"], "properties": {"questId": {"type": "string"}, "timeoutSeconds": {"type": "integer", "description": "Default 300, at most 540"}}}},
-        {"name": "guild_task", "description": "One task in full: instructions, attempts, summaries, failures, verifier results, candidate size, pending permission and the end of the member's transcript.",
-         "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id}}},
+        {"name": "guild_task", "description": "One task in full: instructions, notes, attempts, failures, verifier results, candidate size, pending permission (whole command, file and whether it is inside the worktree) and the end of the member's transcript. full: true gives the member's whole last reply and every verifier's whole output.",
+         "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id, "full": {"type": "boolean"}}}},
+        {"name": "guild_note", "description": "Add to a task that already started: the member reads the note when its turn ends (one more turn in the same session); a retry and the orchestrator read it with the instructions.",
+         "inputSchema": {"type": "object", "required": ["taskId", "text"], "properties": {"taskId": task_id, "text": {"type": "string"}}}},
         {"name": "guild_diff", "description": "The diff of a task's latest candidate.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id}}},
-        {"name": "guild_decide", "description": "Decide on a task: accept (integrates the candidate into the quest's branch), reject (with a reason; the member retries if attempts remain), retry, or cancel.",
-         "inputSchema": {"type": "object", "required": ["taskId", "decision"], "properties": {"taskId": task_id, "decision": {"type": "string", "enum": ["accept", "reject", "retry", "cancel"]}, "reason": {"type": "string"}}}},
+        {"name": "guild_decide", "description": "Decide on a task: accept (integrates the candidate into the quest's branch), reject (with a reason; the member retries if attempts remain), retry (a candidate still waiting is rejected with the reason), or cancel. accept with attemptId and override: true takes a verified attempt that was failed (by the orchestrator, a judge or a reject).",
+         "inputSchema": {"type": "object", "required": ["taskId", "decision"], "properties": {"taskId": task_id, "decision": {"type": "string", "enum": ["accept", "reject", "retry", "cancel"]}, "reason": {"type": "string"}, "attemptId": {"type": "string"}, "override": {"type": "boolean"}}}},
         {"name": "guild_permission", "description": "Answer a member's pending permission request with one of its option ids (from guild_task).",
          "inputSchema": {"type": "object", "required": ["taskId", "optionId"], "properties": {"taskId": task_id, "optionId": {"type": "string"}}}},
     ])
@@ -171,6 +173,10 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 out.push_str(&format!("- {} ({} · {}) roles {} · {}\n", m.name, m.harness, m.model_id.as_deref().unwrap_or("default model"), m.roles.join(", "), if busy.contains(&m.id.as_str()) { "busy" } else { "free" }));
             }
             if snap.members.iter().all(|m| !m.enabled) { out.push_str("- none: add members in the guild window or with `guild member add`\n"); }
+            // Who turned a member on or off, so a change is never a mystery.
+            for m in &snap.members {
+                if let Some(sw) = &m.switched { out.push_str(&format!("  {} was {} by {} at {}\n", m.name, if sw.enabled { "enabled" } else { "disabled" }, sw.by, sw.at)); }
+            }
             let wanted = s("questId");
             for q in snap.quests.iter().filter(|q| wanted.as_ref().map_or(!matches!(q.state, QuestState::Completed | QuestState::Cancelled), |w| &q.id == w)) {
                 out.push_str(&quest_report(&snap, q));
@@ -222,28 +228,39 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
             let snap = snapshot(call)?;
             let task_id = need("taskId")?;
             let t = snap.tasks.iter().find(|t| t.id == task_id).ok_or_else(|| format!("no task {task_id}"))?;
+            let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
             let mut out = task_line(&snap, t);
             out.push_str(&format!("\ninstructions: {}\n", t.instructions));
+            for n in &t.notes { out.push_str(&format!("note: {n}\n")); }
             for ac in &t.acceptance { out.push_str(&format!("acceptance {}: {}\n", ac.id, ac.text)); }
+            if !t.granted.programs.is_empty() { out.push_str(&format!("allowed always for this task: {}\n", t.granted.programs.join(", "))); }
             for a in snap.attempts.iter().filter(|a| a.task_id == t.id) {
                 let member = snap.members.iter().find(|m| m.id == a.member_id).map(|m| m.name.as_str()).unwrap_or("?");
                 out.push_str(&format!("attempt {} by {member}: {:?}", a.id, a.state));
                 if let Some(c) = &a.candidate { out.push_str(&format!(" · candidate {} files +{} -{}", c.files_changed, c.insertions, c.deletions)); }
+                if let Some(f) = &a.failure { out.push_str(&format!(" · failure: {f}")); }
                 out.push('\n');
                 for v in &a.verifier_results {
-                    out.push_str(&format!("  verifier {} {}: {}\n", v.id, v.status, v.tail.lines().last().unwrap_or("")));
+                    // One line each by default; the whole output when asked (a suite prints one line per test).
+                    if full { out.push_str(&format!("  verifier {} {}:\n{}\n", v.id, v.status, v.tail.trim_end())); }
+                    else { out.push_str(&format!("  verifier {} {}: {}\n", v.id, v.status, v.tail.lines().last().unwrap_or(""))); }
                     for e in &v.evidence { out.push_str(&format!("    capture {e} (open it to see what the player sees)\n")); }
                 }
                 if let Some(p) = &a.pending_permission {
-                    out.push_str(&format!("  PERMISSION {}: {}\n", p.title, p.detail));
+                    let worktree = a.workspace_id.as_ref().and_then(|w| snap.workspaces.iter().find(|x| &x.id == w)).map(|w| w.path.as_str()).unwrap_or("");
+                    out.push_str(&format!("  PERMISSION {}\n", p.title));
+                    let what = crate::policy::describe(&p.title, &p.detail, worktree);
+                    if !what.is_empty() { out.push_str(&format!("    {what}\n")); }
+                    if !p.detail.trim().is_empty() { out.push_str(&format!("    detail: {}\n", p.detail.trim())); }
                     for o in &p.options { out.push_str(&format!("    option {} ({}, {})\n", o.id, o.name, o.kind)); }
                 }
             }
             if let Some(a) = latest_attempt(&snap, &t.id) {
-                if let Ok(r) = call("events.attempt", json!({"attemptId": a.id, "limit": 400})) {
+                if let Ok(r) = call("events.attempt", json!({"attemptId": a.id, "limit": if full { 20_000 } else { 400 }})) {
                     let text: String = r.as_array().into_iter().flatten().filter(|e| e["type"] == "turn.text").filter_map(|e| e["payload"]["text"].as_str()).collect::<Vec<_>>().join("");
-                    let tail: String = text.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
-                    if !tail.trim().is_empty() { out.push_str(&format!("member's last words:\n{tail}\n")); }
+                    let keep = if full { 60_000 } else { 2000 };
+                    let tail: String = text.chars().rev().take(keep).collect::<Vec<_>>().into_iter().rev().collect();
+                    if !tail.trim().is_empty() { out.push_str(&format!("member's {}:\n{tail}\n", if full { "whole last reply" } else { "last words (full: true for all of it)" })); }
                 }
             }
             Ok(out)
@@ -257,13 +274,17 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
             if crate::domain::cut(&mut text, 60_000) { text.push_str("\n… (truncated)"); }
             Ok(text)
         }
+        "guild_note" => {
+            let r = call("task.note", json!({"taskId": need("taskId")?, "text": need("text")?, "by": "delegate"}))?;
+            Ok(format!("noted ({} notes on the task): the member reads it when its turn ends", r["notes"].as_array().map(Vec::len).unwrap_or(0)))
+        }
         "guild_decide" => {
             let task_id = need("taskId")?;
             let reason = s("reason");
             let r = match need("decision")?.as_str() {
-                "accept" => call("task.accept", json!({"taskId": task_id, "integrate": true, "reason": reason}))?,
+                "accept" => call("task.accept", json!({"taskId": task_id, "integrate": true, "reason": reason, "attemptId": s("attemptId"), "override": args.get("override").and_then(Value::as_bool).unwrap_or(false)}))?,
                 "reject" => call("task.reject", json!({"taskId": task_id, "reason": reason}))?,
-                "retry" => call("task.retry", json!({"taskId": task_id}))?,
+                "retry" => call("task.retry", json!({"taskId": task_id, "reason": reason}))?,
                 "cancel" => call("task.cancel", json!({"taskId": task_id}))?,
                 other => return Err(format!("unknown decision {other}")),
             };

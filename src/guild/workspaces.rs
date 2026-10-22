@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(candidate.files_changed, 1);
         assert_ne!(candidate.head_sha, base);
         let quest = Quest { id: "q1".into(), project_id: "p".into(), title: "q".into(), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some(base.clone()), plan_version: 1, created_at: now(), updated_at: now() };
-        let task = Task { id: "t1".into(), quest_id: "q1".into(), title: "add file".into(), instructions: String::new(), acceptance: vec![], depends_on: vec![], role: "implementer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Accepted, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now() };
+        let task = Task { id: "t1".into(), quest_id: "q1".into(), title: "add file".into(), instructions: String::new(), acceptance: vec![], depends_on: vec![], role: "implementer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Accepted, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), version: 1, created_at: now(), updated_at: now() };
         let merged = integrate(&project, &quest, &candidate, &task).unwrap();
         assert_ne!(merged, base);
         let files = git(Path::new(&project.repo_path), &["ls-tree", "--name-only", &merged]).unwrap();

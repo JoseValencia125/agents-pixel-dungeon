@@ -176,6 +176,7 @@ impl HarnessAdapter for MockHarness {
                             detail: "The mock wants to write a file.".into(),
                             options: vec![
                                 PermissionOption { id: "allow".into(), name: "Allow".into(), kind: "allow_once".into() },
+                                PermissionOption { id: "always".into(), name: "Always allow".into(), kind: "allow_always".into() },
                                 PermissionOption { id: "deny".into(), name: "Deny".into(), kind: "reject_once".into() },
                             ],
                         });
@@ -248,7 +249,7 @@ impl HarnessAdapter for MockHarness {
             return Err(HarnessError::InvalidOutput(format!("no pending permission {request_id}")));
         };
         let (_, _, tx) = st.pending.remove(pos);
-        let _ = tx.send(option_id == Some("allow"));
+        let _ = tx.send(matches!(option_id, Some("allow" | "always")));
         Ok(())
     }
 }

@@ -59,7 +59,7 @@ mod tests {
         Task {
             id: id.into(), quest_id: "q".into(), title: id.into(), instructions: String::new(), acceptance: vec![],
             depends_on: deps.iter().map(|s| s.to_string()).collect(), role: "implementer".into(), member_id: None, model_id: None,
-            priority: 0, state, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now(),
+            priority: 0, state, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), version: 1, created_at: now(), updated_at: now(),
         }
     }
 
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn a_busy_member_is_skipped_and_a_named_one_is_honoured() {
-        let m = |id: &str, role: &str| Member { id: id.into(), name: id.into(), roles: vec![role.into()], harness: HarnessId::named("mock"), model_id: None, mode: None, role_prompt: String::new(), enabled: true };
+        let m = |id: &str, role: &str| Member { id: id.into(), name: id.into(), roles: vec![role.into()], harness: HarnessId::named("mock"), model_id: None, mode: None, role_prompt: String::new(), enabled: true, switched: None };
         let members = vec![m("a", "implementer"), m("b", "implementer"), m("r", "reviewer")];
         let t = task("t", &[], TaskState::Ready);
         assert_eq!(pick_member(&t, &members, &["a".into()], &[HarnessId::named("mock")]).unwrap().id, "b");
