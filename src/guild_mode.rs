@@ -306,11 +306,14 @@ fn design(ui: &mut Ui, snap: &Snapshot, project: Option<&Project>, wide: bool) -
     let questions: Vec<_> = snap.questions.iter().filter(|q| &q.project_id == pid).collect();
     let open: Vec<_> = questions.iter().filter(|q| q.status == "open").collect();
     let decisions: Vec<_> = snap.design_decisions.iter().filter(|x| &x.project_id == pid).collect();
+    if let Some(doc) = &d.doc { doc_banner(ui, doc, &tr("El diseño se edita en su Claude Doc: lo de aquí es la copia que leen los miembros.")); }
     ui.horizontal_wrapped(|ui| {
         ui.label(mono(&trf("versión {} · {}% maduro · {} preguntas abiertas · {} decisiones", &[&d.version, &guild::design::maturity_percent(d), &open.len(), &decisions.len()]), 10.5).color(DIM));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new(mono(&tr("Editar en la cámara"), 10.5).color(INK))).clicked() { edit = true; }
-        });
+        if d.doc.is_none() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Button::new(mono(&tr("Editar en la cámara"), 10.5).color(INK))).clicked() { edit = true; }
+            });
+        }
     });
     // A readable column in full screen, the whole width under the rooms.
     let column = if wide { ui.available_width().min(760.0) } else { ui.available_width() };
@@ -460,6 +463,12 @@ fn visual(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot, project: Option<&P
     let pid = project.id.clone();
     let empty = guild::design::VisualDirection::default();
     let v = snap.designs.iter().find(|d| d.project_id == pid).map(|d| &d.visual).unwrap_or(&empty);
+    // Kept in a Claude Doc: this is the members' copy, changed there.
+    if let Some(doc) = snap.designs.iter().find(|d| d.project_id == pid).and_then(|d| d.doc.as_ref()) {
+        doc_banner(ui, doc, &tr("La dirección visual se edita en su Claude Doc: suelta allí las imágenes y paletas. Lo de aquí es la copia que leen los miembros."));
+        visual_mirror(ui, &mut view.visual, v, wide);
+        return;
+    }
     // Files dropped anywhere on the window while this tab is open.
     let (hovering, dropped) = ui.ctx().input(|i| (!i.raw.hovered_files.is_empty(), i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>()));
     for path in dropped { view.command("visual.add", json!({"projectId": pid, "path": path.display().to_string()})); }
@@ -549,16 +558,71 @@ fn visual(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot, project: Option<&P
     for (method, params) in commands { view.command(method, params); }
 }
 
+/// Where the design is edited when a Claude delegate keeps it in a doc.
+fn doc_banner(ui: &mut Ui, doc: &guild::design::DesignDoc, what: &str) {
+    Frame::new().fill(Color32::from_rgba_unmultiplied(254, 174, 52, 18)).stroke(Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(254, 174, 52, 90))).corner_radius(CornerRadius::same(5)).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.label(mono(what, 11.0).color(INK));
+            if ui.add(egui::Button::new(mono(&tr("Abrir el doc"), 10.5).color(GOLD))).on_hover_text(doc.url.clone()).clicked() { ui.ctx().open_url(egui::OpenUrl::new_tab(&doc.url)); }
+        });
+        let synced = match (&doc.synced_rev, &doc.synced_at) {
+            (Some(rev), Some(at)) => trf("copia al día con la revisión {} del doc ({})", &[rev, &at.get(..16).unwrap_or(at).replace('T', " ")]),
+            _ => tr("el delegado aún no trae el doc a la guild"),
+        };
+        ui.label(mono(&synced, 10.0).color(DIM));
+    });
+    ui.add_space(6.0);
+}
+
+/// The visual direction as the members read it, nothing to change here.
+fn visual_mirror(ui: &mut Ui, state: &mut VisualState, v: &guild::design::VisualDirection, wide: bool) {
+    h2(ui, &tr("Notas de dirección"), None);
+    if v.notes.trim().is_empty() { missing(ui); } else { ui.label(mono(v.notes.trim(), 11.0).color(INK)); }
+    h2(ui, &trf("Paletas ({})", &[&v.palettes.len()]), None);
+    for p in &v.palettes {
+        ui.label(mono(&p.name, 11.5).strong().color(INK));
+        swatches(ui, state, &p.colors, 22.0);
+        ui.add_space(4.0);
+    }
+    h2(ui, &trf("Imágenes ({})", &[&v.images.len()]), None);
+    if v.images.is_empty() { missing(ui); }
+    let card = if wide { 200.0 } else { 160.0 };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+        for img in &v.images {
+            Frame::new().fill(Color32::from_rgba_unmultiplied(255, 255, 255, 6)).corner_radius(CornerRadius::same(4)).inner_margin(Margin::same(6)).show(ui, |ui| {
+                ui.set_width(card);
+                ui.vertical(|ui| {
+                    match thumbnail(ui.ctx(), state, &img.file) {
+                        Some(tex) => {
+                            let [w, h] = tex.size();
+                            let scale = (card / w as f32).min(card * 0.75 / h as f32);
+                            ui.image((tex.id(), vec2(w as f32 * scale, h as f32 * scale)));
+                        }
+                        None => { ui.label(mono(&tr("(no se puede mostrar)"), 10.0).color(DIM)); }
+                    }
+                    ui.label(mono(if img.caption.trim().is_empty() { &img.name } else { &img.caption }, 10.5).color(INK));
+                    swatches(ui, state, &img.colors, 16.0);
+                });
+            });
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Every piece of text one frame of a guild tab draws, on the demo guild.
-    fn texts_on(tab: Tab) -> String {
+    fn texts_on(tab: Tab) -> String { texts_with(tab, |_| {}) }
+
+    fn texts_with(tab: Tab, prepare: impl Fn(&mut GuildView)) -> String {
         let ctx = egui::Context::default();
         let mut view = GuildView::new(std::sync::Arc::new(|| {}));
         view.set_demo(true);
         view.poll();
+        prepare(&mut view);
         let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 6000.0))), ..Default::default() };
         let mut out = String::new();
         for _ in 0..2 {
@@ -575,6 +639,25 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_design_kept_in_a_claude_doc_is_read_here_and_edited_there() {
+        let link = |view: &mut GuildView| {
+            let snap = view.snapshot.as_mut().unwrap();
+            for d in &mut snap.designs { d.doc = Some(guild::design::DesignDoc { url: "https://claude.ai/artifact/VzVmi9VGcK1FLEStcbm4e6".into(), synced_rev: Some(308), synced_at: Some("2026-10-22T18:04:00Z".into()), ..Default::default() }); }
+        };
+        let design = texts_with(Tab::Design, link);
+        assert!(design.contains(&tr("Abrir el doc")) && design.contains(&tr("Concepto")), "{design}");
+        assert!(!design.contains(&tr("Editar en la cámara")), "no editing here once it is in the doc");
+        let visual = texts_with(Tab::Visual, link);
+        assert!(visual.contains(&tr("Abrir el doc")) && visual.contains("Papel y tinta"), "{visual}");
+        for gone in [tr("+ Paleta"), tr("× Quitar"), tr("+ Añadir archivos…")] { assert!(!visual.contains(&gone), "{gone} is edited in the doc"); }
+        // Without a doc the guild's tabs still edit.
+        assert!(texts_on(Tab::Visual).contains(&tr("+ Paleta")));
+        assert!(guild::design::is_doc_url("https://claude.ai/artifact/VzVmi9VGcK1FLEStcbm4e6?sk=x#a.b"));
+        assert!(guild::design::is_doc_url("https://claude.ai/code/artifact/Game-design-VzVmi9VGcK1FLEStcbm4e6"));
+        assert!(!guild::design::is_doc_url("https://example.com/artifact/VzVmi9VGcK1FLEStcbm4e6"));
     }
 
     #[test]

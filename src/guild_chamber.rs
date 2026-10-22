@@ -125,6 +125,8 @@ impl Draft {
             sections: self.sections.clone(),
             // The visual direction has its own tab: the chamber keeps it as it was.
             visual: self.visual_direction.clone(),
+            // Its doc too: a design sent without one keeps it.
+            doc: None,
             concept_maturity: self.concept_maturity, experience_maturity: self.experience_maturity, loops_maturity: self.loops_maturity,
             version: 0,
             updated_at: String::new(),

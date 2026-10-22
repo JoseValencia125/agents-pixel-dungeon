@@ -259,6 +259,11 @@ pub struct LivingGameDesign {
     /// The game's look: reference and concept images, palettes, notes.
     #[serde(default)]
     pub visual: VisualDirection,
+    /// Where the user edits the design and the visual direction, when a
+    /// Claude delegate keeps them in a Claude Doc; the guild's copy is then
+    /// its mirror, for the members.
+    #[serde(default)]
+    pub doc: Option<DesignDoc>,
     /// Maturity of the concept-level sections, set by the human.
     #[serde(default)]
     pub concept_maturity: Maturity,
@@ -270,6 +275,53 @@ pub struct LivingGameDesign {
     pub version: u32,
     #[serde(default)]
     pub updated_at: String,
+}
+
+/// A Claude Doc that holds the design (a tab) and the visual direction
+/// (another), and how far the guild's copy has caught up with it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DesignDoc {
+    pub url: String,
+    #[serde(default)]
+    pub linked_by: String,
+    #[serde(default)]
+    pub linked_at: String,
+    /// The doc's revision the guild's copy reflects.
+    #[serde(default)]
+    pub synced_rev: Option<u64>,
+    #[serde(default)]
+    pub synced_at: Option<String>,
+    /// The guild's design version at that moment: a later one is a change
+    /// the doc does not have yet.
+    #[serde(default)]
+    pub synced_version: Option<u32>,
+}
+
+/// What the guild settled that its doc does not show yet: a new design
+/// version, questions raised or answered, decisions taken since the last
+/// sync. Only what is settled — drafts never leave the doc, candidates
+/// never reach the design.
+pub fn doc_behind(d: &LivingGameDesign, questions: &[DesignQuestion], decisions: &[DesignDecision]) -> Vec<String> {
+    let Some(doc) = &d.doc else { return vec![] };
+    let since = doc.synced_at.clone().unwrap_or_else(|| doc.linked_at.clone());
+    let mut out = vec![];
+    if doc.synced_version.is_none_or(|v| d.version > v) { out.push(format!("design v{}{}", d.version, doc.synced_version.map(|v| format!(" (the doc has v{v})")).unwrap_or_default())); }
+    let mine = |p: &str| p == d.project_id;
+    let raised: Vec<&str> = questions.iter().filter(|q| mine(&q.project_id) && q.created_at > since).map(|q| q.id.as_str()).collect();
+    let answered: Vec<&str> = questions.iter().filter(|q| mine(&q.project_id) && q.resolved_at.as_ref().is_some_and(|at| *at > since)).map(|q| q.id.as_str()).collect();
+    let decided: Vec<&str> = decisions.iter().filter(|x| mine(&x.project_id) && x.created_at > since).map(|x| x.id.as_str()).collect();
+    for (label, ids) in [("questions raised", raised), ("questions answered", answered), ("decisions", decided)] {
+        if !ids.is_empty() { out.push(format!("{label} {}", ids.join(", "))); }
+    }
+    out
+}
+
+/// A Claude Doc's link, as claude.ai gives it (with or without a title
+/// before the id, a `code/` path, a share key or an anchor).
+pub fn is_doc_url(url: &str) -> bool {
+    let rest = url.strip_prefix("https://claude.ai/").or_else(|| url.strip_prefix("https://preview.claude.ai/")).unwrap_or("");
+    let rest = rest.strip_prefix("code/").unwrap_or(rest);
+    rest.strip_prefix("artifact/").is_some_and(|id| id.split(['?', '#', '/']).next().is_some_and(|id| id.len() >= 22))
 }
 
 /// The game's visual direction: what it should look like, shown rather
