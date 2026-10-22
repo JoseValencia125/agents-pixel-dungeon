@@ -1093,10 +1093,10 @@ fn demo_result(method: &str) -> Option<Value> {
 
 fn demo_snapshot(tick: usize) -> Snapshot {
     let t = now();
-    let member = |id: &str, name: &str, harness: HarnessKind, model: &str, role: &str| Member { id: id.into(), name: name.into(), roles: vec![role.into()], harness, model_id: Some(model.into()), mode: None, role_prompt: String::new(), enabled: true };
+    let member = |id: &str, name: &str, harness: HarnessKind, model: &str, role: &str| Member { id: id.into(), name: name.into(), roles: vec![role.into()], harness, model_id: Some(model.into()), mode: None, role_prompt: String::new(), enabled: true, switched: None };
     let task = |id: &str, title: &str, state: TaskState, deps: &[&str]| Task {
         id: id.into(), quest_id: "q1".into(), title: tr(title), instructions: String::new(), acceptance: vec![], depends_on: deps.iter().map(|s| s.to_string()).collect(), role: "implementer".into(),
-        member_id: None, model_id: None, priority: 0, state, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, version: 1, created_at: t.clone(), updated_at: t.clone(),
+        member_id: None, model_id: None, priority: 0, state, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), version: 1, created_at: t.clone(), updated_at: t.clone(),
     };
     let attempt = |id: &str, task: &str, member: &str, harness: HarnessKind, model: &str, state: AttemptState| Attempt {
         id: id.into(), task_id: task.into(), task_version: 1, quest_id: "q1".into(), project_id: "verbrawl".into(), member_id: member.into(), harness, model_requested: Some(model.into()), model_effective: Some(model.into()),

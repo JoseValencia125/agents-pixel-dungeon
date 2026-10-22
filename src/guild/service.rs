@@ -2063,9 +2063,24 @@ impl Service {
             slot.harness = member.harness.clone();
         }
         self.move_attempt(attempt_id, AttemptState::Running, None)?;
+        let notes_of = |s: &Service| s.store.lock().unwrap().task(&attempt.task_id).ok().flatten().map(|t| t.notes).unwrap_or_default();
+        let mut seen = notes_of(self).len();
         let handle = adapter.prompt(&session, attempt_id, prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
         self.emit(Event::new("turn.started", "guild").about_attempt(attempt).with(json!({"turnId": handle.turn_id, "promptChars": prompt.len()})));
-        let outcome = self.follow_turn(attempt_id, attempt, adapter, &session, handle);
+        let mut outcome = self.follow_turn(attempt_id, attempt, adapter, &session, handle);
+        // Notes added while it worked: one more turn in the same session takes them in.
+        for round in 1..=3 {
+            let done = matches!(&outcome, TurnOutcome::Completed { stop_reason } if stop_reason != "interrupted");
+            let notes = notes_of(self);
+            if attempt.kind != AttemptKind::Work || !done || notes.len() <= seen || self.cancel_requested(attempt_id) { break; }
+            let added: String = notes[seen..].iter().map(|n| format!("- {}\n", n.trim())).collect();
+            seen = notes.len();
+            let follow = format!("While you worked, the lead added to the task:\n{added}\nTake this into account now, in the same worktree, then finish with the updated summary.");
+            let Ok(handle) = adapter.prompt(&session, &format!("{attempt_id}-note{round}"), &follow) else { break };
+            let _ = self.update_attempt(attempt_id, |a| a.turns += 1);
+            self.emit(Event::new("turn.started", "guild").about_attempt(attempt).with(json!({"turnId": handle.turn_id, "promptChars": follow.len(), "notes": true})));
+            outcome = self.follow_turn(attempt_id, attempt, adapter, &session, handle);
+        }
         let stopped = adapter.stop(&session).unwrap_or(false);
         self.emit(Event::new("session.closed", "harness").about_attempt(attempt).with(json!({"confirmed": stopped})));
         self.finish_attempt_of(attempt_id, attempt.generation, outcome)
@@ -2226,12 +2241,18 @@ impl Service {
                 if let Some(r) = self.running.lock().unwrap().get_mut(attempt_id) { r.waiting_since.get_or_insert_with(Instant::now); }
                 self.emit(Event::new("permission.requested", "harness").about_attempt(attempt).with(json!({"requestId": request_id, "title": title, "detail": detail, "options": options})));
                 // Routine work in the worktree is answered at once; only the unusual waits.
-                let programs = self.project_of_attempt(attempt).map(|p| crate::policy::project_programs(&p)).unwrap_or_default();
-                let worktree = {
+                let mut programs = self.project_of_attempt(attempt).map(|p| crate::policy::project_programs(&p)).unwrap_or_default();
+                let (worktree, granted) = {
                     let store = self.store.lock().unwrap();
-                    store.attempt(attempt_id).ok().flatten().and_then(|a| a.workspace_id).and_then(|w| store.workspace(&w).ok().flatten()).map(|w| w.path).unwrap_or_default()
+                    let worktree = store.attempt(attempt_id).ok().flatten().and_then(|a| a.workspace_id).and_then(|w| store.workspace(&w).ok().flatten()).map(|w| w.path).unwrap_or_default();
+                    (worktree, store.task(&attempt.task_id).ok().flatten().map(|t| t.granted).unwrap_or_default())
                 };
-                let verdict = crate::policy::decide_request(&title, &detail, &programs, &worktree);
+                // What this task was already allowed does not ask again.
+                programs.extend(granted.programs.iter().cloned());
+                let verdict = match crate::policy::command_of(&title, &detail) {
+                    Some(cmd) if granted.commands.contains(&cmd) && crate::policy::decide_request(&title, &detail, &programs, &worktree) != crate::policy::Verdict::Refuse => crate::policy::Verdict::Allow,
+                    _ => crate::policy::decide_request(&title, &detail, &programs, &worktree),
+                };
                 if let Some(option) = crate::policy::option_for(&verdict, &title, &options) {
                     let by = if verdict == crate::policy::Verdict::Allow { "policy" } else { "policy-refused" };
                     if let Err(e) = self.permission_respond(&json!({"attemptId": attempt_id, "requestId": request_id, "optionId": option, "by": by})) {
@@ -2435,7 +2456,9 @@ impl Service {
             Permission => {
                 let p = attempt.pending_permission.clone().ok_or_else(|| ApiError::conflict("the permission was answered already"))?;
                 let options: Vec<String> = p.options.iter().map(|o| format!("{} ({})", o.name, o.kind)).collect();
-                format!("{worker} asks for a permission while working in its worktree {} (its scratch folder: {}):\n\n```\n{}\n```\n{}\n\nIts harness offers: {}.", workspace.map(|w| w.path).unwrap_or_default(), crate::paths::scratch_dir(&attempt.id).display(), p.title.trim(), p.detail.trim(), options.join(", "))
+                let worktree = workspace.map(|w| w.path).unwrap_or_default();
+                let what = crate::policy::describe(&p.title, &p.detail, &worktree);
+                format!("{worker} asks for a permission while working in its worktree {worktree} (its scratch folder: {}):\n\n```\n{}\n```\n{what}\n{}\n\nIts harness offers: {}.", crate::paths::scratch_dir(&attempt.id).display(), p.title.trim(), p.detail.trim(), options.join(", "))
             }
             Candidate => {
                 let mut diff = attempt.candidate.as_ref().and_then(|c| c.diff_artifact_id.clone()).and_then(|id| self.artifact_text(&id).ok()).unwrap_or_default();
@@ -2451,7 +2474,7 @@ impl Service {
             Failure => format!("The task ran out of attempts ({} of {}). The last one, by {worker}, failed: {}\n\nIts last words: {}", task.attempts_made, task.max_attempts, attempt.failure.clone().unwrap_or_default(), attempt.summary.trim()),
         };
         let prompt = crate::orchestrator::decision_prompt(kind, &task, &worker, &context, design.as_ref());
-        let text = self.one_turn(&project, &steward, &config::default_role_prompt("orchestrator"), &prompt, Duration::from_secs(300))?;
+        let text = self.one_turn(&project, &steward, &config::default_role_prompt("orchestrator"), &prompt, Duration::from_secs(120))?;
         crate::orchestrator::parse_ruling(&text, kind).ok_or_else(|| ApiError::new("orchestrator", "its answer had no decision"))
     }
 
@@ -2742,6 +2765,7 @@ impl Service {
             "quest.create" => self.quest_create(params),
             "task.create" => self.task_create(params),
             "task.update" => self.task_update(params),
+            "task.note" => self.task_note(params),
             "quest.start" => self.quest_start(params),
             "quest.sync" => self.quest_sync(params),
             "quest.pause" => self.quest_set(params, QuestState::Paused, &[QuestState::Running]),
@@ -2804,7 +2828,10 @@ impl Service {
         let mut members = 0;
         if let Some(f) = &file {
             for m in &f.members {
-                store.put_member(&m.to_member())?;
+                let mut member = m.to_member();
+                // Re-adding the project keeps who the user turned off (FB-024).
+                if let Some(old) = store.member(&member.id)? { member.enabled = old.enabled; member.switched = old.switched; }
+                store.put_member(&member)?;
                 members += 1;
             }
         }
@@ -2858,9 +2885,13 @@ impl Service {
         if params.get("roles").is_some() { let roles = p_list(params, "roles"); if !roles.is_empty() { m.roles = roles; } }
         if params.get("model").is_some() { m.model_id = p_opt(params, "model"); }
         if params.get("mode").is_some() { m.mode = p_opt(params, "mode"); }
-        if let Some(e) = params.get("enabled").and_then(Value::as_bool) { m.enabled = e; }
+        let by = p_opt(params, "by").unwrap_or_else(|| "user".into());
+        if let Some(e) = params.get("enabled").and_then(Value::as_bool).filter(|e| *e != m.enabled) {
+            m.enabled = e;
+            m.switched = Some(Switched { enabled: e, by: by.clone(), at: now() });
+        }
         store.put_member(&m)?;
-        self.emit_locked(&store, Event::new("member.updated", "user").with(json!({"memberId": m.id, "harness": m.harness, "model": m.model_id, "roles": m.roles})));
+        self.emit_locked(&store, Event::new("member.updated", "user").with(json!({"memberId": m.id, "harness": m.harness, "model": m.model_id, "roles": m.roles, "enabled": m.enabled, "by": by})));
         Ok(serde_json::to_value(m).unwrap())
     }
 
@@ -3194,6 +3225,7 @@ impl Service {
             mode: p_opt(params, "mode"),
             role_prompt: p_opt(params, "prompt").unwrap_or_default(),
             enabled: true,
+            switched: None,
         };
         let store = self.store.lock().unwrap();
         self.atomic(&store, || {
@@ -3257,6 +3289,8 @@ impl Service {
             timeout_minutes: params.get("timeoutMinutes").and_then(Value::as_u64).filter(|m| *m > 0).map(|m| m as u32),
             strategy,
             winner_attempt_id: None,
+            notes: vec![],
+            granted: Default::default(),
             version: 1,
             created_at: now(),
             updated_at: now(),
@@ -3307,6 +3341,29 @@ impl Service {
         self.atomic(&store, || {
             store.put_task(&task)?;
             self.emit_locked(&store, Event::new("task.updated", "user").about_task(&task, &quest.project_id).with(json!({"title": task.title, "dependsOn": task.depends_on, "version": task.version})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(task).unwrap())
+    }
+
+    /// Add to a task that already started: the member working on it reads
+    /// the note when its turn ends (one more turn in the same session), and
+    /// a retry or the orchestrator read it with the instructions.
+    fn task_note(&self, params: &Value) -> ApiResult {
+        let task_id = p_str(params, "taskId")?;
+        let text = p_str(params, "text")?.trim().to_string();
+        let store = self.store.lock().unwrap();
+        let mut task = store.task(task_id)?.ok_or_else(|| ApiError::not_found(format!("task {task_id}")))?;
+        if matches!(task.state, TaskState::Completed | TaskState::Cancelled | TaskState::Integrating) {
+            return Err(ApiError::conflict(format!("task {task_id} is {:?}: a note would reach nobody", task.state)));
+        }
+        let quest = store.quest(&task.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
+        task.notes.push(text.clone());
+        task.version += 1;
+        task.updated_at = now();
+        self.atomic(&store, || {
+            store.put_task(&task)?;
+            self.emit_locked(&store, Event::new("task.noted", p_opt(params, "by").as_deref().unwrap_or("user")).about_task(&task, &quest.project_id).with(json!({"text": text, "notes": task.notes.len()})));
             Ok(())
         })?;
         Ok(serde_json::to_value(task).unwrap())
@@ -3404,6 +3461,20 @@ impl Service {
 
     fn task_retry(self: &Arc<Service>, params: &Value) -> ApiResult {
         let task_id = p_str(params, "taskId")?;
+        // A candidate still waiting keeps its member busy: retrying it is
+        // rejecting it, so the new attempt can start.
+        if self.latest_submitted(task_id).is_ok() {
+            {
+                let store = self.store.lock().unwrap();
+                let mut task = store.task(task_id)?.ok_or_else(|| ApiError::not_found(format!("task {task_id}")))?;
+                if task.attempts_made >= task.max_attempts { task.max_attempts = task.attempts_made + 1; task.version += 1; task.updated_at = now(); store.put_task(&task)?; }
+            }
+            let reason = p_opt(params, "reason").unwrap_or_else(|| "retried by user".into());
+            let mut reject = json!({"taskId": task_id, "reason": reason});
+            if let Some(id) = p_opt(params, "attemptId") { reject["attemptId"] = json!(id); }
+            self.task_reject(&reject)?;
+            return Ok(serde_json::to_value(self.store.lock().unwrap().task(task_id)?).unwrap());
+        }
         {
             let store = self.store.lock().unwrap();
             let mut task = store.task(task_id)?.ok_or_else(|| ApiError::not_found(format!("task {task_id}")))?;
@@ -3486,15 +3557,28 @@ impl Service {
         };
         let adapter = self.adapter(harness)?;
         adapter.respond_permission(&session, request_id, option.as_deref()).map_err(|e| ApiError::new("harness", e.to_string()))?;
+        let by = p_opt(params, "by").unwrap_or_else(|| "user".into());
         let store = self.store.lock().unwrap();
         self.atomic(&store, || {
             let mut a = store.attempt(attempt_id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
+            // A command the orchestrator or the user allowed is allowed for the
+            // rest of the task as it is; one the user allowed always, by program.
+            if let (false, Some(p)) = (by.starts_with("policy"), a.pending_permission.as_ref().filter(|p| p.request_id == request_id)) {
+                let kind = p.options.iter().find(|o| Some(&o.id) == option.as_ref()).map(|o| o.kind.as_str()).unwrap_or("");
+                if let (true, Some(cmd), Some(mut task)) = (kind.starts_with("allow"), crate::policy::command_of(&p.title, &p.detail), store.task(&a.task_id)?) {
+                    let before = task.granted.clone();
+                    if !task.granted.commands.contains(&cmd) && task.granted.commands.len() < 200 { task.granted.commands.push(cmd.clone()); }
+                    if kind == "allow_always" && by != "orchestrator" {
+                        for program in crate::policy::trusted_programs(&cmd) { if !task.granted.programs.contains(&program) { task.granted.programs.push(program); } }
+                    }
+                    if task.granted != before { task.updated_at = now(); store.put_task(&task)?; }
+                }
+            }
             a.pending_permission = None;
             a.escalation = None;
             a.updated_at = now();
             store.put_attempt(&a)?;
             let _ = self.move_attempt_locked(&store, attempt_id, AttemptState::Running, None);
-            let by = p_opt(params, "by").unwrap_or_else(|| "user".into());
             self.emit_locked(&store, Event::new("permission.resolved", if by.starts_with("policy") { "policy" } else if by == "orchestrator" { "orchestrator" } else { "user" }).about_attempt(&a).with(json!({"requestId": request_id, "optionId": option, "by": by})));
             Ok(())
         })?;
@@ -3513,6 +3597,10 @@ impl Service {
 
     fn task_accept(self: &Arc<Service>, params: &Value) -> ApiResult {
         let task_id = p_str(params, "taskId")?;
+        if params.get("override").and_then(Value::as_bool).unwrap_or(false) {
+            let id = p_opt(params, "attemptId").ok_or_else(|| ApiError::invalid("override needs the attempt to accept"))?;
+            self.revive_candidate(task_id, &id)?;
+        }
         let attempt = match p_opt(params, "attemptId") { Some(id) => id, None => self.latest_submitted(task_id)?.id };
         {
             let store = self.store.lock().unwrap();
@@ -3534,6 +3622,29 @@ impl Service {
             return self.task_integrate(task_id);
         }
         Ok(json!({"accepted": task_id, "attemptId": attempt.id}))
+    }
+
+    /// The user overrides a verdict: an attempt that passed its required
+    /// verifiers but was failed (by the orchestrator, a judge or a reject)
+    /// is a candidate again. A retry already running is cancelled first.
+    fn revive_candidate(&self, task_id: &str, attempt_id: &str) -> Res<()> {
+        let store = self.store.lock().unwrap();
+        self.atomic(&store, || {
+            let mut a = store.attempt(attempt_id)?.filter(|a| a.task_id == task_id && a.kind == AttemptKind::Work).ok_or_else(|| ApiError::not_found(format!("attempt {attempt_id} of {task_id}")))?;
+            if a.state != AttemptState::Failed { return Ok(()); }
+            if !passes_gates(&a) { return Err(ApiError::conflict("that attempt did not pass its required verifiers: only a verified candidate can be accepted over a failure")); }
+            if store.attempts_of_task(task_id)?.iter().any(|o| o.kind == AttemptKind::Work && o.state.is_active() && !matches!(o.state, AttemptState::Submitted | AttemptState::Verifying)) {
+                return Err(ApiError::conflict("a retry of this task is running: cancel it first (guild cancel <attempt>)"));
+            }
+            let failure = a.failure.take();
+            a.state = AttemptState::Submitted;
+            a.finished_at = None;
+            a.updated_at = now();
+            store.put_attempt(&a)?;
+            self.emit_locked(&store, Event::new("candidate.revived", "user").about_attempt(&a).with(json!({"failure": failure})));
+            if store.task(task_id)?.is_some_and(|t| t.state != TaskState::Verifying) { self.move_task_locked(&store, task_id, TaskState::Verifying, None)?; }
+            Ok(())
+        })
     }
 
     fn task_reject(self: &Arc<Service>, params: &Value) -> ApiResult {
@@ -3699,6 +3810,10 @@ fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design:
     s.push_str(&task.title);
     s.push_str("\n\n");
     s.push_str(task.instructions.trim());
+    if !task.notes.is_empty() {
+        s.push_str("\n\n## Notes the lead added after the task started\n");
+        for n in &task.notes { s.push_str(&format!("- {}\n", n.trim())); }
+    }
     if !task.acceptance.is_empty() {
         s.push_str("\n\n## Acceptance criteria\n");
         for ac in &task.acceptance {
@@ -4162,6 +4277,92 @@ mod tests {
     }
 
     #[test]
+    fn what_was_allowed_for_a_task_is_not_asked_again() {
+        let (_home, service, quest_id) = setup(MockBehaviour::AskPermission { file: "x.txt".into(), content: "x".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Ask first", "maxAttempts": 3})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "waiting", |s| s.attempts.first().is_some_and(|a| a.state == AttemptState::WaitingInput));
+        let a = &snap.attempts[0];
+        // The user allows it always (FB-018): Kiro would forget it in the next session; the guild does not.
+        service.handle("permission.respond", &json!({"attemptId": a.id, "requestId": "perm-1", "optionId": "always"})).unwrap();
+        let snap = wait_for(&service, "submitted", |s| s.attempts[0].state == AttemptState::Submitted);
+        let granted = &snap.tasks[0].granted;
+        assert_eq!((granted.commands.clone(), granted.programs.clone()), (vec!["mock-install x.txt".to_string()], vec!["mock-install".to_string()]));
+        // The retry asks the same: answered at once, by the policy.
+        service.handle("task.retry", &json!({"taskId": "t1", "reason": "once more"})).unwrap();
+        let first = a.id.clone();
+        let snap = wait_for(&service, "second submitted", |s| s.attempts.iter().any(|x| x.id != first && x.state == AttemptState::Submitted));
+        let second = snap.attempts.iter().find(|x| x.id != first).unwrap();
+        let events = service.handle("events.attempt", &json!({"attemptId": second.id})).unwrap();
+        let resolved: Vec<&Value> = events.as_array().unwrap().iter().filter(|e| e["type"] == "permission.resolved").collect();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0]["payload"]["by"], "policy");
+        assert_eq!(resolved[0]["payload"]["optionId"], "allow", "allowed once each time: the harness keeps nothing");
+    }
+
+    #[test]
+    fn retrying_a_waiting_candidate_rejects_it_and_starts_again() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "A", "maxAttempts": 1})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "candidate", |s| s.tasks[0].state == TaskState::Verifying);
+        let first = snap.attempts[0].id.clone();
+        // FB-019: the candidate kept its member busy, so the task sat Ready.
+        service.handle("task.retry", &json!({"taskId": "t1", "reason": "use b"})).unwrap();
+        let snap = wait_for(&service, "second candidate", |s| s.attempts.len() == 2 && s.tasks[0].state == TaskState::Verifying);
+        let old = snap.attempts.iter().find(|a| a.id == first).unwrap();
+        assert_eq!((old.state, old.failure.as_deref()), (AttemptState::Failed, Some("use b")));
+        assert_eq!(snap.tasks[0].max_attempts, 2);
+    }
+
+    #[test]
+    fn the_user_can_accept_a_verified_attempt_the_orchestrator_failed() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "A", "maxAttempts": 1})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "candidate", |s| s.tasks[0].state == TaskState::Verifying);
+        let good = snap.attempts[0].id.clone();
+        service.handle("task.reject", &json!({"taskId": "t1", "attemptId": good, "reason": "the orchestrator: no evidence"})).unwrap();
+        wait_for(&service, "failed", |s| s.tasks[0].state == TaskState::Failed);
+        // Without --override a failed attempt stays failed (FB-017).
+        assert!(service.handle("task.accept", &json!({"taskId": "t1", "attemptId": good})).is_err());
+        service.handle("task.accept", &json!({"taskId": "t1", "attemptId": good, "override": true, "integrate": true})).unwrap();
+        let snap = wait_for(&service, "integrated", |s| s.tasks[0].state == TaskState::Completed);
+        assert_eq!(snap.attempts[0].state, AttemptState::Passed);
+        assert_eq!(snap.tasks[0].winner_attempt_id.as_deref(), Some(good.as_str()));
+    }
+
+    #[test]
+    fn a_note_on_a_running_task_reaches_the_member_before_it_finishes() {
+        let (_home, service, quest_id) = setup(MockBehaviour::AskPermission { file: "x.txt".into(), content: "x".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Ask first"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "waiting", |s| s.attempts.first().is_some_and(|a| a.state == AttemptState::WaitingInput));
+        // FB-026: three new points while it works.
+        service.handle("task.note", &json!({"taskId": "t1", "text": "also cover the empty case"})).unwrap();
+        service.handle("permission.respond", &json!({"attemptId": snap.attempts[0].id, "requestId": "perm-1", "optionId": "allow"})).unwrap();
+        let snap = wait_for(&service, "submitted", |s| s.attempts[0].state == AttemptState::Submitted);
+        assert_eq!(snap.attempts[0].turns, 2, "one more turn in the same session for the note");
+        assert_eq!(snap.tasks[0].notes, ["also cover the empty case"]);
+        assert!(service.handle("task.note", &json!({"taskId": "t1", "text": " "})).is_err());
+    }
+
+    #[test]
+    fn re_adding_the_project_keeps_a_member_the_user_turned_off() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        std::fs::create_dir_all(repo.join(".guild")).unwrap();
+        std::fs::write(repo.join(".guild/guild.toml"), "schema_version = 1\n[[members]]\nid = \"oro\"\nroles = [\"orchestrator\"]\nharness = \"mock\"\n").unwrap();
+        let service = Service::new(Store::open_in_memory().unwrap(), Settings::default());
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.update", &json!({"memberId": "oro", "enabled": false, "by": "delegate"})).unwrap();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        let m = service.snapshot().unwrap().members.into_iter().find(|m| m.id == "oro").unwrap();
+        assert!(!m.enabled, "FB-024");
+        assert_eq!(m.switched.map(|s| (s.enabled, s.by)), Some((false, "delegate".to_string())));
+    }
+
+    #[test]
     fn waiting_for_a_permission_does_not_count_against_the_time_limit() {
         let home = TempHome::new();
         let repo = home.repo();
@@ -4440,7 +4641,7 @@ mod tests {
         assert_eq!(saved["version"], 2);
         assert_eq!(saved["loops"][2]["id"], "loop-3");
         let design: crate::design::GameDesign = serde_json::from_value(saved).unwrap();
-        let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, version: 1, created_at: now(), updated_at: now() };
+        let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), version: 1, created_at: now(), updated_at: now() };
         let ws = Workspace { id: "w".into(), attempt_id: "a".into(), project_id: design.project_id.clone(), path: "/tmp/w".into(), branch: "guild/x".into(), base_sha: "0".into(), state: WorkspaceState::Ready, created_at: now(), updated_at: now() };
         let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design), &[], Carried::Nothing);
         assert!(prompt.contains("Avoid: a dominant strategy; always choosing the longest word; obvious decisions; grinding"));

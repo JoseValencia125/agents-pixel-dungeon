@@ -50,6 +50,7 @@ USAGE
                                      [--role R] [--member ID] [--model M] [--priority N] [--max-attempts N] [--id ID]
                                      [--strategy single|reviewed|race] [--candidates N] [--select policy|judge|user] [--auto-integrate] [--timeout MIN]
                                      a race runs N members at once; the selection picks among the candidates that passed the verifiers
+  guild task note <task> <text>      add to a task that already started: the member reads it when its turn ends, a retry with the instructions
   guild task set <task> [--title T] [--instructions TEXT] [--accept TEXT]... [--depends ID,ID | --no-depends] [--role R] [--member ID] [--priority N] [--timeout MIN]
                                      change a task nobody has started yet; --accept replaces the criteria
   guild decisions <task>             how each candidate was chosen: by the policy, a judge or you
@@ -91,10 +92,11 @@ USAGE
   guild records [--project ID] [--task ID]   one row per finished attempt: strategy, member, harness, model, duration, size, verifiers, judge score, winner
   guild start <quest>  |  guild pause <quest>  |  guild resume <quest>  |  guild cancel-quest <quest>
 
-  guild accept <task> [--integrate] [--attempt ID]  the latest (or that) candidate passes; --integrate squashes it into the quest branch
+  guild accept <task> [--integrate] [--attempt ID [--override]]  the latest (or that) candidate passes; --integrate squashes it into the quest branch;
+                                     --override accepts a verified attempt that was failed (by the orchestrator, a judge or a reject)
   guild reject <task> [--reason TEXT]
   guild integrate <task>
-  guild retry <task>  |  guild cancel-task <task>  |  guild cancel <attempt>
+  guild retry <task> [--reason TEXT]  a candidate still waiting is rejected with the reason  |  guild cancel-task <task>  |  guild cancel <attempt>
   guild interrupt <attempt>          end the turn now; what the worktree has becomes the candidate
   guild permission <attempt> <option-id|deny>
   guild attempt <attempt>            the attempt, its candidate, verifiers and transcript
@@ -187,7 +189,7 @@ fn parse(args: &[String]) -> Args<'_> {
     Args { positional, flags }
 }
 
-fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground" | "detach" | "enable" | "disable" | "no-depends") }
+fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground" | "detach" | "enable" | "disable" | "no-depends" | "override" | "full") }
 
 impl Args<'_> {
     fn flag(&self, name: &str) -> Option<&str> { self.flags.iter().rev().find(|(k, _)| *k == name).and_then(|(_, v)| *v) }
@@ -497,6 +499,11 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             println!("quest {} · {}", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""));
             Ok(())
         }
+        "task" if a.positional.first().copied() == Some("note") => {
+            let r = call(&ensure_running()?, "task.note", json!({"taskId": a.pos(1, "task")?, "text": a.pos(2, "note")?}))?;
+            println!("task {} · {} notes · the member reads it when its turn ends", r["id"].as_str().unwrap_or(""), r["notes"].as_array().map(Vec::len).unwrap_or(0));
+            Ok(())
+        }
         "task" if a.positional.first().copied() == Some("set") => {
             let mut params = json!({"taskId": a.pos(1, "task")?});
             for (flag, key) in [("title", "title"), ("instructions", "instructions"), ("role", "role"), ("member", "memberId")] { if let Some(v) = a.flag(flag) { params[key] = json!(v); } }
@@ -531,7 +538,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "accept" => {
-            let r = call(&ensure_running()?, "task.accept", json!({"taskId": a.pos(0, "task")?, "integrate": a.has("integrate"), "attemptId": a.flag("attempt")}))?;
+            let r = call(&ensure_running()?, "task.accept", json!({"taskId": a.pos(0, "task")?, "integrate": a.has("integrate"), "attemptId": a.flag("attempt"), "override": a.has("override"), "reason": a.flag("reason")}))?;
             println!("{}", summarize(&r));
             Ok(())
         }
@@ -546,7 +553,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "retry" => {
-            let r = call(&ensure_running()?, "task.retry", json!({"taskId": a.pos(0, "task")?}))?;
+            let r = call(&ensure_running()?, "task.retry", json!({"taskId": a.pos(0, "task")?, "reason": a.flag("reason")}))?;
             println!("task {} · attempt {} of {}", r["state"].as_str().unwrap_or(""), r["attempts_made"], r["max_attempts"]);
             Ok(())
         }

@@ -177,6 +177,14 @@ pub struct Task {
     /// The candidate that won, once decided.
     #[serde(default)]
     pub winner_attempt_id: Option<String>,
+    /// Notes added after the task started: the member reads them in its
+    /// next turn, a retry and the orchestrator read them too.
+    #[serde(default)]
+    pub notes: Vec<String>,
+    /// What the orchestrator or the user already allowed for this task, so
+    /// its attempts do not ask again.
+    #[serde(default)]
+    pub granted: Granted,
     pub version: u32,
     pub created_at: String,
     pub updated_at: String,
@@ -195,6 +203,17 @@ pub struct Member {
     #[serde(default)]
     pub role_prompt: String,
     pub enabled: bool,
+    /// Who last enabled or disabled it, and when: a member that comes back
+    /// on is never a mystery.
+    #[serde(default)]
+    pub switched: Option<Switched>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Switched {
+    pub enabled: bool,
+    pub by: String,
+    pub at: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,6 +448,16 @@ pub struct PermissionOption {
     pub kind: String,
 }
 
+/// Permissions granted for a task: commands allowed as they are (by the
+/// orchestrator or the user), and programs the user allowed always.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Granted {
+    #[serde(default)]
+    pub commands: Vec<String>,
+    #[serde(default)]
+    pub programs: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PermissionRequest {
     pub request_id: String,
@@ -623,6 +652,8 @@ pub fn task_transition(from: TaskState, to: TaskState) -> Result<(), String> {
             | (Integrating, Completed) | (Integrating, Blocked) | (Integrating, Accepted)
             | (Blocked, Pending) | (Blocked, Ready) | (Blocked, Accepted) | (Blocked, Failed) | (Blocked, Cancelled)
             | (Failed, Ready) | (Failed, Pending)
+            // A failed verdict the user overrides (`accept --override`).
+            | (Failed, Verifying) | (Ready, Verifying) | (Blocked, Verifying)
     );
     if ok || from == to { Ok(()) } else { Err(format!("task cannot go from {from:?} to {to:?}")) }
 }
@@ -717,7 +748,7 @@ mod tests {
         Task {
             id: id.into(), quest_id: "q".into(), title: id.into(), instructions: String::new(), acceptance: vec![],
             depends_on: deps.iter().map(|s| s.to_string()).collect(), role: "implementer".into(), member_id: None, model_id: None,
-            priority: 0, state: TaskState::Pending, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, version: 1,
+            priority: 0, state: TaskState::Pending, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), version: 1,
             created_at: now(), updated_at: now(),
         }
     }

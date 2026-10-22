@@ -383,7 +383,7 @@ mod tests {
     fn a_failed_transaction_rolls_back_the_entity_and_the_event() {
         let mut store = Store::open_in_memory().unwrap();
         let result: StoreResult<()> = store.transaction(|s| {
-            s.put_member(&Member { id: "m".into(), name: "M".into(), roles: vec![], harness: HarnessId::named("mock"), model_id: None, mode: None, role_prompt: String::new(), enabled: true })?;
+            s.put_member(&Member { id: "m".into(), name: "M".into(), roles: vec![], harness: HarnessId::named("mock"), model_id: None, mode: None, role_prompt: String::new(), enabled: true, switched: None })?;
             s.append(Event::new("x", "guild"))?;
             Err("boom".into())
         });

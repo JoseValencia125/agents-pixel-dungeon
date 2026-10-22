@@ -49,6 +49,9 @@ struct Inner {
     /// Permission requests the agent is waiting on: our request id → JSON-RPC id.
     permissions: HashMap<String, Value>,
     tools: HashMap<String, (String, String)>,
+    /// Each tool call's input (the command, the file and its text): Kiro's
+    /// permission request names only the call, so this is its detail.
+    inputs: HashMap<String, Value>,
     config_options: Value,
     models: Vec<ModelOption>,
     closed: bool,
@@ -217,6 +220,7 @@ fn handle_notification(method: &str, msg: &Value, inner: &Arc<Mutex<Inner>>) {
             let tool_kind = update.get("kind").and_then(Value::as_str).map(str::to_string).or(known.map(|k| k.1)).unwrap_or_else(|| "other".into());
             let status = update.get("status").and_then(Value::as_str).unwrap_or(if kind == "tool_call" { "pending" } else { "in_progress" }).to_string();
             guard.tools.insert(id.clone(), (title.clone(), tool_kind.clone()));
+            if let Some(input) = update.get("rawInput").filter(|v| v.is_object()) { guard.inputs.insert(id.clone(), input.clone()); }
             let action = action_for_tool(&tool_kind, &title).to_string();
             let paths: Vec<String> = update.get("locations").and_then(Value::as_array).into_iter().flatten()
                 .filter_map(|l| l.get("path").and_then(Value::as_str)).map(str::to_string).collect();
@@ -240,12 +244,20 @@ fn handle_notification(method: &str, msg: &Value, inner: &Arc<Mutex<Inner>>) {
     let _ = turn.send(event);
 }
 
+/// What a permission is about: the input of the tool call it names (Kiro
+/// sends that in the earlier `tool_call` update, not in the request).
+fn permission_detail(tool: &Value, inputs: &HashMap<String, Value>) -> String {
+    let id = tool.get("toolCallId").and_then(Value::as_str).unwrap_or("");
+    tool.get("rawInput").filter(|v| v.is_object()).or_else(|| inputs.get(id)).map(|v| v.to_string())
+        .or_else(|| tool.get("content").map(|v| v.to_string())).unwrap_or_default()
+}
+
 fn handle_request(method: &str, id: Value, msg: &Value, inner: &Arc<Mutex<Inner>>, proc: &Arc<Proc>) {
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     if method == "session/request_permission" {
         let tool = params.get("toolCall").cloned().unwrap_or(Value::Null);
         let title = tool.get("title").and_then(Value::as_str).unwrap_or("Permission").to_string();
-        let detail = tool.get("rawInput").map(|v| v.to_string()).or_else(|| tool.get("content").map(|v| v.to_string())).unwrap_or_default();
+        let detail = permission_detail(&tool, &inner.lock().unwrap().inputs);
         let options: Vec<PermissionOption> = params
             .get("options")
             .and_then(Value::as_array)
@@ -542,6 +554,23 @@ mod tests {
         let v2 = json!({"models": {"currentModelId": "auto", "availableModels": [{"modelId": "gpt-5.6-sol", "name": "gpt-5.6-sol"}]}});
         let (_, models) = parse_models(&v2);
         assert_eq!(models[0].id, "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn a_permission_carries_the_input_of_the_tool_call_it_names() {
+        // As kiro-cli 2.x sends them: the path and text come with the tool call, the request has only its id.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let inner: Arc<Mutex<Inner>> = Arc::default();
+        inner.lock().unwrap().turn = Some(tx);
+        let call = json!({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Write File", "kind": "edit",
+            "rawInput": {"path": "/wt/a1/notes/hello.txt", "text": "hi"}, "locations": [{"path": "/wt/a1/notes/hello.txt"}]}}});
+        handle_notification("session/update", &call, &inner);
+        assert!(matches!(rx.try_recv(), Ok(HarnessEvent::Tool { .. })));
+        let request = json!({"toolCallId": "t1", "status": "pending", "title": "Write File"});
+        let detail = permission_detail(&request, &inner.lock().unwrap().inputs);
+        assert_eq!(serde_json::from_str::<Value>(&detail).unwrap()["path"], "/wt/a1/notes/hello.txt");
+        assert_eq!(crate::policy::decide_request("Write File", &detail, &[], "/wt/a1"), crate::policy::Verdict::Allow);
+        assert_eq!(permission_detail(&json!({"toolCallId": "unknown", "title": "x"}), &inner.lock().unwrap().inputs), "");
     }
 
     #[test]
