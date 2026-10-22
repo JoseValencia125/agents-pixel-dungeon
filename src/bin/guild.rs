@@ -58,6 +58,7 @@ USAGE
   guild decisions <task>             how each candidate was chosen: by the policy, a judge or you
   guild question new <project> --question TEXT [--context TEXT] [--system ID]
   guild question resolve <project> <Q-id> --decision TEXT [--why TEXT] [--answer TEXT] [--evidence TEXT]... [--rejected TEXT]...
+  guild question reopen <project> <Q-id> [--why TEXT]   open a question resolved by mistake; its decision no longer answers it
   guild questions <project>          open and resolved questions, with their decisions
   guild decision new <project> --decision TEXT [--why TEXT] [--question Q-id]... [--system ID]... [--evidence TEXT]... [--rejected TEXT]...
   guild design <project> system set <id> --name N [--maturity undefined|concept|hypothesis|prototyping|validated|production|revised] [--intent TEXT] [--current TEXT] [--known TEXT]... [--unknown TEXT]...
@@ -594,6 +595,11 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                 "new" => {
                     let r = call(&ensure_running()?, "question.create", json!({"projectId": a.pos(1, "project")?, "question": a.flag("question"), "context": a.flag("context"), "systemId": a.flag("system")}))?;
                     println!("{} · {}", r["id"].as_str().unwrap_or(""), r["question"].as_str().unwrap_or(""));
+                    Ok(())
+                }
+                "reopen" => {
+                    let r = call(&ensure_running()?, "question.reopen", json!({"projectId": a.pos(1, "project")?, "questionId": a.pos(2, "question id")?, "why": a.flag("why")}))?;
+                    println!("{} open again", r["id"].as_str().unwrap_or(""));
                     Ok(())
                 }
                 "resolve" => {

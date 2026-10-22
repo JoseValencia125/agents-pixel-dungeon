@@ -1651,6 +1651,33 @@ impl Service {
         Ok(json!({"question": self.store.lock().unwrap().question(project_id, qid)?, "decision": decided}))
     }
 
+    /// Undo a resolution (FB-034): the question is open again and its
+    /// decision no longer answers it; a decision that answered only it
+    /// stays on record, with the reason it no longer holds.
+    fn question_reopen(&self, params: &Value) -> ApiResult {
+        let project_id = p_str(params, "projectId")?;
+        let qid = p_str(params, "questionId")?;
+        let why = p_opt(params, "why").unwrap_or_else(|| "reopened".into());
+        let store = self.store.lock().unwrap();
+        let mut q = store.question(project_id, qid)?.ok_or_else(|| ApiError::not_found(format!("question {qid}")))?;
+        if q.status == "open" { return Err(ApiError::conflict(format!("{qid} is already open"))); }
+        let decision = q.decision_id.take();
+        self.atomic(&store, || {
+            if let Some(mut d) = decision.as_deref().and_then(|id| store.design_decisions_of(project_id).ok()?.into_iter().find(|d| d.id == id)) {
+                d.question_ids.retain(|x| x != qid);
+                if d.question_ids.is_empty() { d.why = format!("{} (no longer answers {qid}: {why})", d.why.trim()).trim().to_string(); }
+                store.put_design_decision(&d)?;
+            }
+            q.status = "open".into();
+            q.answer.clear();
+            q.resolved_at = None;
+            store.put_question(&q)?;
+            self.emit_locked(&store, Event::new("question.reopened", "user").with(json!({"projectId": project_id, "questionId": qid, "decisionId": decision, "why": why})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(q).unwrap())
+    }
+
     fn decision_create(&self, params: &Value) -> ApiResult {
         let project_id = p_str(params, "projectId")?;
         let store = self.store.lock().unwrap();
@@ -2724,6 +2751,7 @@ impl Service {
             "feedback.set" => self.feedback_set(params),
             "question.create" => self.question_create(params),
             "question.resolve" => self.question_resolve(params),
+            "question.reopen" => self.question_reopen(params),
             "decision.create" => self.decision_create(params),
             "design.system.set" => self.design_system_set(params),
             "hypothesis.create" => self.hypothesis_create(params),
@@ -3530,6 +3558,11 @@ impl Service {
         let task_id = p_str(params, "taskId")?;
         let active = self.store.lock().unwrap().active_attempts()?;
         for a in active.iter().filter(|a| a.task_id == task_id) {
+            // A candidate still waiting goes with its task, or its member stays busy (FB-035).
+            if matches!(a.state, AttemptState::Submitted | AttemptState::Verifying) && !self.running.lock().unwrap().contains_key(&a.id) {
+                let _ = self.move_attempt(&a.id, AttemptState::Cancelled, Some("its task was cancelled".into()));
+                continue;
+            }
             let _ = self.attempt_cancel(&a.id);
         }
         let task = self.store.lock().unwrap().task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
@@ -3689,6 +3722,8 @@ impl Service {
         self.move_attempt(&attempt.id, AttemptState::Failed, Some(reason.clone()))?;
         self.emit(Event::new("candidate.rejected", "user").about_attempt(&attempt).with(json!({"reason": reason})));
         let task = self.store.lock().unwrap().task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
+        // A cancelled task stays cancelled: rejecting only lets its member go.
+        if matches!(task.state, TaskState::Cancelled | TaskState::Completed) { return Ok(json!({"rejected": task_id, "attemptId": attempt.id})); }
         // In a race, other candidates may still be waiting for the user.
         if self.latest_submitted(task_id).is_ok() { return Ok(json!({"rejected": task_id, "attemptId": attempt.id, "remaining": true})); }
         self.after_failed_attempt(&task, &reason)?;
@@ -4361,6 +4396,37 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0]["payload"]["by"], "policy");
         assert_eq!(resolved[0]["payload"]["optionId"], "allow", "allowed once each time: the harness keeps nothing");
+    }
+
+    #[test]
+    fn a_question_resolved_by_mistake_opens_again() {
+        let (_home, service, _quest) = setup(MockBehaviour::Hang);
+        service.handle("question.create", &json!({"projectId": "p", "question": "How long is a round?"})).unwrap();
+        service.handle("question.create", &json!({"projectId": "p", "question": "How many districts?"})).unwrap();
+        // Q-002 resolved by mistake, then opened again (FB-034).
+        service.handle("decision.create", &json!({"projectId": "p", "decision": "Six districts.", "questionIds": ["Q-002"]})).unwrap();
+        let reopened = service.handle("question.reopen", &json!({"projectId": "p", "questionId": "Q-002", "why": "answered the wrong question"})).unwrap();
+        assert_eq!((reopened["status"].as_str(), reopened["answer"].as_str(), reopened["decision_id"].clone()), (Some("open"), Some(""), Value::Null));
+        let snap = service.snapshot().unwrap();
+        let dec = snap.design_decisions.iter().find(|d| d.decision == "Six districts.").unwrap();
+        assert!(dec.question_ids.is_empty() && dec.why.contains("no longer answers Q-002"), "{dec:?}");
+        assert!(service.handle("question.reopen", &json!({"projectId": "p", "questionId": "Q-002"})).is_err(), "already open");
+        assert_eq!(service.snapshot().unwrap().questions.iter().filter(|q| q.status == "open").count(), 2);
+    }
+
+    #[test]
+    fn cancelling_a_task_lets_its_waiting_candidate_s_member_go() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "A", "memberId": "aria"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "candidate", |s| s.tasks.iter().any(|t| t.id == "t1" && t.state == TaskState::Verifying));
+        // FB-035: the candidate stayed submitted and Aria busy, so the next task sat Ready.
+        service.handle("task.cancel", &json!({"taskId": "t1"})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t2", "title": "B", "memberId": "aria"})).unwrap();
+        let snap = wait_for(&service, "t2's candidate", |s| s.tasks.iter().any(|t| t.id == "t2" && t.state == TaskState::Verifying));
+        let first = snap.attempts.iter().find(|a| a.task_id == "t1").unwrap();
+        assert_eq!(first.state, AttemptState::Cancelled);
+        assert_eq!(snap.tasks.iter().find(|t| t.id == "t1").unwrap().state, TaskState::Cancelled);
     }
 
     #[test]
