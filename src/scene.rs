@@ -492,6 +492,8 @@ struct Trainee {
     facing: f32,
     /// When its station next throws sparks.
     next_spark: f32,
+    /// Nothing to do (or gone from the guild): walking out of the door.
+    leaving: bool,
 }
 
 impl Room {
@@ -921,6 +923,8 @@ impl Room {
             let dist = d.length();
             if dist > 0.3 { let step = (34.0 * dt).min(dist); t.pos += d / dist * step; if d.x.abs() > 0.5 { t.facing = d.x.signum(); } } else { t.pos = t.target; }
         }
+        // Who walked out of the door is gone.
+        self.crew.retain(|t| !(t.leaving && t.pos == t.target));
         self.clock += dt;
         self.frame_clock += dt;
         if !self.in_transition { self.routine_clock += dt; }
@@ -1320,20 +1324,24 @@ impl Room {
         (pos2(x + nudge, y), facing)
     }
 
-    /// Each member to its spot; one joining comes in by the door. Without
-    /// animation, each is at its spot at once.
+    /// Each member with something to do to its spot; one joining comes in
+    /// by the door. One with nothing to do (free, or its candidate handed
+    /// in), or no longer in the guild, walks out of it. Without animation,
+    /// each is at its spot, or gone, at once.
     fn set_crew(&mut self, crew: &[crate::herdr::CrewMember], animated: bool) {
         let mut next: Vec<Trainee> = vec![];
         let mut taken: HashMap<(String, String), usize> = HashMap::new();
-        for m in crew {
+        let away = |m: &crate::herdr::CrewMember| matches!(m.status.as_str(), "idle" | "done");
+        for m in crew.iter().filter(|m| !away(m)) {
             let action = m.action.clone().unwrap_or_default();
             let n = taken.entry((m.status.clone(), if m.status == "working" { action.clone() } else { String::new() })).or_insert(0);
             let (target, facing) = Room::crew_spot(&m.status, &action, *n);
             *n += 1;
             let mut t = match self.crew.iter().position(|t| t.name == m.name) {
                 Some(i) => self.crew.remove(i),
-                None => Trainee { name: m.name.clone(), harness: harness_for(&m.harness), status: String::new(), action: String::new(), pos: DOOR, target, facing, next_spark: 0.0 },
+                None => Trainee { name: m.name.clone(), harness: harness_for(&m.harness), status: String::new(), action: String::new(), pos: DOOR, target, facing, next_spark: 0.0, leaving: false },
             };
+            t.leaving = false;
             t.harness = harness_for(&m.harness);
             t.status = m.status.clone();
             t.action = action;
@@ -1341,6 +1349,12 @@ impl Room {
             if !animated { t.pos = target; }
             if (t.pos - t.target).length() < 0.5 { t.facing = facing; }
             next.push(t);
+        }
+        // The rest leave by the door, walking, as nobody waits on the floor.
+        for mut t in std::mem::take(&mut self.crew) {
+            if !animated { continue; }
+            if !t.leaving { t.leaving = true; t.status = "idle".into(); t.action.clear(); t.target = DOOR; }
+            if t.pos != t.target { next.push(t); }
         }
         self.crew = next;
     }
@@ -2294,13 +2308,24 @@ mod tests {
         let spot = |status: &str, action: &str, k: usize| Room::crew_spot(status, action, k).0;
         assert_eq!(at("Lira"), spot("working", "forge", 0), "writing: at the anvil");
         assert_eq!(at("Orin"), spot("blocked", "", 0), "asking: before the director's desk");
-        assert_eq!(at("Kael"), spot("idle", "", 0), "free: on the floor");
+        assert!(room.crew.iter().all(|c| c.name != "Kael"), "free: nobody waits in the room, it never came in");
         assert!(spot("blocked", "", 0).y > room.style.spot.y, "the asker stands in front of the director, not behind");
         // They walked in by the door; given time, they reach their spots, and the busy ones throw sparks.
         let room = scene.rooms.get_mut("w1:p1").unwrap();
         for _ in 0..200 { room.advance(0.05); }
         assert!(room.crew.iter().all(|c| c.pos == c.target));
         assert!(!room.particles.is_empty());
+        // One that is done walks out of the door and is gone; given work again, it comes back in.
+        let aria = lead.crew.iter().position(|c| c.name == "Aria").unwrap();
+        lead.crew[aria].status = "done".into();
+        scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
+        let room = scene.rooms.get_mut("w1:p1").unwrap();
+        assert_eq!(room.crew.iter().find(|c| c.name == "Aria").map(|c| c.target), Some(DOOR), "on its way out");
+        for _ in 0..200 { room.advance(0.05); }
+        assert!(room.crew.iter().all(|c| c.name != "Aria"), "gone");
+        lead.crew[aria].status = "working".into();
+        scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
+        assert_eq!(scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Aria").unwrap().pos, DOOR, "back in by the door");
         // Asking for a permission: up and before the director; answered, back to its station.
         lead.crew[3].status = "blocked".into();
         scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
@@ -2318,7 +2343,7 @@ mod tests {
         }
         room.size = RoomSize::Large;
         // Someone hired comes in by the door; leaving guild mode gives the room back its own state.
-        lead.crew.push(member("Nim", "idle", None));
+        lead.crew.push(member("Nim", "working", Some("read")));
         scene.sync(&[agent("a", "idle"), lead.clone(), agent("b", "idle")]);
         assert_eq!(scene.rooms.get("w1:p1").unwrap().crew.iter().find(|c| c.name == "Nim").unwrap().pos, DOOR);
         let mut plain = lead;
