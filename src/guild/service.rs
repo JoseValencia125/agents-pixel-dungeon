@@ -51,6 +51,13 @@ struct Running {
     waiting_since: Option<Instant>,
     /// How long it may work: its task's limit, else the guild's.
     limit: Duration,
+    /// A note came while it worked: stop the turn and hand it over now (FB-051).
+    redirect_requested: bool,
+    /// Cancelled to start again on its member's current harness and model,
+    /// from what it had written (FB-054).
+    restart_requested: bool,
+    /// Cancelled with its task: the task ends too, in one step (FB-061).
+    task_cancelled: bool,
 }
 
 impl Running {
@@ -1964,7 +1971,7 @@ impl Service {
         // Reserve the slot before the thread starts, so the next tick counts it.
         self.running.lock().unwrap().insert(
             attempt_id.clone(),
-            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None, limit: Duration::ZERO },
+            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None, limit: Duration::ZERO, redirect_requested: false, restart_requested: false, task_cancelled: false },
         );
         let service = self.clone();
         std::thread::Builder::new()
@@ -1987,7 +1994,7 @@ impl Service {
     fn spawn_resumer(self: &Arc<Service>, attempt_id: String, native_id: String) {
         self.running.lock().unwrap().insert(
             attempt_id.clone(),
-            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None, limit: Duration::ZERO },
+            Running { session: SessionRef { id: String::new(), native_id: None }, harness: HarnessId::named("mock"), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None, limit: Duration::ZERO, redirect_requested: false, restart_requested: false, task_cancelled: false },
         );
         let service = self.clone();
         std::thread::Builder::new()
@@ -2078,7 +2085,11 @@ impl Service {
         let prompt = match attempt.kind {
             AttemptKind::Judge => self.compose_judge_prompt(&role_prompt, &task, design.as_ref())?,
             AttemptKind::Analysis => self.compose_analysis_prompt(&role_prompt, &task, design.as_ref())?,
-            AttemptKind::Work => compose_prompt(&role_prompt, &task, &workspace, design.as_ref(), &feedback, continued),
+            AttemptKind::Work => {
+                let found = workspaces::deleted_matching(Path::new(&workspace.path), &format!("{}\n{}", task.title, task.instructions), 15);
+                let reads: Vec<String> = project.permitted_reads.iter().chain(quest.read_paths.iter()).cloned().collect();
+                compose_prompt(&role_prompt, &task, &workspace, design.as_ref(), &feedback, continued, &Context { reads, deleted: found })
+            }
         };
         self.run_turn(attempt_id, &attempt, &member, &adapter, session, &prompt)
     }
@@ -2129,7 +2140,7 @@ impl Service {
         let attempt = &attempt;
         {
             let mut running = self.running.lock().unwrap();
-            let slot = running.entry(attempt_id.to_string()).or_insert(Running { session: session.clone(), harness: member.harness.clone(), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None, limit: Duration::ZERO });
+            let slot = running.entry(attempt_id.to_string()).or_insert(Running { session: session.clone(), harness: member.harness.clone(), cancel_requested: false, interrupt_requested: false, started: Instant::now(), waited: Duration::ZERO, waiting_since: None, limit: Duration::ZERO, redirect_requested: false, restart_requested: false, task_cancelled: false });
             slot.session = session.clone();
             slot.harness = member.harness.clone();
         }
@@ -2139,6 +2150,8 @@ impl Service {
         let handle = adapter.prompt(&session, attempt_id, prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
         self.emit(Event::new("turn.started", "guild").about_attempt(attempt).with(json!({"turnId": handle.turn_id, "promptChars": prompt.len()})));
         let mut outcome = self.follow_turn(attempt_id, attempt, adapter, &session, handle);
+        let unredirect = |s: &Service| if let Some(r) = s.running.lock().unwrap().get_mut(attempt_id) { r.redirect_requested = false; };
+        unredirect(self);
         // Notes added while it worked, or work it left running in the background
         // (FB-047): one more turn in the same session takes them in.
         let folders = {
@@ -2147,7 +2160,8 @@ impl Service {
         };
         let scratch = crate::paths::scratch_dir(attempt_id);
         let mut waited_for = false;
-        for round in 1..=3 {
+        for round in 1..=8 {
+            let redirected = matches!(&outcome, TurnOutcome::Completed { stop_reason } if stop_reason == "redirected");
             let done = matches!(&outcome, TurnOutcome::Completed { stop_reason } if stop_reason != "interrupted");
             if attempt.kind != AttemptKind::Work || !done || self.cancel_requested(attempt_id) { break; }
             let notes = notes_of(self);
@@ -2164,14 +2178,16 @@ impl Service {
             }
             if notes.len() > seen {
                 let added: String = notes[seen..].iter().map(|n| format!("- {}\n", n.trim())).collect();
-                follow.push_str(&format!("While you worked, the lead added to the task:\n{added}"));
+                if redirected { follow.push_str(&format!("The lead stopped you to correct course. Read this before you go on:\n{added}")); }
+                else { follow.push_str(&format!("While you worked, the lead added to the task:\n{added}")); }
             }
             seen = notes.len();
-            follow.push_str("\nTake this into account now, in the same worktree, then finish with the updated summary.");
+            follow.push_str(if redirected { "\nGo on from where you are, in the same worktree, doing it this way; finish with the summary of the whole task." } else { "\nTake this into account now, in the same worktree, then finish with the updated summary." });
             let Ok(handle) = adapter.prompt(&session, &format!("{attempt_id}-note{round}"), &follow) else { break };
             let _ = self.update_attempt(attempt_id, |a| a.turns += 1);
             self.emit(Event::new("turn.started", "guild").about_attempt(attempt).with(json!({"turnId": handle.turn_id, "promptChars": follow.len(), "notes": true})));
             outcome = self.follow_turn(attempt_id, attempt, adapter, &session, handle);
+            unredirect(self);
         }
         let stopped = adapter.stop(&session).unwrap_or(false);
         self.emit(Event::new("session.closed", "harness").about_attempt(attempt).with(json!({"confirmed": stopped})));
@@ -2210,9 +2226,11 @@ impl Service {
         let mut events_closed = false;
         // An interrupted turn ends as a completed one: the worktree is the candidate.
         let settle = |outcome: TurnOutcome, s: &Service| -> TurnOutcome {
-            let interrupted = s.running.lock().unwrap().get(attempt_id).map(|r| r.interrupt_requested && !r.cancel_requested).unwrap_or(false);
+            let (interrupted, redirected) = s.running.lock().unwrap().get(attempt_id).map(|r| (r.interrupt_requested && !r.cancel_requested, r.redirect_requested && !r.cancel_requested && !r.interrupt_requested)).unwrap_or((false, false));
             match outcome {
                 TurnOutcome::Cancelled if interrupted => TurnOutcome::Completed { stop_reason: "interrupted".into() },
+                // Stopped to be handed a note: the session goes on with it (FB-051).
+                TurnOutcome::Cancelled | TurnOutcome::Completed { .. } if redirected => TurnOutcome::Completed { stop_reason: "redirected".into() },
                 other => other,
             }
         };
@@ -2254,20 +2272,27 @@ impl Service {
                 }
             }
             if last_flush.elapsed() > Duration::from_secs(2) { flush(&mut text, self); last_flush = Instant::now(); }
-            let (cancel, interrupt, worked, limit) = {
+            let (cancel, interrupt, redirect, worked, limit) = {
                 let running = self.running.lock().unwrap();
-                running.get(attempt_id).map(|r| (r.cancel_requested, r.interrupt_requested, r.working_time(), if r.limit.is_zero() { self.settings.attempt_timeout } else { r.limit })).unwrap_or((true, false, Duration::ZERO, self.settings.attempt_timeout))
+                running.get(attempt_id).map(|r| (r.cancel_requested, r.interrupt_requested, r.redirect_requested, r.working_time(), if r.limit.is_zero() { self.settings.attempt_timeout } else { r.limit })).unwrap_or((true, false, false, Duration::ZERO, self.settings.attempt_timeout))
             };
             if !timed_out && worked > limit {
                 timed_out = true;
                 self.emit(Event::new("attempt.timeout", "guild").about_attempt(attempt).with(json!({"afterSeconds": limit.as_secs()})));
             }
-            if (cancel || interrupt || timed_out) && interrupted_at.is_none() {
+            let stopping = cancel || interrupt || timed_out;
+            if (stopping || redirect) && interrupted_at.is_none() {
                 let _ = adapter.interrupt(session);
                 interrupted_at = Some(Instant::now());
             }
             if let Some(at) = interrupted_at {
-                if at.elapsed() > self.settings.cancel_timeout {
+                // A turn that does not stop for a note keeps its session: the note waits for its end.
+                if !stopping && at.elapsed() > self.settings.cancel_timeout {
+                    if let Some(r) = self.running.lock().unwrap().get_mut(attempt_id) { r.redirect_requested = false; }
+                    interrupted_at = None;
+                    continue;
+                }
+                if stopping && at.elapsed() > self.settings.cancel_timeout {
                     flush(&mut text, self);
                     let _ = adapter.stop(session);
                     return if timed_out { TurnOutcome::Failed { reason: "timed out".into() } } else { settle(TurnOutcome::Cancelled, self) };
@@ -2333,17 +2358,26 @@ impl Service {
                 if let Some(r) = self.running.lock().unwrap().get_mut(attempt_id) { r.waiting_since.get_or_insert_with(Instant::now); }
                 self.emit(Event::new("permission.requested", "harness").about_attempt(attempt).with(json!({"requestId": request_id, "title": title, "detail": detail, "options": options})));
                 // Routine work in the worktree is answered at once; only the unusual waits.
-                let mut programs = self.project_of_attempt(attempt).map(|p| crate::policy::project_programs(&p)).unwrap_or_default();
-                let (worktree, granted) = {
+                let project = self.project_of_attempt(attempt);
+                let mut programs = project.as_ref().map(crate::policy::project_programs).unwrap_or_default();
+                let (worktree, granted, quest_reads) = {
                     let store = self.store.lock().unwrap();
                     let worktree = store.attempt(attempt_id).ok().flatten().and_then(|a| a.workspace_id).and_then(|w| store.workspace(&w).ok().flatten()).map(|w| w.path).unwrap_or_default();
-                    (worktree, store.task(&attempt.task_id).ok().flatten().map(|t| t.granted).unwrap_or_default())
+                    let reads = store.quest(&attempt.quest_id).ok().flatten().map(|q| q.read_paths).unwrap_or_default();
+                    (worktree, store.task(&attempt.task_id).ok().flatten().map(|t| t.granted).unwrap_or_default(), reads)
                 };
                 // What this task was already allowed does not ask again.
                 programs.extend(granted.programs.iter().cloned());
+                // What the project and the quest allow (FB-052, FB-063).
+                let allow = crate::policy::Allowances {
+                    readable: project.as_ref().map(|p| p.permitted_reads.clone()).unwrap_or_default().into_iter().chain(quest_reads).chain(granted.reads.iter().cloned()).collect(),
+                    commands: project.as_ref().map(|p| p.permitted_commands.clone()).unwrap_or_default(),
+                    web: project.as_ref().is_none_or(|p| p.web),
+                };
+                let judged = crate::policy::decide_allowing(&title, &detail, &programs, &worktree, &allow);
                 let verdict = match crate::policy::command_of(&title, &detail) {
-                    Some(cmd) if granted.commands.contains(&cmd) && crate::policy::decide_request(&title, &detail, &programs, &worktree) != crate::policy::Verdict::Refuse => crate::policy::Verdict::Allow,
-                    _ => crate::policy::decide_request(&title, &detail, &programs, &worktree),
+                    Some(cmd) if granted.commands.contains(&cmd) && judged != crate::policy::Verdict::Refuse => crate::policy::Verdict::Allow,
+                    _ => judged,
                 };
                 if let Some(option) = crate::policy::option_for(&verdict, &title, &options) {
                     let by = if verdict == crate::policy::Verdict::Allow { "policy" } else { "policy-refused" };
@@ -2398,11 +2432,17 @@ impl Service {
                     }
                     None => None,
                 };
+                // What it shows: the images the task asked for and its step captures (FB-050, FB-059).
+                let mut shown = workspace.as_ref().map(|ws| self.collect_evidence(attempt_id, &task, ws)).into_iter().flatten().collect::<Vec<_>>();
+                // Deleting a lot is never accepted without someone reading what goes (FB-049).
+                let mass = match (&workspace, &candidate) { (Some(ws), Some(c)) => self.mass_deletion(attempt_id, ws, c), _ => None };
+                if let Some(m) = &mass { shown.push(m.clone()); }
                 {
                     let store = self.store.lock().unwrap();
                     self.atomic(&store, || {
                         let mut a = store.attempt(attempt_id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
                         a.candidate = candidate.clone();
+                        if !shown.is_empty() { a.verifier_results = shown.clone(); }
                         a.action = None;
                         a.pending_permission = None;
                         a.updated_at = now();
@@ -2428,7 +2468,8 @@ impl Service {
                     let verifiers = config::load(Path::new(&ws.path)).ok().flatten().map(|f| f.verifiers.iter().map(|v| v.to_verifier()).collect::<Vec<_>>()).unwrap_or_else(|| p.verifiers.clone());
                     if !verifiers.is_empty() || own_gates {
                         self.move_attempt(attempt_id, AttemptState::Verifying, None)?;
-                        let mut results = self.run_verifiers(attempt_id, &attempt, &verifiers, ws);
+                        let mut results = shown.clone();
+                        results.extend(self.run_verifiers(attempt_id, &attempt, &verifiers, ws));
                         if own_gates {
                             results.push(VerifierResult { id: "own-gates".into(), required: true, status: "needs-review".into(), exit_code: None, duration_ms: 0, log_artifact_id: None,
                                 tail: "the candidate changes .guild/guild.toml, so it was checked with its own verifiers: read that change in its diff before accepting it".into(), evidence: vec![] });
@@ -2446,7 +2487,8 @@ impl Service {
                 }
                 // A choice left to the user goes to the orchestrator first, if the guild has one.
                 if candidate.is_some() && task.candidates <= 1 && task.strategy.selection() == Selection::User {
-                    if own_gates { self.update_attempt(attempt_id, |a| a.escalation = Some("it changes its own verifiers (.guild/guild.toml): only you or the delegate accept that".into()))?; }
+                    if let Some(m) = &mass { self.update_attempt(attempt_id, |a| a.escalation = Some(format!("it deletes many files — {}: only you or the delegate accept that", m.tail.lines().next().unwrap_or(""))))?; }
+                    else if own_gates { self.update_attempt(attempt_id, |a| a.escalation = Some("it changes its own verifiers (.guild/guild.toml): only you or the delegate accept that".into()))?; }
                     else { self.ask_orchestrator(attempt_id, crate::orchestrator::DecisionKind::Candidate); }
                 }
                 self.settle_task(&task.id)
@@ -2459,7 +2501,24 @@ impl Service {
             }
             TurnOutcome::Cancelled => {
                 self.keep_partial(&attempt, &task, workspace.as_ref());
-                self.move_attempt(attempt_id, AttemptState::Cancelled, Some("cancelled".into()))?;
+                let (restart, task_cancelled) = self.running.lock().unwrap().get(attempt_id).map(|r| (r.restart_requested, r.task_cancelled)).unwrap_or((false, false));
+                if restart {
+                    // Again on what its member runs now, from what it wrote, without costing an attempt (FB-054).
+                    let member = self.store.lock().unwrap().member(&attempt.member_id)?.map(|m| format!("{}{}", m.harness, m.model_id.map(|x| format!("/{x}")).unwrap_or_default())).unwrap_or_default();
+                    self.move_attempt(attempt_id, AttemptState::Cancelled, Some(format!("started again by the user on {member}; nothing was wrong with the work: go on from it")))?;
+                    let store = self.store.lock().unwrap();
+                    self.atomic(&store, || {
+                        let mut t = store.task(&task.id)?.ok_or_else(|| ApiError::not_found("task"))?;
+                        t.max_attempts = t.max_attempts.max(t.attempts_made) + 1;
+                        t.updated_at = now();
+                        store.put_task(&t)?;
+                        self.move_task_locked(&store, &task.id, TaskState::Ready, None)?;
+                        Ok(())
+                    })?;
+                    return Ok(());
+                }
+                self.move_attempt(attempt_id, AttemptState::Cancelled, Some(if task_cancelled { "its task was cancelled".into() } else { "cancelled".into() }))?;
+                if task_cancelled { let _ = self.move_task(&task.id, TaskState::Cancelled, None); return Ok(()); }
                 if task.candidates > 1 { return self.settle_task(&task.id); }
                 let _ = self.move_task(&task.id, TaskState::Blocked, Some("attempt cancelled; retry to continue".into()));
                 Ok(())
@@ -2478,6 +2537,44 @@ impl Service {
                 self.emit(Event::new("partial.kept", "guild").about_attempt(attempt).with(json!({"filesChanged": files, "insertions": added, "deletions": removed})));
             }
         }
+    }
+
+    /// The images a task's work leaves to be seen: the files its `evidence`
+    /// names in the worktree (kept even when git ignores them) and the step
+    /// captures in its scratch folder's `evidence/`, copied where the guild
+    /// keeps artifacts. One result, required when the task named images:
+    /// what it asked to see and is missing fails it.
+    fn collect_evidence(&self, attempt_id: &str, task: &Task, ws: &Workspace) -> Option<VerifierResult> {
+        let live = crate::paths::scratch_dir(attempt_id).join("evidence");
+        let mut files: Vec<PathBuf> = images_in(&live);
+        let mut missing = vec![];
+        for pattern in &task.evidence {
+            let found = evidence_files(Path::new(&ws.path), pattern);
+            if found.is_empty() { missing.push(pattern.clone()); }
+            files.extend(found);
+        }
+        if files.is_empty() && task.evidence.is_empty() { return None; }
+        let dir = crate::paths::artifacts_dir().join(attempt_id).join(format!("evidence-task-{}", new_id()));
+        let _ = std::fs::create_dir_all(&dir);
+        for (i, f) in files.iter().enumerate() {
+            let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("evidence.png");
+            let _ = std::fs::copy(f, dir.join(format!("{:02}-{name}", i + 1)));
+        }
+        let evidence = self.keep_evidence(attempt_id, &dir);
+        let tail = if missing.is_empty() { format!("{} images to look at", evidence.len()) } else { format!("missing: {} (the task asked for them)", missing.join(", ")) };
+        Some(VerifierResult { id: "evidence".into(), required: !task.evidence.is_empty(), status: if missing.is_empty() { "passed".into() } else { "failed".into() }, exit_code: None, duration_ms: 0, log_artifact_id: None, tail, evidence })
+    }
+
+    /// A candidate that deletes many files: what goes, grouped, as a result
+    /// someone must read before accepting it (FB-049).
+    fn mass_deletion(&self, attempt_id: &str, ws: &Workspace, c: &Candidate) -> Option<VerifierResult> {
+        let out = workspaces::git(Path::new(&ws.path), &["diff", "--no-renames", "--name-only", "--diff-filter=D", &c.base_sha, &c.head_sha]).ok()?;
+        let deleted: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+        if deleted.len() < MASS_DELETION { return None; }
+        let manifest = deletion_manifest(&deleted);
+        let artifact = self.write_artifact(Some(attempt_id), "deleted-files", deleted.join("\n").as_bytes()).ok();
+        Some(VerifierResult { id: "deletions".into(), required: true, status: "needs-review".into(), exit_code: None, duration_ms: 0, log_artifact_id: artifact.map(|a| a.id),
+            tail: format!("{manifest}\nAccept it only if all of that should go; to keep a group, reject it saying which (\"keep the shaders and the scenes\")."), evidence: vec![] })
     }
 
     /// A runner ended without a candidate: a race settles with the rest,
@@ -2587,7 +2684,8 @@ impl Service {
                 let verifiers: Vec<String> = attempt.verifier_results.iter().map(|v| {
                     let lines: Vec<&str> = v.tail.lines().collect();
                     let tail = lines[lines.len().saturating_sub(15)..].join("\n    ");
-                    format!("- {} {}{}{}", v.id, v.status, if v.required { " (required)" } else { "" }, if tail.trim().is_empty() { String::new() } else { format!(":\n    {tail}") })
+                    let shots: String = v.evidence.iter().map(|e| format!("\n    capture: {e} (open it to see it)")).collect();
+                    format!("- {} {}{}{}{shots}", v.id, v.status, if v.required { " (required)" } else { "" }, if tail.trim().is_empty() { String::new() } else { format!(":\n    {tail}") })
                 }).collect();
                 // Its whole reply, not the cut summary: the evidence asked for is often there (FB-043).
                 let mut reply = self.reply_of(&attempt.id);
@@ -2896,6 +2994,8 @@ impl Service {
             "task.complete" => self.task_complete(params),
             "quest.start" => self.quest_start(params),
             "quest.sync" => self.quest_sync(params),
+            "quest.update" => self.quest_update(params),
+            "attempt.restart" => self.attempt_restart(p_str(params, "attemptId")?),
             "quest.pause" => self.quest_set(params, QuestState::Paused, &[QuestState::Running]),
             "quest.resume" => self.quest_set(params, QuestState::Running, &[QuestState::Paused, QuestState::Blocked]),
             "quest.cancel" => self.quest_cancel(params),
@@ -2950,6 +3050,9 @@ impl Service {
             play: file.as_ref().and_then(|f| f.play.as_ref()).map(|p| p.to_runner()),
             ai_play: file.as_ref().and_then(|f| f.ai_play.as_ref()).map(|p| p.to_runner()),
             permitted_programs: file.as_ref().map(|f| f.permissions.programs.clone()).unwrap_or_default(),
+            permitted_reads: file.as_ref().map(|f| f.permissions.read.iter().map(|r| crate::policy::expand_home(r)).collect()).unwrap_or_default(),
+            permitted_commands: file.as_ref().map(|f| f.permissions.commands.clone()).unwrap_or_default(),
+            web: file.as_ref().and_then(|f| f.permissions.web).unwrap_or(true),
             created_at: existing.map(|p| p.created_at).unwrap_or_else(now),
         };
         store.put_project(&project)?;
@@ -3420,6 +3523,7 @@ impl Service {
             state: QuestState::Draft,
             integration_ref: format!("refs/heads/guild/quest/{}", &id[id.len() - 8..]),
             base_sha: None,
+            read_paths: parse_read_paths(params)?.unwrap_or_default(),
             plan_version: 1,
             created_at: now(),
             updated_at: now(),
@@ -3435,10 +3539,13 @@ impl Service {
     fn task_create(&self, params: &Value) -> ApiResult {
         let quest_id = p_str(params, "questId")?;
         let store = self.store.lock().unwrap();
-        let quest = store.quest(quest_id)?.ok_or_else(|| ApiError::not_found(format!("quest {quest_id}")))?;
+        let mut quest = store.quest(quest_id)?.ok_or_else(|| ApiError::not_found(format!("quest {quest_id}")))?;
         let acceptance = parse_acceptance(params).unwrap_or_default();
+        // A task added to a quest that had completed opens it again (FB-055).
+        let reopen = quest.state == QuestState::Completed;
         let state = if quest.state == QuestState::Draft { TaskState::Draft } else { TaskState::Pending };
         let strategy = parse_strategy(params)?;
+        let spike = params.get("spike").and_then(Value::as_bool).unwrap_or(false);
         let task = Task {
             id: p_opt(params, "id").unwrap_or_else(new_id),
             quest_id: quest_id.into(),
@@ -3457,11 +3564,14 @@ impl Service {
             max_attempts: (params.get("maxAttempts").and_then(Value::as_u64).unwrap_or(2) as u32).max(strategy.runners()),
             candidates: strategy.runners(),
             auto_integrate: strategy.auto_integrate,
-            timeout_minutes: params.get("timeoutMinutes").and_then(Value::as_u64).filter(|m| *m > 0).map(|m| m as u32),
+            // A spike is short by default: a trial, not the work (FB-058).
+            timeout_minutes: params.get("timeoutMinutes").and_then(Value::as_u64).filter(|m| *m > 0).map(|m| m as u32).or(spike.then_some(SPIKE_MINUTES)),
             strategy,
             winner_attempt_id: None,
             notes: vec![],
             granted: Default::default(),
+            evidence: p_list(params, "evidence"),
+            spike,
             version: 1,
             created_at: now(),
             updated_at: now(),
@@ -3473,6 +3583,12 @@ impl Service {
         self.atomic(&store, || {
             store.put_task(&task)?;
             self.emit_locked(&store, Event::new("task.created", "user").about_task(&task, &quest.project_id).with(json!({"title": task.title, "dependsOn": task.depends_on})));
+            if reopen {
+                quest.state = QuestState::Running;
+                quest.updated_at = now();
+                store.put_quest(&quest)?;
+                self.emit_locked(&store, Event::new("quest.reopened", "guild").about_quest(&quest).with(json!({"title": quest.title, "task": task.id})));
+            }
             Ok(())
         })?;
         Ok(serde_json::to_value(task).unwrap())
@@ -3485,7 +3601,9 @@ impl Service {
         let task_id = p_str(params, "taskId")?;
         let store = self.store.lock().unwrap();
         let mut task = store.task(task_id)?.ok_or_else(|| ApiError::not_found(format!("task {task_id}")))?;
-        if !matches!(task.state, TaskState::Draft | TaskState::Pending | TaskState::Ready) || task.attempts_made > 0 {
+        // Waiting on a dependency that failed or was cancelled counts as not started: it can be pointed elsewhere (FB-053).
+        let waiting_on_parent = task.state == TaskState::Blocked && task.block_reason.as_deref().is_some_and(|r| r.starts_with("dependency"));
+        if !(matches!(task.state, TaskState::Draft | TaskState::Pending | TaskState::Ready) || waiting_on_parent) || task.attempts_made > 0 {
             return Err(ApiError::conflict(format!("task {task_id} is {:?}: only a task not yet started can change", task.state)));
         }
         let quest = store.quest(&task.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
@@ -3496,6 +3614,8 @@ impl Service {
         if params.get("memberId").is_some() { task.member_id = p_opt(params, "memberId"); }
         if let Some(p) = params.get("priority").and_then(Value::as_i64) { task.priority = p as i32; }
         if let Some(m) = params.get("timeoutMinutes").and_then(Value::as_u64) { task.timeout_minutes = (m > 0).then_some(m as u32); }
+        if params.get("evidence").is_some_and(Value::is_array) { task.evidence = p_list(params, "evidence"); }
+        if let Some(b) = params.get("spike").and_then(Value::as_bool) { task.spike = b; }
         let deps_changed = params.get("dependsOn").is_some_and(|d| d.is_array()) && p_list(params, "dependsOn") != task.depends_on;
         if deps_changed {
             task.depends_on = p_list(params, "dependsOn");
@@ -3541,9 +3661,10 @@ impl Service {
         Ok(serde_json::to_value(self.store.lock().unwrap().task(task_id)?).unwrap())
     }
 
-    /// Add to a task that already started: the member working on it reads
-    /// the note when its turn ends (one more turn in the same session), and
-    /// a retry or the orchestrator read it with the instructions.
+    /// Add to a task that already started: a member at work is stopped and
+    /// handed it in the same session (FB-051), one waiting for a permission
+    /// reads it when its turn ends; a retry or the orchestrator read it with
+    /// the instructions.
     fn task_note(&self, params: &Value) -> ApiResult {
         let task_id = p_str(params, "taskId")?;
         let text = p_str(params, "text")?.trim().to_string();
@@ -3561,7 +3682,17 @@ impl Service {
             self.emit_locked(&store, Event::new("task.noted", p_opt(params, "by").as_deref().unwrap_or("user")).about_task(&task, &quest.project_id).with(json!({"text": text, "notes": task.notes.len()})));
             Ok(())
         })?;
-        Ok(serde_json::to_value(task).unwrap())
+        // A member at work is stopped and handed the note now, not when it
+        // finishes (FB-051); `later: true` waits for its turn to end.
+        let mut redirected = false;
+        if !params.get("later").and_then(Value::as_bool).unwrap_or(false) {
+            let working: Vec<String> = store.attempts_of_task(task_id)?.into_iter().filter(|a| a.kind == AttemptKind::Work && a.state == AttemptState::Running).map(|a| a.id).collect();
+            let mut running = self.running.lock().unwrap();
+            for id in working { if let Some(r) = running.get_mut(&id) { r.redirect_requested = true; redirected = true; } }
+        }
+        let mut out = serde_json::to_value(task).unwrap();
+        out["redirected"] = json!(redirected);
+        Ok(out)
     }
 
     /// Bring the project's target (or `from`) into a quest's branch, so the
@@ -3584,6 +3715,24 @@ impl Service {
             self.emit(ev);
         }
         Ok(json!({"questId": quest.id, "from": from, "oldSha": old, "newSha": new, "files": files, "changed": old != new}))
+    }
+
+    /// Change a quest's title, description or the folders its members may
+    /// read; attempts already running read the new folders too (FB-052).
+    fn quest_update(&self, params: &Value) -> ApiResult {
+        let quest_id = p_str(params, "questId")?;
+        let store = self.store.lock().unwrap();
+        let mut quest = store.quest(quest_id)?.ok_or_else(|| ApiError::not_found(format!("quest {quest_id}")))?;
+        if let Some(t) = p_opt(params, "title") { quest.title = t; }
+        if let Some(d) = params.get("description").and_then(Value::as_str) { quest.description = d.trim().to_string(); }
+        if let Some(r) = parse_read_paths(params)? { quest.read_paths = r; }
+        quest.updated_at = now();
+        self.atomic(&store, || {
+            store.put_quest(&quest)?;
+            self.emit_locked(&store, Event::new("quest.updated", "user").about_quest(&quest).with(json!({"title": quest.title, "readPaths": quest.read_paths})));
+            Ok(())
+        })?;
+        Ok(serde_json::to_value(quest).unwrap())
     }
 
     fn quest_start(self: &Arc<Service>, params: &Value) -> ApiResult {
@@ -3656,6 +3805,9 @@ impl Service {
 
     fn task_retry(self: &Arc<Service>, params: &Value) -> ApiResult {
         let task_id = p_str(params, "taskId")?;
+        // Running: start its attempt again, on what its member runs now (FB-054).
+        let live = self.store.lock().unwrap().attempts_of_task(task_id)?.into_iter().find(|a| a.kind == AttemptKind::Work && matches!(a.state, AttemptState::Provisioning | AttemptState::Running | AttemptState::WaitingInput));
+        if let Some(a) = live { return self.attempt_restart(&a.id); }
         // A candidate still waiting keeps its member busy: retrying it is
         // rejecting it, so the new attempt can start.
         if self.latest_submitted(task_id).is_ok() {
@@ -3689,9 +3841,14 @@ impl Service {
         Ok(serde_json::to_value(self.store.lock().unwrap().task(task_id)?).unwrap())
     }
 
+    /// Cancel a task in one step, whatever it is doing (FB-061). With
+    /// `replacedBy`, the tasks that waited for it wait for that one instead
+    /// (FB-053).
     fn task_cancel(&self, params: &Value) -> ApiResult {
         let task_id = p_str(params, "taskId")?;
+        let replaced = match p_opt(params, "replacedBy") { Some(r) => Some(self.repoint_dependants(task_id, &r)?), None => None };
         let active = self.store.lock().unwrap().active_attempts()?;
+        let mut running = false;
         for a in active.iter().filter(|a| a.task_id == task_id) {
             // A candidate still waiting goes with its task, or its member stays busy (FB-035).
             // Its turn is over even when its driver is still finishing up.
@@ -3699,13 +3856,62 @@ impl Service {
                 let _ = self.move_attempt(&a.id, AttemptState::Cancelled, Some("its task was cancelled".into()));
                 continue;
             }
+            // A live turn ends the task itself when it stops.
+            if let Some(r) = self.running.lock().unwrap().get_mut(&a.id) { r.task_cancelled = true; running = true; }
             let _ = self.attempt_cancel(&a.id);
         }
         let task = self.store.lock().unwrap().task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
-        if task.state != TaskState::Running {
+        if !task.state.is_terminal() && !(running && task.state == TaskState::Running) {
             self.move_task(task_id, TaskState::Cancelled, None)?;
         }
-        Ok(json!({"cancelled": task_id}))
+        Ok(json!({"cancelled": task_id, "repointed": replaced}))
+    }
+
+    /// The tasks waiting for `old` wait for `new` instead: same quest, no cycle.
+    fn repoint_dependants(&self, old: &str, new: &str) -> Res<Vec<String>> {
+        let store = self.store.lock().unwrap();
+        let old_task = store.task(old)?.ok_or_else(|| ApiError::not_found(format!("task {old}")))?;
+        let new_task = store.task(new)?.ok_or_else(|| ApiError::not_found(format!("task {new}")))?;
+        if new_task.quest_id != old_task.quest_id { return Err(ApiError::invalid(format!("{new} is in another quest"))); }
+        let mut all = store.tasks_of_quest(&old_task.quest_id)?;
+        let mut changed = vec![];
+        for t in all.iter_mut().filter(|t| t.depends_on.iter().any(|d| d == old) && !t.state.is_terminal()) {
+            t.depends_on.retain(|d| d != old && d != new);
+            if t.id != new { t.depends_on.push(new.to_string()); }
+            t.version += 1;
+            t.updated_at = now();
+            changed.push(t.id.clone());
+        }
+        validate_dag(&all).map_err(ApiError::invalid)?;
+        let quest = store.quest(&old_task.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
+        self.atomic(&store, || {
+            for t in all.iter().filter(|t| changed.contains(&t.id)) {
+                store.put_task(t)?;
+                self.emit_locked(&store, Event::new("task.updated", "user").about_task(t, &quest.project_id).with(json!({"title": t.title, "dependsOn": t.depends_on, "version": t.version, "replaced": old})));
+            }
+            Ok(())
+        })?;
+        Ok(changed)
+    }
+
+    /// Start a running attempt again on its member's current harness and
+    /// model: the turn stops, what it wrote is kept and the next attempt
+    /// goes on from it (FB-054). The new attempt does not count against the task.
+    fn attempt_restart(&self, attempt_id: &str) -> ApiResult {
+        let attempt = self.store.lock().unwrap().attempt(attempt_id)?.ok_or_else(|| ApiError::not_found(format!("attempt {attempt_id}")))?;
+        if attempt.kind != AttemptKind::Work || !matches!(attempt.state, AttemptState::Provisioning | AttemptState::Running | AttemptState::WaitingInput) {
+            return Err(ApiError::conflict(format!("attempt is {:?}: only a running attempt starts again", attempt.state)));
+        }
+        let task = self.store.lock().unwrap().task(&attempt.task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
+        if task.candidates > 1 { return Err(ApiError::conflict("a race's runner cannot start again: cancel it, the race settles with the others")); }
+        {
+            let mut running = self.running.lock().unwrap();
+            let r = running.get_mut(attempt_id).ok_or_else(|| ApiError::conflict("the attempt has no live turn"))?;
+            r.restart_requested = true;
+            r.cancel_requested = true;
+        }
+        self.emit(Event::new("attempt.restart_requested", "user").about_attempt(&attempt));
+        Ok(json!({"restarting": attempt_id}))
     }
 
     /// End the turn now and keep what the worktree has as the candidate.
@@ -3766,6 +3972,15 @@ impl Service {
             // rest of the task as it is; one the user allowed always, by program.
             if let (false, Some(p)) = (by.starts_with("policy"), a.pending_permission.as_ref().filter(|p| p.request_id == request_id)) {
                 let kind = p.options.iter().find(|o| Some(&o.id) == option.as_ref()).map(|o| o.kind.as_str()).unwrap_or("");
+                // Reading a file outside its worktree, allowed always by the user: its folder, for the rest of the task (FB-052).
+                if let (true, Some(path), Some(mut task)) = (kind == "allow_always" && by != "orchestrator" && crate::policy::is_read(&p.title), crate::policy::read_path(&p.detail), store.task(&a.task_id)?) {
+                    let folder = Path::new(&crate::policy::expand_home(&path)).parent().map(|d| d.display().to_string()).unwrap_or_default();
+                    if Path::new(&folder).is_absolute() && folder != "/" && !task.granted.reads.contains(&folder) {
+                        task.granted.reads.push(folder);
+                        task.updated_at = now();
+                        store.put_task(&task)?;
+                    }
+                }
                 if let (true, Some(cmd), Some(mut task)) = (kind.starts_with("allow"), crate::policy::command_of(&p.title, &p.detail), store.task(&a.task_id)?) {
                     let before = task.granted.clone();
                     if !task.granted.commands.contains(&cmd) && task.granted.commands.len() < 200 { task.granted.commands.push(cmd.clone()); }
@@ -3878,9 +4093,11 @@ impl Service {
             (t, q, p, a)
         };
         self.move_task(task_id, TaskState::Integrating, None)?;
-        let Some(candidate) = &attempt.candidate else {
+        // A spike's deliverable is what it showed: it is done, never merged (FB-058).
+        let candidate = attempt.candidate.as_ref().filter(|_| !task.spike);
+        let Some(candidate) = candidate else {
             self.move_task(task_id, TaskState::Completed, None)?;
-            self.emit(Event::new("merge.skipped", "guild").about_attempt(&attempt).with(json!({"note": "no code changes to integrate"})));
+            self.emit(Event::new("merge.skipped", "guild").about_attempt(&attempt).with(json!({"note": if task.spike { "a spike: its captures and report are the result, nothing is integrated" } else { "no code changes to integrate" }})));
             self.tick();
             return Ok(json!({"completed": task_id, "integrated": false}));
         };
@@ -3927,6 +4144,79 @@ impl Service {
             }
         }
     }
+}
+
+/// How many deleted files make a candidate need someone to read the list (FB-049).
+const MASS_DELETION: usize = 20;
+
+/// How long a spike may run unless it says otherwise (FB-058).
+const SPIKE_MINUTES: u32 = 30;
+
+/// `readPaths` as absolute folders, `~/` expanded; None when absent.
+fn parse_read_paths(params: &Value) -> Res<Option<Vec<String>>> {
+    let Some(list) = params.get("readPaths").and_then(Value::as_array) else { return Ok(None) };
+    let mut out = vec![];
+    for p in list.iter().filter_map(Value::as_str).map(crate::policy::expand_home).filter(|p| !p.is_empty()) {
+        if !Path::new(&p).is_absolute() { return Err(ApiError::invalid(format!("{p}: a folder to read must be absolute or start with ~/"))); }
+        if !out.contains(&p) { out.push(p); }
+    }
+    Ok(Some(out))
+}
+
+/// The images in a folder, by name.
+fn images_in(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir).map(|r| r.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    files.retain(|p| p.is_file() && p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp")));
+    files.sort();
+    files
+}
+
+/// The files of a worktree a pattern names: a path relative to it, with
+/// `*` allowed in the file name (`captures/day_*.png`). Never outside it.
+fn evidence_files(root: &Path, pattern: &str) -> Vec<PathBuf> {
+    let pattern = pattern.trim().trim_start_matches("./");
+    if pattern.is_empty() || pattern.contains("..") || Path::new(pattern).is_absolute() { return vec![]; }
+    let full = root.join(pattern);
+    let name = full.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+    if !name.contains('*') { return if full.is_file() { vec![full] } else { vec![] }; }
+    let dir = full.parent().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir).map(|r| r.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    found.retain(|p| p.is_file() && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| crate::policy::pattern_matches(&name, n)));
+    found.sort();
+    found
+}
+
+/// Deleted files grouped by what they are (code, scenes, shaders, assets,
+/// docs…), each group with its count and the folders most of it was in.
+fn deletion_manifest(deleted: &[&str]) -> String {
+    let group = |path: &str| -> &'static str {
+        let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        match ext.as_str() {
+            "gdshader" | "shader" | "glsl" | "hlsl" | "wgsl" | "frag" | "vert" | "gdshaderinc" => "shaders",
+            "tscn" | "scn" | "tres" | "res" | "unity" | "prefab" | "scene" => "scenes",
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "wav" | "ogg" | "mp3" | "glb" | "gltf" | "fbx" | "obj" | "blend" | "ttf" | "otf" | "aseprite" | "psd" | "import" | "bin" | "exr" | "hdr" => "assets",
+            "md" | "txt" | "pdf" | "rst" => "docs",
+            "rs" | "gd" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "c" | "cc" | "cpp" | "h" | "hpp" | "cs" | "java" | "kt" | "swift" | "rb" | "lua" | "sh" => "code",
+            _ => "other",
+        }
+    };
+    let mut groups: Vec<(&str, Vec<&str>)> = vec![];
+    for d in deleted {
+        let g = group(d);
+        match groups.iter_mut().find(|(n, _)| *n == g) { Some((_, v)) => v.push(d), None => groups.push((g, vec![d])) }
+    }
+    groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    let mut out = format!("{} files deleted: {}", deleted.len(), groups.iter().map(|(g, v)| format!("{g} {}", v.len())).collect::<Vec<_>>().join(", "));
+    for (g, files) in &groups {
+        let mut dirs: Vec<(String, usize)> = vec![];
+        for f in files {
+            let dir = f.rsplit_once('/').map(|(d, _)| d.split('/').take(2).collect::<Vec<_>>().join("/")).unwrap_or_else(|| ".".into());
+            match dirs.iter_mut().find(|(d, _)| *d == dir) { Some((_, n)) => *n += 1, None => dirs.push((dir, 1)) }
+        }
+        dirs.sort_by(|a, b| b.1.cmp(&a.1));
+        out.push_str(&format!("\n- {g} ({}): {}", files.len(), dirs.iter().take(6).map(|(d, n)| format!("{d}/ {n}")).collect::<Vec<_>>().join(", ")));
+    }
+    out
 }
 
 /// Names for members who come without one: Greek and Roman heroes.
@@ -4040,7 +4330,15 @@ enum Carried {
     Conflicts { files: Vec<String> },
 }
 
-fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>, feedback: &[String], continued: Carried) -> String {
+/// What else a member's prompt carries: the folders it may read and the
+/// files the history holds that its task may want back.
+#[derive(Default)]
+struct Context {
+    reads: Vec<String>,
+    deleted: Vec<(String, String)>,
+}
+
+fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>, feedback: &[String], continued: Carried, ctx: &Context) -> String {
     let mut s = String::new();
     s.push_str(role_prompt.trim());
     s.push_str("\n\n# Task: ");
@@ -4061,6 +4359,24 @@ fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design:
         "\n## Rules\n- Your working directory is a dedicated git worktree on branch `{}`. Work only inside it.\n- Do not commit, push or switch branches; the guild commits your work when you finish.\n- Do not ask whether to proceed: do the work, then reply with a short summary of what changed, how you verified it, and anything left undone.\n- Scratch files (throwaway scripts, logs, data) go in `{}`, never in /tmp: it is yours and the guild deletes it when you finish.\n",
         workspace.branch, crate::paths::scratch_dir(&workspace.attempt_id).display()
     ));
+    if !ctx.reads.is_empty() {
+        s.push_str(&format!("- You may read (never change) these folders without asking: {}.\n", ctx.reads.join(", ")));
+    }
+    // What it shows, while it works and at the end (FB-050, FB-059).
+    let live = crate::paths::scratch_dir(&workspace.attempt_id).join("evidence");
+    s.push_str(&format!("- When your work changes what is seen (art, scenes, UI), save a numbered capture of each step in `{}` (01-….png, 02-….png): the lead watches that folder while you work and can correct you early.\n", live.display()));
+    if !task.evidence.is_empty() {
+        s.push_str(&format!("\n## Evidence to leave\nLeave these images in your worktree before you finish (they need not be committed; the guild keeps them with your candidate and the reviewer looks at them): {}. Without them the candidate fails.\n", task.evidence.join(", ")));
+    }
+    if task.spike {
+        s.push_str("\n## This is a spike\nA short trial to decide something, not the finished work: nothing you do is integrated. Your deliverable is what you show (the captures) and what you learned, in your summary. Stop as soon as it answers the question.\n");
+    }
+    if !ctx.deleted.is_empty() {
+        s.push_str("\n## It existed before\nThe repository's history holds files that may be what the task wants back. Read them before writing anything new (`git show <commit>^:<path>`), and reuse them:\n");
+        for (sha, path) in &ctx.deleted {
+            if sha.is_empty() { s.push_str(&format!("- {path} (a note on what was removed)\n")); } else { s.push_str(&format!("- {path} — deleted in {sha}\n")); }
+        }
+    }
     if !feedback.is_empty() {
         s.push_str("\n## Earlier attempts were turned down\n");
         for f in feedback { s.push_str(&format!("- {}\n", f.trim())); }
@@ -5064,9 +5380,9 @@ mod tests {
         assert_eq!(saved["version"], 2);
         assert_eq!(saved["loops"][2]["id"], "loop-3");
         let design: crate::design::GameDesign = serde_json::from_value(saved).unwrap();
-        let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), version: 1, created_at: now(), updated_at: now() };
+        let task = Task { id: "t".into(), quest_id: "q".into(), title: "Tune words".into(), instructions: "…".into(), acceptance: vec![], depends_on: vec![], role: "systems-designer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Ready, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), evidence: vec![], spike: false, version: 1, created_at: now(), updated_at: now() };
         let ws = Workspace { id: "w".into(), attempt_id: "a".into(), project_id: design.project_id.clone(), path: "/tmp/w".into(), branch: "guild/x".into(), base_sha: "0".into(), state: WorkspaceState::Ready, created_at: now(), updated_at: now() };
-        let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design), &[], Carried::Nothing);
+        let prompt = compose_prompt(&config::default_role_prompt("systems-designer"), &task, &ws, Some(&design), &[], Carried::Nothing, &Context::default());
         assert!(prompt.contains("Avoid: a dominant strategy; always choosing the longest word; obvious decisions; grinding"));
         assert!(prompt.contains("Loop \"Economy\": earn → spend ↺"));
         assert!(prompt.contains("part, a loop or the whole"));
@@ -5780,6 +6096,189 @@ mod tests {
         let second = service.handle("task.create", &json!({"questId": quest_id, "title": "Once", "idempotencyKey": "k1"})).unwrap();
         assert_eq!(first, second);
         assert_eq!(service.snapshot().unwrap().tasks.len(), 1);
+    }
+
+    /// `setup` with the mock at hand, to change what it does mid-test.
+    fn setup_with_mock(behaviour: MockBehaviour) -> (TempHome, Arc<Service>, String, Arc<MockHarness>) {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(8), cancel_timeout: Duration::from_millis(500), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        let mock = Arc::new(MockHarness::new(behaviour));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"], "model": "mock-fast"})).unwrap();
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
+        (home, service, quest_id, mock)
+    }
+
+    fn worktree_of(snap: &Snapshot, attempt: &Attempt) -> PathBuf {
+        PathBuf::from(&snap.workspaces.iter().find(|w| Some(&w.id) == attempt.workspace_id.as_ref()).unwrap().path)
+    }
+
+    #[test]
+    fn a_task_added_to_a_completed_quest_opens_it_again_and_runs() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "spec", "title": "Spec"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "submitted", |s| s.tasks[0].state == TaskState::Verifying);
+        service.handle("task.accept", &json!({"taskId": "spec", "integrate": true})).unwrap();
+        wait_for(&service, "completed", |s| s.quests[0].state == QuestState::Completed);
+        // FB-055: the implementation tasks written after the spec start, in the same quest.
+        service.handle("task.create", &json!({"questId": quest_id, "id": "impl", "title": "Build it", "dependsOn": ["spec"]})).unwrap();
+        let snap = wait_for(&service, "the new task running", |s| s.tasks.iter().any(|t| t.id == "impl" && !matches!(t.state, TaskState::Pending | TaskState::Ready)));
+        assert_eq!(snap.quests[0].state, QuestState::Running);
+        let kinds: Vec<String> = service.store.lock().unwrap().events_after(0, 2000).unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&"quest.reopened".to_string()));
+    }
+
+    #[test]
+    fn a_task_replaced_hands_its_dependants_over_and_cancelling_ends_it_in_one_step() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Hang);
+        for (id, deps) in [("base", vec![]), ("a", vec!["base"]), ("b", vec!["base"])] {
+            service.handle("task.create", &json!({"questId": quest_id, "id": id, "title": id, "dependsOn": deps})).unwrap();
+        }
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "running", |s| s.attempts.first().is_some_and(|a| a.state == AttemptState::Running));
+        // FB-053: the base is replaced by another task; its dependants follow, nothing is recreated.
+        service.handle("task.create", &json!({"questId": quest_id, "id": "base2", "title": "base, again"})).unwrap();
+        let r = service.handle("task.cancel", &json!({"taskId": "base", "replacedBy": "base2"})).unwrap();
+        assert_eq!(r["repointed"], json!(["a", "b"]));
+        // FB-061: a running task is cancelled in one step, not left blocked asking for another.
+        let snap = wait_for(&service, "cancelled", |s| s.tasks.iter().any(|t| t.id == "base" && t.state == TaskState::Cancelled));
+        for id in ["a", "b"] {
+            let t = snap.tasks.iter().find(|t| t.id == id).unwrap();
+            assert_eq!(t.depends_on, ["base2"]);
+            assert_ne!(t.state, TaskState::Blocked, "{id} waits for base2, not for the cancelled base");
+        }
+        assert_eq!(snap.attempts[0].failure.as_deref(), Some("its task was cancelled"));
+        // A dependant already blocked by a failed parent can be pointed elsewhere too.
+        service.handle("task.create", &json!({"questId": quest_id, "id": "c", "title": "c", "dependsOn": ["base"]})).unwrap();
+        wait_for(&service, "blocked", |s| s.tasks.iter().any(|t| t.id == "c" && t.state == TaskState::Blocked));
+        service.handle("task.update", &json!({"taskId": "c", "dependsOn": ["base2"]})).unwrap();
+        wait_for(&service, "waiting again", |s| s.tasks.iter().any(|t| t.id == "c" && t.state != TaskState::Blocked));
+    }
+
+    #[test]
+    fn a_note_stops_a_working_member_and_reaches_it_at_once() {
+        let (_home, service, quest_id, mock) = setup_with_mock(MockBehaviour::Hang);
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Port the shaders"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "running", |s| s.attempts.first().is_some_and(|a| a.state == AttemptState::Running));
+        mock.set_behaviour(MockBehaviour::Succeed { file: "port.txt".into(), content: "ported\n".into() });
+        // FB-051: Alba kept reinventing shaders through three notes she read only at the end.
+        let r = service.handle("task.note", &json!({"taskId": "t1", "text": "port shaders/neon.gdshader from 91de469, do not write new ones"})).unwrap();
+        assert_eq!(r["redirected"], true);
+        let snap = wait_for(&service, "submitted", |s| s.attempts[0].state == AttemptState::Submitted);
+        assert_eq!(snap.attempts.len(), 1, "the same attempt and session go on");
+        assert_eq!(snap.attempts[0].turns, 2);
+        let last = mock.prompts().last().cloned().unwrap();
+        assert!(last.contains("stopped you to correct course") && last.contains("shaders/neon.gdshader"), "{last}");
+        assert_eq!(snap.attempts[0].candidate.as_ref().map(|c| c.files_changed), Some(1));
+    }
+
+    #[test]
+    fn restarting_an_attempt_goes_on_from_its_work_on_the_members_new_model() {
+        let (_home, service, quest_id, mock) = setup_with_mock(MockBehaviour::Hang);
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Long work", "maxAttempts": 1})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "running", |s| s.attempts.first().is_some_and(|a| a.state == AttemptState::Running));
+        let first = snap.attempts[0].clone();
+        std::fs::write(worktree_of(&snap, &first).join("half.txt"), "half done\n").unwrap();
+        // FB-054: the member moved to another model to save tokens; its attempt in flight follows.
+        service.handle("member.update", &json!({"memberId": "aria", "model": "mock-slow"})).unwrap();
+        mock.set_behaviour(MockBehaviour::Succeed { file: "rest.txt".into(), content: "rest\n".into() });
+        let r = service.handle("task.retry", &json!({"taskId": "t1"})).unwrap();
+        assert_eq!(r["restarting"], json!(first.id));
+        let snap = wait_for(&service, "the new attempt submitted", |s| s.attempts.len() == 2 && s.attempts.iter().any(|a| a.state == AttemptState::Submitted));
+        let old = snap.attempts.iter().find(|a| a.id == first.id).unwrap();
+        let new = snap.attempts.iter().find(|a| a.id != first.id).unwrap();
+        assert_eq!(old.state, AttemptState::Cancelled);
+        assert!(old.failure.as_deref().unwrap_or("").contains("started again"), "{:?}", old.failure);
+        assert_eq!(new.model_requested.as_deref(), Some("mock-slow"));
+        assert!(worktree_of(&snap, new).join("half.txt").exists(), "what it had written came along");
+        assert_eq!(new.candidate.as_ref().map(|c| c.files_changed), Some(2));
+        assert!(snap.tasks[0].max_attempts >= 2, "a restart costs no attempt");
+    }
+
+    #[test]
+    fn the_images_a_task_asks_for_are_kept_even_when_ignored_and_missing_ones_fail_it() {
+        let (home, service, quest_id) = setup(MockBehaviour::Succeed { file: "captures/day.png".into(), content: "png".into() });
+        let repo = home.repo_path();
+        std::fs::write(repo.join(".gitignore"), "captures/\n").unwrap();
+        workspaces::git(&repo, &["add", "-A"]).unwrap();
+        workspaces::git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "ignore captures"]).unwrap();
+        // FB-050: captures/ is ignored by git, and the reviewer could not see them.
+        service.handle("member.add", &json!({"id": "bea", "harness": "mock", "roles": ["implementer"]})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Day look", "evidence": ["captures/*.png"]})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t2", "title": "Night look", "evidence": ["captures/night.png"]})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "both submitted", |s| s.attempts.len() == 2 && s.attempts.iter().all(|a| a.state == AttemptState::Submitted));
+        let of = |t: &str| snap.attempts.iter().find(|a| a.task_id == t).unwrap();
+        let day = of("t1").verifier_results.iter().find(|v| v.id == "evidence").expect("evidence kept");
+        assert_eq!((day.status.as_str(), day.required, day.evidence.len()), ("passed", true, 1));
+        assert!(Path::new(&day.evidence[0]).exists() && day.evidence[0].contains("artifacts"), "{:?}", day.evidence);
+        let night = of("t2").verifier_results.iter().find(|v| v.id == "evidence").unwrap();
+        assert_eq!(night.status, "failed");
+        assert!(night.tail.contains("captures/night.png"));
+        assert!(!passes_gates(of("t2")));
+    }
+
+    #[test]
+    fn a_candidate_deleting_many_files_waits_for_someone_to_read_the_list() {
+        let (home, service, quest_id) = setup(MockBehaviour::AskPermission { file: "x.txt".into(), content: "x".into() });
+        let repo = home.repo_path();
+        for i in 0..14 { std::fs::create_dir_all(repo.join("shaders")).unwrap(); std::fs::write(repo.join(format!("shaders/s{i}.gdshader")), "x").unwrap(); }
+        for i in 0..10 { std::fs::create_dir_all(repo.join("scenes/city")).unwrap(); std::fs::write(repo.join(format!("scenes/city/c{i}.tscn")), "x").unwrap(); }
+        workspaces::git(&repo, &["add", "-A"]).unwrap();
+        workspaces::git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "look"]).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Clean up", "strategy": "single", "selection": "policy", "autoIntegrate": true})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "asking", |s| s.attempts.first().is_some_and(|a| a.state == AttemptState::WaitingInput));
+        let wt = worktree_of(&snap, &snap.attempts[0]);
+        std::fs::remove_dir_all(wt.join("shaders")).unwrap();
+        std::fs::remove_dir_all(wt.join("scenes")).unwrap();
+        service.handle("permission.respond", &json!({"attemptId": snap.attempts[0].id, "requestId": "perm-1", "optionId": "allow"})).unwrap();
+        // FB-049: 631 files went in DEC-075 without anyone seeing the list; this one is not integrated alone.
+        let snap = wait_for(&service, "submitted", |s| s.attempts[0].state == AttemptState::Submitted);
+        let d = snap.attempts[0].verifier_results.iter().find(|v| v.id == "deletions").expect("the list of what goes");
+        assert_eq!((d.status.as_str(), d.required), ("needs-review", true));
+        assert!(d.tail.starts_with("24 files deleted: shaders 14, scenes 10") && d.tail.contains("scenes/city/ 10"), "{}", d.tail);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_ne!(service.snapshot().unwrap().tasks[0].state, TaskState::Completed, "the policy integrated it");
+        // Someone read it: accepting it integrates it.
+        service.handle("task.accept", &json!({"taskId": "t1", "integrate": true})).unwrap();
+        wait_for(&service, "completed", |s| s.tasks[0].state == TaskState::Completed);
+    }
+
+    #[test]
+    fn a_spike_is_short_shows_its_captures_and_is_never_integrated() {
+        let (home, service, quest_id) = setup(MockBehaviour::Succeed { file: "try.txt".into(), content: "trial\n".into() });
+        let t = service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "City by day, no rain", "spike": true})).unwrap();
+        assert_eq!(t["timeout_minutes"], 30, "FB-058: short by default");
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "submitted", |s| s.tasks[0].state == TaskState::Verifying);
+        service.handle("task.accept", &json!({"taskId": "t1", "integrate": true})).unwrap();
+        let snap = wait_for(&service, "completed", |s| s.tasks[0].state == TaskState::Completed);
+        let branch = snap.quests[0].integration_ref.clone();
+        let repo = home.repo_path();
+        assert!(workspaces::git(&repo, &["show", &format!("{branch}:try.txt")]).is_err(), "a spike reached the quest's branch");
+    }
+
+    #[test]
+    fn a_quest_names_the_folders_its_members_read_and_the_prompt_says_so() {
+        let (_home, service, quest_id, mock) = setup_with_mock(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        assert!(service.handle("quest.update", &json!({"questId": quest_id, "readPaths": ["relative/caps"]})).is_err());
+        let q = service.handle("quest.update", &json!({"questId": quest_id, "readPaths": ["~/harness-directive-capturas/"]})).unwrap();
+        let folder = q["read_paths"][0].as_str().unwrap().to_string();
+        assert!(folder.starts_with('/') && folder.ends_with("/harness-directive-capturas"), "{folder}");
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Match the look"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "submitted", |s| s.tasks[0].state == TaskState::Verifying);
+        let prompt = mock.prompts()[0].clone();
+        assert!(prompt.contains(&format!("read (never change) these folders without asking: {folder}")), "{prompt}");
+        assert!(prompt.contains("/evidence`"), "where step captures go");
     }
 
     #[test]

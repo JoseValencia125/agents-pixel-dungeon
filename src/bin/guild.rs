@@ -46,16 +46,23 @@ USAGE
   guild member remove <id>
   guild models [kiro|codex|claude|mock]  the models the harness announces
 
-  guild quest new <project> <title> [--description TEXT]
+  guild quest new <project> <title> [--description TEXT] [--read FOLDER]...
+                                     --read: a folder outside the repository its members may read without asking
+  guild quest set <quest> [--title T] [--description TEXT] [--read FOLDER]... [--no-read]
   guild quest sync <quest> [--from REF]   bring the project's target (or REF) into the quest's branch; later attempts start from it
   guild task new <quest> <title> [--instructions TEXT] [--accept TEXT]... [--depends ID,ID]
                                      [--role R] [--member ID] [--model M] [--priority N] [--max-attempts N] [--id ID]
                                      [--strategy single|reviewed|race] [--candidates N] [--select policy|judge|user] [--auto-integrate] [--timeout MIN]
-                                     a race runs N members at once; the selection picks among the candidates that passed the verifiers
+                                     [--evidence PATH]... [--spike]
+                                     a race runs N members at once; the selection picks among the candidates that passed the verifiers;
+                                     --evidence: an image the work must leave in its worktree (* in the name), kept and shown with the candidate;
+                                     --spike: a short trial (30 min) whose captures and report are the result, never integrated
   guild task done <task> [--sha SHA] [--reason TEXT]  a blocked or accepted task integrated by hand is completed; its dependants start
-  guild task note <task> <text>      add to a task that already started: the member reads it when its turn ends, a retry with the instructions
+  guild task note <task> <text> [--later]  add to a task that already started: a member at work is stopped and handed it now
+                                     (--later: when its turn ends); a retry reads it with the instructions
   guild task set <task> [--title T] [--instructions TEXT] [--accept TEXT]... [--depends ID,ID | --no-depends] [--role R] [--member ID] [--priority N] [--timeout MIN]
-                                     change a task nobody has started yet; --accept replaces the criteria
+                 [--evidence PATH]... [--spike|--no-spike]
+                                     change a task nobody has started yet (or one waiting on a dependency that failed); --accept replaces the criteria
   guild decisions <task>             how each candidate was chosen: by the policy, a judge or you
   guild question new <project> --question TEXT [--context TEXT] [--system ID]
   guild question resolve <project> <Q-id> --decision TEXT [--why TEXT] [--answer TEXT] [--evidence TEXT]... [--rejected TEXT]...
@@ -100,7 +107,9 @@ USAGE
                                      --override accepts a verified attempt that was failed (by the orchestrator, a judge or a reject)
   guild reject <task> [--reason TEXT]
   guild integrate <task>
-  guild retry <task> [--reason TEXT]  a candidate still waiting is rejected with the reason  |  guild cancel-task <task>  |  guild cancel <attempt>
+  guild retry <task> [--reason TEXT]  a candidate still waiting is rejected with the reason; a task at work starts again (see restart)
+  guild cancel-task <task> [--replaced-by TASK]  ends it in one step; its dependants wait for TASK instead  |  guild cancel <attempt>
+  guild restart <attempt>            start a running attempt again on its member's current harness and model, from what it wrote
   guild interrupt <attempt>          end the turn now; what the worktree has becomes the candidate
   guild permission <attempt> <option-id|deny>
   guild attempt <attempt>            the attempt, its candidate, verifiers and transcript
@@ -193,7 +202,7 @@ fn parse(args: &[String]) -> Args<'_> {
     Args { positional, flags }
 }
 
-fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground" | "detach" | "enable" | "disable" | "no-depends" | "override" | "full") }
+fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground" | "detach" | "enable" | "disable" | "no-depends" | "override" | "full" | "spike" | "no-spike" | "later" | "no-read") }
 
 impl Args<'_> {
     fn flag(&self, name: &str) -> Option<&str> { self.flags.iter().rev().find(|(k, _)| *k == name).and_then(|(_, v)| *v) }
@@ -507,9 +516,20 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             else { println!("quest {} already has {}", r["questId"].as_str().unwrap_or(""), r["from"].as_str().unwrap_or("")); }
             Ok(())
         }
+        "quest" if a.positional.first().copied() == Some("set") => {
+            let mut params = json!({"questId": a.pos(1, "quest")?});
+            if let Some(t) = a.flag("title") { params["title"] = json!(t); }
+            if let Some(d) = a.flag("description") { params["description"] = json!(d); }
+            if !a.all("read").is_empty() { params["readPaths"] = json!(a.all("read")); }
+            if a.has("no-read") { params["readPaths"] = json!([]); }
+            let r = call(&ensure_running()?, "quest.update", params)?;
+            println!("quest {} · {} · reads {}", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""), r["read_paths"].as_array().map(|d| d.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).filter(|s| !s.is_empty()).unwrap_or_else(|| "nothing outside".into()));
+            Ok(())
+        }
         "quest" => {
             if a.pos(0, "subcommand")? != "new" { return Err(USAGE.into()); }
-            let r = call(&ensure_running()?, "quest.create", json!({"projectId": a.pos(1, "project")?, "title": a.pos(2, "title")?, "description": a.flag("description")}))?;
+            let reads = a.all("read");
+            let r = call(&ensure_running()?, "quest.create", json!({"projectId": a.pos(1, "project")?, "title": a.pos(2, "title")?, "description": a.flag("description"), "readPaths": if reads.is_empty() { Value::Null } else { json!(reads) }}))?;
             println!("quest {} · {}", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""));
             Ok(())
         }
@@ -519,8 +539,8 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "task" if a.positional.first().copied() == Some("note") => {
-            let r = call(&ensure_running()?, "task.note", json!({"taskId": a.pos(1, "task")?, "text": a.pos(2, "note")?}))?;
-            println!("task {} · {} notes · the member reads it when its turn ends", r["id"].as_str().unwrap_or(""), r["notes"].as_array().map(Vec::len).unwrap_or(0));
+            let r = call(&ensure_running()?, "task.note", json!({"taskId": a.pos(1, "task")?, "text": a.pos(2, "note")?, "later": a.has("later")}))?;
+            println!("task {} · {} notes · {}", r["id"].as_str().unwrap_or(""), r["notes"].as_array().map(Vec::len).unwrap_or(0), if r["redirected"] == true { "the member was stopped and reads it now" } else { "the member reads it when its turn ends" });
             Ok(())
         }
         "task" if a.positional.first().copied() == Some("set") => {
@@ -531,6 +551,9 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             if a.has("no-depends") { params["dependsOn"] = json!([]); }
             if let Some(p) = a.flag("priority").and_then(|s| s.parse::<i64>().ok()) { params["priority"] = json!(p); }
             if let Some(m) = a.flag("timeout").and_then(|s| s.parse::<u64>().ok()) { params["timeoutMinutes"] = json!(m); }
+            if !a.all("evidence").is_empty() { params["evidence"] = json!(a.all("evidence")); }
+            if a.has("spike") { params["spike"] = json!(true); }
+            if a.has("no-spike") { params["spike"] = json!(false); }
             let r = call(&ensure_running()?, "task.update", params)?;
             println!("task {} · {} · v{} · depends on {}", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""), r["version"], r["depends_on"].as_array().map(|d| d.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).filter(|s| !s.is_empty()).unwrap_or_else(|| "nothing".into()));
             Ok(())
@@ -545,6 +568,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                 "candidates": a.flag("candidates").and_then(|s| s.parse::<u64>().ok()), "autoIntegrate": a.has("auto-integrate"),
                 "strategy": a.flag("strategy"), "selection": a.flag("select"),
                 "timeoutMinutes": a.flag("timeout").and_then(|s| s.parse::<u64>().ok()),
+                "evidence": a.all("evidence"), "spike": a.has("spike"),
             });
             let r = call(&ensure_running()?, "task.create", params)?;
             println!("task {} · {} ({})", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""), r["state"].as_str().unwrap_or(""));
@@ -573,11 +597,12 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
         }
         "retry" => {
             let r = call(&ensure_running()?, "task.retry", json!({"taskId": a.pos(0, "task")?, "reason": a.flag("reason")}))?;
+            if let Some(id) = r["restarting"].as_str() { println!("attempt {id} starts again on its member's current harness and model"); return Ok(()); }
             println!("task {} · attempt {} of {}", r["state"].as_str().unwrap_or(""), r["attempts_made"], r["max_attempts"]);
             Ok(())
         }
         "cancel-task" => {
-            let r = call(&ensure_running()?, "task.cancel", json!({"taskId": a.pos(0, "task")?}))?;
+            let r = call(&ensure_running()?, "task.cancel", json!({"taskId": a.pos(0, "task")?, "replacedBy": a.flag("replaced-by")}))?;
             println!("{}", summarize(&r));
             Ok(())
         }
@@ -829,6 +854,11 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                 }
                 if d["human_override"] == true { println!("  (the user chose against an earlier decision)"); }
             }
+            Ok(())
+        }
+        "restart" => {
+            let r = call(&ensure_running()?, "attempt.restart", json!({"attemptId": a.pos(0, "attempt")?}))?;
+            println!("{}", summarize(&r));
             Ok(())
         }
         "interrupt" => {

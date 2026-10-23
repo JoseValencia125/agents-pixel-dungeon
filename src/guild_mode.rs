@@ -177,28 +177,48 @@ fn crew(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot) {
         ui.label(mono(&tr("Sin miembros todavía. Pídele al orquestador, en el Chat, que arme el equipo: elige los roles y cuántos según el trabajo."), 11.0).color(DIM));
         return;
     }
-    let mut members: Vec<&Member> = snap.members.iter().collect();
-    members.sort_by_key(|m| !m.enabled);
-    for m in members {
-        let agent = guild_view::member_agent(snap, m);
-        let color = if m.enabled { state_color(&agent.status) } else { Color32::from_gray(90) };
-        let roles: Vec<String> = m.roles.iter().map(|r| crate::guild_studio::role_name(&snap.roles, r)).collect();
-        let frame = Frame::new().fill(Color32::from_rgba_unmultiplied(255, 255, 255, 6)).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(8, 5));
-        let response = frame.show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(mono("●", 11.0).color(color));
-                ui.label(mono(&m.name, 12.0).strong().color(if m.enabled { INK } else { DIM }));
-                ui.label(mono(&roles.join(", "), 10.5).color(GOLD));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(mono(&format!("{} · {}", m.harness, m.model_id.clone().unwrap_or_else(|| tr("modelo por defecto"))), 10.0).color(DIM));
-                });
+    // By what they do, so who works is seen at once (FB-056): at work, then
+    // waiting for a decision, then free; the ones turned off folded away.
+    let rows: Vec<(&Member, Agent)> = snap.members.iter().map(|m| (m, guild_view::member_agent(snap, m))).collect();
+    let group = |m: &Member, a: &Agent| -> usize {
+        if !m.enabled { 3 } else { match a.status.as_str() { "working" | "unknown" => 0, "blocked" | "done" => 1, _ => 2 } }
+    };
+    for (g, title) in [(0, tr("Trabajando")), (1, tr("Esperan una decisión")), (2, tr("Libres")), (3, tr("Desactivados"))] {
+        let mut members: Vec<&(&Member, Agent)> = rows.iter().filter(|(m, a)| group(m, a) == g).collect();
+        if members.is_empty() { continue; }
+        members.sort_by(|a, b| a.0.name.to_lowercase().cmp(&b.0.name.to_lowercase()));
+        let heading = format!("{title} · {}", members.len());
+        if g == 3 {
+            egui::CollapsingHeader::new(mono(&heading, 10.5).strong().color(DIM)).id_salt("crew-off").default_open(false).show(ui, |ui| {
+                for (m, a) in members { member_row(ui, view, snap, m, a); }
             });
-            let doing = if m.enabled { agent.activity.clone() } else { tr("Desactivado") };
-            ui.add(egui::Label::new(mono(&doing, 10.5).color(DIM)).truncate());
-        }).response.interact(egui::Sense::click());
-        if response.on_hover_text(tr("Ver su trabajo")).clicked() { view.hall_member = Some(m.id.clone()); }
+        } else {
+            ui.add_space(2.0);
+            ui.label(mono(&heading, 10.5).strong().color(if g == 0 { YELLOW } else if g == 1 { GOLD } else { DIM }));
+            for (m, a) in members { member_row(ui, view, snap, m, a); }
+        }
     }
+}
+
+/// One member: its state's colour, name, roles, harness and what it does now.
+fn member_row(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot, m: &Member, agent: &Agent) {
+    let color = if m.enabled { state_color(&agent.status) } else { Color32::from_gray(90) };
+    let roles: Vec<String> = m.roles.iter().map(|r| crate::guild_studio::role_name(&snap.roles, r)).collect();
+    let frame = Frame::new().fill(Color32::from_rgba_unmultiplied(255, 255, 255, 6)).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(8, 5));
+    let response = frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(mono("●", 11.0).color(color));
+            ui.label(mono(&m.name, 12.0).strong().color(if m.enabled { INK } else { DIM }));
+            ui.label(mono(&roles.join(", "), 10.5).color(GOLD));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(mono(&format!("{} · {}", m.harness, m.model_id.clone().unwrap_or_else(|| tr("modelo por defecto"))), 10.0).color(DIM));
+            });
+        });
+        let doing = if m.enabled { agent.activity.clone() } else { tr("Desactivado") };
+        ui.add(egui::Label::new(mono(&doing, 10.5).color(DIM)).truncate());
+    }).response.interact(egui::Sense::click());
+    if response.on_hover_text(tr("Ver su trabajo")).clicked() { view.hall_member = Some(m.id.clone()); }
 }
 
 fn quest_state(state: QuestState) -> String {
@@ -443,7 +463,7 @@ fn swatches(ui: &mut Ui, state: &mut VisualState, colors: &[String], size: f32) 
 }
 
 /// An image's thumbnail, decoded once and kept, at most 320 px a side.
-fn thumbnail(ctx: &egui::Context, state: &mut VisualState, file: &str) -> Option<egui::TextureHandle> {
+pub(crate) fn thumbnail(ctx: &egui::Context, state: &mut VisualState, file: &str) -> Option<egui::TextureHandle> {
     state.textures.entry(file.to_string()).or_insert_with(|| {
         let bytes = std::fs::read(file).ok()?;
         let image = image::load_from_memory(&bytes).ok()?.thumbnail(320, 320).to_rgba8();
@@ -724,7 +744,7 @@ mod tests {
 
     #[test]
     fn the_project_is_the_repository_that_holds_the_folder() {
-        let p = |id: &str, path: &str| Project { id: id.into(), name: id.into(), repo_path: path.into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], created_at: String::new() };
+        let p = |id: &str, path: &str| Project { id: id.into(), name: id.into(), repo_path: path.into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, created_at: String::new() };
         let snap = Snapshot { projects: vec![p("a", "/r/app"), p("b", "/r/app/game"), p("c", "/r/application")], ..Default::default() };
         assert_eq!(project_for(&snap, "/r/app/game/src").map(|p| p.id.as_str()), Some("b"));
         assert_eq!(project_for(&snap, "/r/app").map(|p| p.id.as_str()), Some("a"));

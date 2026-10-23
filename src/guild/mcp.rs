@@ -59,7 +59,7 @@ pub fn handle(msg: &Value, call: Call, sleep: &dyn Fn(Duration)) -> Option<Value
     })
 }
 
-const INSTRUCTIONS: &str = "The guild runs coding agents (its members, e.g. Kiro) in isolated git worktrees. You orchestrate: break the user's request into small tasks with verifiable acceptance criteria and dependencies, start them as a quest with guild_start_quest, then call guild_wait until something needs you. For a candidate ready, read it with guild_diff and accept (integrate) or reject with a reason the member can act on; answer permissions with guild_permission; retry or cancel failed tasks. Integrating merges into the quest's branch guild/quest/<id>, never into main: tell the user the branch when the quest completes.";
+const INSTRUCTIONS: &str = "The guild runs coding agents (its members, e.g. Kiro) in isolated git worktrees. You orchestrate: break the user's request into small tasks with verifiable acceptance criteria and dependencies, start them as a quest with guild_start_quest, then call guild_wait until something needs you. For a candidate ready, read it with guild_diff and accept (integrate) or reject with a reason the member can act on; answer permissions with guild_permission; retry or cancel failed tasks. Integrating merges into the quest's branch guild/quest/<id>, never into main: tell the user the branch when the quest completes. Visual work (art, scenes, look): every task names the reference image to match (its path), the exact files to reuse (paths, or `git show <commit>:<path>` when they were deleted), asks the member to build it inside the game's real scene and compare it side by side with the reference, and lists the images to leave in `evidence`; when the direction is uncertain, try it first as a `spike` (short, never integrated). Folders outside the repository the members must read (references, captures) go in the quest's `readPaths`. A note reaches a working member at once; restart a task to move it onto a member's new harness or model.";
 
 fn tools() -> Value {
     let task_id = json!({"type": "string", "description": "A task id as guild_status or guild_start_quest gives it"});
@@ -67,10 +67,12 @@ fn tools() -> Value {
         {"name": "guild_status", "description": "The guild at a glance: projects, members (role, harness, busy), quests with their tasks and what needs a decision.",
          "inputSchema": {"type": "object", "properties": {"questId": {"type": "string", "description": "Only this quest"}}}},
         {"name": "guild_start_quest", "description": "Create a quest with its tasks and start it. Members take the tasks by role (or the member named) in their own worktrees; dependencies run in order, the rest in parallel.",
-         "inputSchema": {"type": "object", "required": ["title", "tasks"], "properties": {
+         "inputSchema": {"type": "object", "required": ["tasks"], "properties": {
             "projectId": {"type": "string", "description": "Defaults to the guild's first project"},
             "title": {"type": "string"},
             "description": {"type": "string"},
+            "questId": {"type": "string", "description": "Add these tasks to this quest instead of creating one (a completed quest opens again)"},
+            "readPaths": {"type": "array", "items": {"type": "string"}, "description": "Folders outside the repository its members may read without asking (absolute or ~/…)"},
             "tasks": {"type": "array", "items": {"type": "object", "required": ["id", "title", "instructions"], "properties": {
                 "id": {"type": "string", "description": "Short id, unique in this quest (t1, t2…), for dependsOn"},
                 "title": {"type": "string"},
@@ -80,17 +82,19 @@ fn tools() -> Value {
                 "member": {"type": "string", "description": "A member's name or id, to pin the task to it"},
                 "dependsOn": {"type": "array", "items": {"type": "string"}},
                 "candidates": {"type": "integer", "description": "Run a race of this many members (default 1)"},
-                "timeoutMinutes": {"type": "integer", "description": "How long an attempt may work on it (default the guild's, 30)"}}}}}}},
+                "timeoutMinutes": {"type": "integer", "description": "How long an attempt may work on it (default the guild's, 30)"},
+                "evidence": {"type": "array", "items": {"type": "string"}, "description": "Images the member must leave in its worktree (paths relative to it, * in the name): kept with the candidate even if git ignores them, shown to you and the user"},
+                "spike": {"type": "boolean", "description": "A short trial (30 min by default) whose captures and report are the result: accepting it never integrates it"}}}}}}},
         {"name": "guild_wait", "description": "Block until a task of the quest (without questId, of any quest under way) needs you (candidate ready, permission asked, failed, blocked) or the quest ends, or until the timeout. Returns the quest's status.",
          "inputSchema": {"type": "object", "properties": {"questId": {"type": "string", "description": "Without it, every quest under way"}, "timeoutSeconds": {"type": "integer", "description": "Default 300, at most 540"}}}},
         {"name": "guild_task", "description": "One task in full: instructions, notes, attempts, failures, verifier results, candidate size, pending permission (whole command, file and whether it is inside the worktree) and the end of the member's transcript. full: true gives the member's whole last reply and every verifier's whole output.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id, "full": {"type": "boolean"}}}},
-        {"name": "guild_note", "description": "Add to a task that already started: the member reads the note when its turn ends (one more turn in the same session); a retry and the orchestrator read it with the instructions.",
-         "inputSchema": {"type": "object", "required": ["taskId", "text"], "properties": {"taskId": task_id, "text": {"type": "string"}}}},
+        {"name": "guild_note", "description": "Add to a task that already started: a member at work is stopped and handed the note at once, in the same session, to correct course (later: true waits until its turn ends); a retry and the orchestrator read it with the instructions.",
+         "inputSchema": {"type": "object", "required": ["taskId", "text"], "properties": {"taskId": task_id, "text": {"type": "string"}, "later": {"type": "boolean"}}}},
         {"name": "guild_diff", "description": "The diff of a task's latest candidate.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id}}},
-        {"name": "guild_decide", "description": "Decide on a task: accept (integrates the candidate into the quest's branch), reject (with a reason; the member retries if attempts remain), retry (a candidate still waiting is rejected with the reason), or cancel. accept with attemptId and override: true takes a verified attempt that was failed (by the orchestrator, a judge or a reject).",
-         "inputSchema": {"type": "object", "required": ["taskId", "decision"], "properties": {"taskId": task_id, "decision": {"type": "string", "enum": ["accept", "reject", "retry", "cancel"]}, "reason": {"type": "string"}, "attemptId": {"type": "string"}, "override": {"type": "boolean"}}}},
+        {"name": "guild_decide", "description": "Decide on a task: accept (integrates the candidate into the quest's branch; a spike is completed without integrating), reject (with a reason; the member retries if attempts remain), retry (a candidate still waiting is rejected with the reason; a task at work starts again on its member's current harness and model, from what it wrote, without costing an attempt), or cancel (in one step; replacedBy: the tasks that waited for it wait for that task instead). accept with attemptId and override: true takes a verified attempt that was failed (by the orchestrator, a judge or a reject).",
+         "inputSchema": {"type": "object", "required": ["taskId", "decision"], "properties": {"taskId": task_id, "decision": {"type": "string", "enum": ["accept", "reject", "retry", "cancel"]}, "reason": {"type": "string"}, "attemptId": {"type": "string"}, "override": {"type": "boolean"}, "replacedBy": {"type": "string", "description": "With cancel: a task id of the same quest"}}}},
         {"name": "guild_permission", "description": "Answer a member's pending permission request with one of its option ids (from guild_task).",
          "inputSchema": {"type": "object", "required": ["taskId", "optionId"], "properties": {"taskId": task_id, "optionId": {"type": "string"}}}},
     ])
@@ -169,6 +173,20 @@ fn find_member<'a>(snap: &'a Snapshot, who: &str) -> Option<&'a Member> {
     snap.members.iter().find(|m| m.id == who || m.name.eq_ignore_ascii_case(who))
 }
 
+/// What a visual task lacks to be done right the first time (FB-060): a
+/// reference image, the files to reuse, the images to leave.
+fn visual_gap(t: &Value) -> Option<String> {
+    let role = t["role"].as_str().unwrap_or("");
+    let text = format!("{} {}", t["title"].as_str().unwrap_or(""), t["instructions"].as_str().unwrap_or("")).to_lowercase();
+    let visual = role.contains("art") || ["visual", "look", "shader", "sprite", "escena", "scene", "captura", "capture"].iter().any(|w| text.contains(w));
+    if !visual { return None; }
+    let mut missing = vec![];
+    if ![".png", ".jpg", ".jpeg", ".webp"].iter().any(|e| text.contains(e)) { missing.push("a reference image (its path)"); }
+    if !(text.contains('/') && [".gd", ".tscn", ".gdshader", ".glsl", ".rs", ".ts", ".py", "git show"].iter().any(|e| text.contains(e))) { missing.push("the exact files to reuse"); }
+    if t["evidence"].as_array().is_none_or(|e| e.is_empty()) { missing.push("evidence images to leave"); }
+    (!missing.is_empty()).then(|| format!("{} looks like visual work without {}: tasks that named them got it right the first time", t["id"].as_str().unwrap_or("?"), missing.join(", ")))
+}
+
 /// One tool, as `tools/call` runs it; also `guild tool <name>` on the command line.
 pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) -> Result<String, String> {
     let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
@@ -198,8 +216,15 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
             let snap = snapshot(call)?;
             let project = match s("projectId") { Some(p) => p, None => snap.projects.first().map(|p| p.id.clone()).ok_or("the guild has no project yet")? };
             let tasks = args.get("tasks").and_then(Value::as_array).filter(|t| !t.is_empty()).ok_or("missing tasks")?;
-            let quest = call("quest.create", json!({"projectId": project, "title": need("title")?, "description": s("description").unwrap_or_default()}))?;
-            let quest_id = quest["id"].as_str().unwrap_or_default().to_string();
+            let reads = args.get("readPaths").cloned().filter(Value::is_array);
+            let quest_id = match s("questId") {
+                Some(id) => {
+                    let q = snap.quests.iter().find(|q| q.id == id).ok_or_else(|| format!("no quest {id}"))?;
+                    if let Some(r) = &reads { call("quest.update", json!({"questId": q.id, "readPaths": r}))?; }
+                    q.id.clone()
+                }
+                None => call("quest.create", json!({"projectId": project, "title": need("title")?, "description": s("description").unwrap_or_default(), "readPaths": reads}))?["id"].as_str().unwrap_or_default().to_string(),
+            };
             // Task ids are global: the plan's own get the quest's suffix.
             let suffix = &quest_id[quest_id.len().saturating_sub(8)..];
             let local: Vec<String> = tasks.iter().filter_map(|t| t["id"].as_str().map(str::to_string)).collect();
@@ -214,10 +239,16 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 if let Some(role) = role { params["role"] = json!(role); }
                 if let Some(n) = t["candidates"].as_u64().filter(|n| *n > 1) { params["candidates"] = json!(n); }
                 if let Some(m) = t["timeoutMinutes"].as_u64() { params["timeoutMinutes"] = json!(m); }
+                if t["evidence"].is_array() { params["evidence"] = t["evidence"].clone(); }
+                if t["spike"].as_bool() == Some(true) { params["spike"] = json!(true); }
                 call("task.create", params)?;
             }
-            call("quest.start", json!({"questId": quest_id}))?;
-            Ok(format!("started. task ids: {}\n{}", local.iter().map(|l| id(l)).collect::<Vec<_>>().join(", "), quest_report(&snapshot(call)?, snapshot(call)?.quests.iter().find(|q| q.id == quest_id).ok_or("quest vanished")?)))
+            let fresh = snapshot(call)?;
+            // A new quest starts; one that existed starts only if it had not.
+            if s("questId").is_none() || fresh.quests.iter().any(|q| q.id == quest_id && matches!(q.state, QuestState::Draft | QuestState::Ready | QuestState::Paused)) { call("quest.start", json!({"questId": quest_id}))?; }
+            let warnings: String = tasks.iter().filter_map(|t| visual_gap(t)).map(|w| format!("warning: {w}\n")).collect();
+            let snap = snapshot(call)?;
+            Ok(format!("started. task ids: {}\n{warnings}{}", local.iter().map(|l| id(l)).collect::<Vec<_>>().join(", "), quest_report(&snap, snap.quests.iter().find(|q| q.id == quest_id).ok_or("quest vanished")?)))
         }
         "guild_wait" => {
             // Without a quest, every quest under way (FB-041: it failed only once the wait was over).
@@ -261,6 +292,13 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 if let Some(c) = &a.candidate { out.push_str(&format!(" · candidate {} files +{} -{}", c.files_changed, c.insertions, c.deletions)); }
                 if let Some(f) = &a.failure { out.push_str(&format!(" · failure: {f}")); }
                 out.push('\n');
+                // Step captures it leaves while it works (FB-059).
+                if a.state.is_active() {
+                    let live = crate::paths::scratch_dir(&a.id).join("evidence");
+                    let mut shots: Vec<String> = std::fs::read_dir(&live).map(|r| r.flatten().map(|e| e.path().display().to_string()).filter(|p| [".png", ".jpg", ".jpeg", ".webp", ".gif"].iter().any(|x| p.to_lowercase().ends_with(x))).collect()).unwrap_or_default();
+                    shots.sort();
+                    for p in shots { out.push_str(&format!("  step capture {p} (open it to see where it is going)\n")); }
+                }
                 for v in &a.verifier_results {
                     // One line each by default; the whole output when asked (a suite prints one line per test).
                     if full { out.push_str(&format!("  verifier {} {}:\n{}\n", v.id, v.status, v.tail.trim_end())); }
@@ -296,8 +334,9 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
             Ok(text)
         }
         "guild_note" => {
-            let r = call("task.note", json!({"taskId": need("taskId")?, "text": need("text")?, "by": "delegate"}))?;
-            Ok(format!("noted ({} notes on the task): the member reads it when its turn ends", r["notes"].as_array().map(Vec::len).unwrap_or(0)))
+            let r = call("task.note", json!({"taskId": need("taskId")?, "text": need("text")?, "by": "delegate", "later": args.get("later").and_then(Value::as_bool).unwrap_or(false)}))?;
+            let when = if r["redirected"] == true { "the member was stopped and reads it now" } else { "the member reads it when its turn ends" };
+            Ok(format!("noted ({} notes on the task): {when}", r["notes"].as_array().map(Vec::len).unwrap_or(0)))
         }
         "guild_decide" => {
             let task_id = need("taskId")?;
@@ -306,7 +345,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 "accept" => call("task.accept", json!({"taskId": task_id, "integrate": true, "reason": reason, "attemptId": s("attemptId"), "override": args.get("override").and_then(Value::as_bool).unwrap_or(false)}))?,
                 "reject" => call("task.reject", json!({"taskId": task_id, "reason": reason}))?,
                 "retry" => call("task.retry", json!({"taskId": task_id, "reason": reason}))?,
-                "cancel" => call("task.cancel", json!({"taskId": task_id}))?,
+                "cancel" => call("task.cancel", json!({"taskId": task_id, "replacedBy": s("replacedBy")}))?,
                 other => return Err(format!("unknown decision {other}")),
             };
             Ok(format!("done: {r}"))
@@ -340,6 +379,18 @@ mod tests {
         // A tool that fails says so in its result, not as a protocol error.
         let failed = handle(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "guild_status", "arguments": {}}}), call, &|_| {}).unwrap();
         assert_eq!(failed["result"]["isError"], true);
+    }
+
+    #[test]
+    fn a_visual_task_without_reference_files_or_evidence_is_flagged() {
+        // FB-060: tasks that named the reference and the files to reuse got it right the first time.
+        let vague = json!({"id": "t1", "role": "asset-artist", "title": "Neon look", "instructions": "bring the look back"});
+        let gap = visual_gap(&vague).unwrap();
+        assert!(gap.contains("a reference image") && gap.contains("the exact files") && gap.contains("evidence"), "{gap}");
+        let precise = json!({"id": "t2", "role": "asset-artist", "title": "Neon look", "evidence": ["captures/dia.png"],
+            "instructions": "Match docs/visual_ref/02_ciudad.png reusing `git show 91de469:shaders/neon.gdshader` in scenes/city.tscn"});
+        assert_eq!(visual_gap(&precise), None);
+        assert_eq!(visual_gap(&json!({"id": "t3", "role": "implementer", "title": "Save game", "instructions": "persist the run"})), None);
     }
 
     #[test]
