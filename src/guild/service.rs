@@ -1957,6 +1957,13 @@ impl Service {
                 self.emit_locked(&store, Event::new("candidate.rejected", by).about_attempt(rival).with(json!({"reason": "another candidate was selected", "winner": attempt_id})));
             }
             self.move_attempt_locked(&store, attempt_id, AttemptState::Passed, None)?;
+            // Decided: what the orchestrator had escalated no longer waits for anyone (FB-065).
+            if let Some(mut a) = store.attempt(attempt_id)?.filter(|a| a.escalation.is_some() || a.deciding) {
+                a.escalation = None;
+                a.deciding = false;
+                a.updated_at = now();
+                store.put_attempt(&a)?;
+            }
             let mut t = store.task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
             t.winner_attempt_id = Some(attempt_id.into());
             t.updated_at = now();
@@ -6115,6 +6122,21 @@ mod tests {
 
     fn worktree_of(snap: &Snapshot, attempt: &Attempt) -> PathBuf {
         PathBuf::from(&snap.workspaces.iter().find(|w| Some(&w.id) == attempt.workspace_id.as_ref()).unwrap().path)
+    }
+
+    #[test]
+    fn accepting_a_candidate_ends_what_the_orchestrator_had_escalated() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Look"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "submitted", |s| s.tasks[0].state == TaskState::Verifying);
+        service.update_attempt(&snap.attempts[0].id, |a| a.escalation = Some("the verifier failed".into())).unwrap();
+        // FB-065: accepted without integrating, nothing of it waits any more, and it can be closed as it is.
+        service.handle("task.accept", &json!({"taskId": "t1"})).unwrap();
+        let a = service.snapshot().unwrap().attempts[0].clone();
+        assert_eq!((a.state, a.escalation), (AttemptState::Passed, None));
+        service.handle("task.complete", &json!({"taskId": "t1", "reason": "kept for its captures"})).unwrap();
+        assert_eq!(service.snapshot().unwrap().tasks[0].state, TaskState::Completed);
     }
 
     #[test]
