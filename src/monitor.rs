@@ -940,6 +940,13 @@ impl Monitor {
 }
 
 /// The visible text of a pane, or nothing if Herdr does not answer.
+/// The name of the process in a pane's foreground, as Herdr reports it.
+fn pane_process(session: &str, pane: &str) -> Option<String> {
+    let out = run_herdr(&["pane", "process-info", "--pane", pane], session, Duration::from_secs(3)).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&out).ok()?;
+    v["result"]["process_info"]["foreground_processes"][0]["name"].as_str().map(str::to_string)
+}
+
 fn pane_screen(session: &str, pane: &str) -> String {
     run_herdr(&["pane", "read", pane, "--source", "visible", "--format", "text"], session, Duration::from_secs(3)).map(|out| String::from_utf8_lossy(&out).into_owned()).unwrap_or_default()
 }
@@ -965,6 +972,8 @@ fn start_agent(session: &str, name: &str, kind: &str, pane: &str, trust_all: boo
         if let Some(blocker) = shell_blocker(&pane_screen(session, pane)) { return Err(MonitorError::Message(blocker)); }
         match run_herdr(&args, session, Duration::from_secs(65)) {
             Err(e) if e.code() == Some("agent_pane_busy") && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(250)),
+            // Still not a shell Herdr knows: say which one it is, when we know why.
+            Err(e) if e.code() == Some("agent_pane_busy") => return Err(pane_process(session, pane).as_deref().and_then(crate::herdr::wrapped_shell).map(MonitorError::Message).unwrap_or(e)),
             other => return other,
         }
     }

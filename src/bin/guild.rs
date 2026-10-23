@@ -52,6 +52,7 @@ USAGE
                                      [--role R] [--member ID] [--model M] [--priority N] [--max-attempts N] [--id ID]
                                      [--strategy single|reviewed|race] [--candidates N] [--select policy|judge|user] [--auto-integrate] [--timeout MIN]
                                      a race runs N members at once; the selection picks among the candidates that passed the verifiers
+  guild task done <task> [--sha SHA] [--reason TEXT]  a blocked or accepted task integrated by hand is completed; its dependants start
   guild task note <task> <text>      add to a task that already started: the member reads it when its turn ends, a retry with the instructions
   guild task set <task> [--title T] [--instructions TEXT] [--accept TEXT]... [--depends ID,ID | --no-depends] [--role R] [--member ID] [--priority N] [--timeout MIN]
                                      change a task nobody has started yet; --accept replaces the criteria
@@ -510,6 +511,11 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             if a.pos(0, "subcommand")? != "new" { return Err(USAGE.into()); }
             let r = call(&ensure_running()?, "quest.create", json!({"projectId": a.pos(1, "project")?, "title": a.pos(2, "title")?, "description": a.flag("description")}))?;
             println!("quest {} · {}", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        "task" if a.positional.first().copied() == Some("done") => {
+            let r = call(&ensure_running()?, "task.complete", json!({"taskId": a.pos(1, "task")?, "sha": a.flag("sha"), "reason": a.flag("reason")}))?;
+            println!("task {} · {}", r["id"].as_str().unwrap_or(""), r["state"].as_str().unwrap_or(""));
             Ok(())
         }
         "task" if a.positional.first().copied() == Some("note") => {

@@ -2045,8 +2045,11 @@ impl Service {
         // when they do not apply, the member is told where they are.
         let continued = match &resume_from {
             None => Carried::Nothing,
-            Some((c, partial, branch)) if workspaces::carry(&workspace, c) => if *partial { Carried::Partial } else { let _ = branch; Carried::Candidate },
-            Some((c, _, branch)) => Carried::Left { branch: branch.clone(), head: c.head_sha.clone(), base: c.base_sha.clone() },
+            Some((c, partial, branch)) => match workspaces::carry(&workspace, c) {
+                workspaces::Carry::Applied => if *partial { Carried::Partial } else { Carried::Candidate },
+                workspaces::Carry::Conflicts(files) => Carried::Conflicts { files },
+                workspaces::Carry::Failed => Carried::Left { branch: branch.clone(), head: c.head_sha.clone(), base: c.base_sha.clone() },
+            },
         };
         {
             let store = self.store.lock().unwrap();
@@ -2136,14 +2139,35 @@ impl Service {
         let handle = adapter.prompt(&session, attempt_id, prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
         self.emit(Event::new("turn.started", "guild").about_attempt(attempt).with(json!({"turnId": handle.turn_id, "promptChars": prompt.len()})));
         let mut outcome = self.follow_turn(attempt_id, attempt, adapter, &session, handle);
-        // Notes added while it worked: one more turn in the same session takes them in.
+        // Notes added while it worked, or work it left running in the background
+        // (FB-047): one more turn in the same session takes them in.
+        let folders = {
+            let store = self.store.lock().unwrap();
+            store.attempt(attempt_id).ok().flatten().and_then(|a| a.workspace_id).and_then(|w| store.workspace(&w).ok().flatten()).map(|w| PathBuf::from(w.path))
+        };
+        let scratch = crate::paths::scratch_dir(attempt_id);
+        let mut waited_for = false;
         for round in 1..=3 {
             let done = matches!(&outcome, TurnOutcome::Completed { stop_reason } if stop_reason != "interrupted");
+            if attempt.kind != AttemptKind::Work || !done || self.cancel_requested(attempt_id) { break; }
             let notes = notes_of(self);
-            if attempt.kind != AttemptKind::Work || !done || notes.len() <= seen || self.cancel_requested(attempt_id) { break; }
-            let added: String = notes[seen..].iter().map(|n| format!("- {}\n", n.trim())).collect();
+            let running: Vec<(i32, String)> = match (&folders, waited_for) {
+                (Some(wt), false) => crate::platform::processes_in(&[wt.as_path(), scratch.as_path()]),
+                _ => vec![],
+            };
+            if notes.len() <= seen && running.is_empty() { break; }
+            let mut follow = String::new();
+            if !running.is_empty() {
+                waited_for = true;
+                let list: Vec<String> = running.iter().take(8).map(|(pid, name)| format!("{name} (pid {pid})")).collect();
+                follow.push_str(&format!("You finished while what you started is still running in your worktree: {}. Wait for it to end, use what it produces, then finish; your work is committed only when you reply.\n", list.join(", ")));
+            }
+            if notes.len() > seen {
+                let added: String = notes[seen..].iter().map(|n| format!("- {}\n", n.trim())).collect();
+                follow.push_str(&format!("While you worked, the lead added to the task:\n{added}"));
+            }
             seen = notes.len();
-            let follow = format!("While you worked, the lead added to the task:\n{added}\nTake this into account now, in the same worktree, then finish with the updated summary.");
+            follow.push_str("\nTake this into account now, in the same worktree, then finish with the updated summary.");
             let Ok(handle) = adapter.prompt(&session, &format!("{attempt_id}-note{round}"), &follow) else { break };
             let _ = self.update_attempt(attempt_id, |a| a.turns += 1);
             self.emit(Event::new("turn.started", "guild").about_attempt(attempt).with(json!({"turnId": handle.turn_id, "promptChars": follow.len(), "notes": true})));
@@ -2478,6 +2502,19 @@ impl Service {
 
     // ----- the guild's orchestrator
 
+    /// What a member said in an attempt, every turn of it, in order.
+    fn reply_of(&self, attempt_id: &str) -> String {
+        let events = self.store.lock().unwrap().events_of_attempt(attempt_id, 20_000).unwrap_or_default();
+        let mut out = String::new();
+        let mut turn = 0u32;
+        for e in events {
+            if e.kind == "turn.started" && turn > 0 { out.push_str("\n\n"); }
+            if e.kind == "turn.started" { turn += 1; }
+            if e.kind == "turn.text" { out.push_str(e.payload["text"].as_str().unwrap_or("")); }
+        }
+        out
+    }
+
     /// An artifact's text (a diff, a log).
     fn artifact_text(&self, id: &str) -> Res<String> {
         let a = self.store.lock().unwrap().artifact(id)?.ok_or_else(|| ApiError::not_found(format!("artifact {id}")))?;
@@ -2552,7 +2589,11 @@ impl Service {
                     let tail = lines[lines.len().saturating_sub(15)..].join("\n    ");
                     format!("- {} {}{}{}", v.id, v.status, if v.required { " (required)" } else { "" }, if tail.trim().is_empty() { String::new() } else { format!(":\n    {tail}") })
                 }).collect();
-                format!("{worker} left this candidate. Its summary: {}\n\nVerifiers:\n{}\n\nDiff:\n```diff\n{diff}\n```", attempt.summary.trim(), if verifiers.is_empty() { "- none".into() } else { verifiers.join("\n") })
+                // Its whole reply, not the cut summary: the evidence asked for is often there (FB-043).
+                let mut reply = self.reply_of(&attempt.id);
+                if reply.trim().is_empty() { reply = attempt.summary.clone(); }
+                if crate::domain::cut(&mut reply, 20_000) { reply.push_str("\n… (cut)"); }
+                format!("{worker} left this candidate. Its whole reply:\n\n{}\n\nVerifiers:\n{}\n\nDiff:\n```diff\n{diff}\n```", reply.trim(), if verifiers.is_empty() { "- none".into() } else { verifiers.join("\n") })
             }
             Failure => format!("The task ran out of attempts ({} of {}). The last one, by {worker}, failed: {}\n\nIts last words: {}", task.attempts_made, task.max_attempts, attempt.failure.clone().unwrap_or_default(), attempt.summary.trim()),
         };
@@ -2852,6 +2893,7 @@ impl Service {
             "task.create" => self.task_create(params),
             "task.update" => self.task_update(params),
             "task.note" => self.task_note(params),
+            "task.complete" => self.task_complete(params),
             "quest.start" => self.quest_start(params),
             "quest.sync" => self.quest_sync(params),
             "quest.pause" => self.quest_set(params, QuestState::Paused, &[QuestState::Running]),
@@ -2966,7 +3008,11 @@ impl Service {
         let id = p_str(params, "memberId")?;
         let store = self.store.lock().unwrap();
         let mut m = store.member(id)?.ok_or_else(|| ApiError::not_found(format!("member {id}")))?;
-        if let Some(n) = p_opt(params, "name") { m.name = n; }
+        if let Some(n) = p_opt(params, "name") {
+            let others: Vec<Member> = store.members()?.into_iter().filter(|o| o.id != id).collect();
+            unique_name(&others, &n)?;
+            m.name = n.trim().to_string();
+        }
         if let Some(h) = p_opt(params, "harness") { m.harness = HarnessKind::parse(&h).ok_or_else(|| ApiError::invalid("unknown harness"))?; }
         if params.get("roles").is_some() { let roles = p_list(params, "roles"); if !roles.is_empty() { m.roles = roles; } }
         if params.get("model").is_some() { m.model_id = p_opt(params, "model"); }
@@ -3332,9 +3378,18 @@ impl Service {
         let id = p_str(params, "id")?.to_string();
         let mut roles = p_list(params, "roles");
         if roles.is_empty() { roles.push("implementer".into()); }
+        let name = {
+            let store = self.store.lock().unwrap();
+            let others: Vec<Member> = store.members()?.into_iter().filter(|m| m.id != id).collect();
+            match p_opt(params, "name") {
+                Some(n) => { unique_name(&others, &n)?; n.trim().to_string() }
+                // A hero of its own, never one another member has (FB-048).
+                None => HEROES.iter().find(|h| unique_name(&others, h).is_ok()).map(|h| h.to_string()).unwrap_or_else(|| id.clone()),
+            }
+        };
         let member = Member {
             id: id.clone(),
-            name: p_opt(params, "name").unwrap_or_else(|| id.clone()),
+            name,
             roles,
             harness,
             model_id: p_opt(params, "model"),
@@ -3460,6 +3515,30 @@ impl Service {
             Ok(())
         })?;
         Ok(serde_json::to_value(task).unwrap())
+    }
+
+    /// A task someone integrated by hand (a clash merged in the quest's
+    /// branch, say) is done: its dependants can start (FB-045).
+    fn task_complete(self: &Arc<Service>, params: &Value) -> ApiResult {
+        let task_id = p_str(params, "taskId")?;
+        let reason = p_opt(params, "reason").unwrap_or_else(|| "integrated by hand".into());
+        {
+            let store = self.store.lock().unwrap();
+            let task = store.task(task_id)?.ok_or_else(|| ApiError::not_found(format!("task {task_id}")))?;
+            let path: &[TaskState] = match task.state {
+                TaskState::Blocked | TaskState::Verifying => &[TaskState::Accepted, TaskState::Integrating, TaskState::Completed],
+                TaskState::Accepted => &[TaskState::Integrating, TaskState::Completed],
+                other => return Err(ApiError::conflict(format!("task is {other:?}: only a blocked, verifying or accepted task is completed by hand"))),
+            };
+            let quest = store.quest(&task.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
+            self.atomic(&store, || {
+                for state in path { self.move_task_locked(&store, task_id, *state, None)?; }
+                self.emit_locked(&store, Event::new("task.completed_by_hand", p_opt(params, "by").as_deref().unwrap_or("user")).about_task(&task, &quest.project_id).with(json!({"reason": reason, "sha": p_opt(params, "sha")})));
+                Ok(())
+            })?;
+        }
+        self.tick();
+        Ok(serde_json::to_value(self.store.lock().unwrap().task(task_id)?).unwrap())
     }
 
     /// Add to a task that already started: the member working on it reads
@@ -3820,15 +3899,47 @@ impl Service {
                 Ok(json!({"completed": task_id, "integrated": true, "sha": sha}))
             }
             Err(e) => {
+                // It clashes with work integrated meanwhile (FB-044): back to its member, on
+                // top of the quest's branch with the clash marked, in an attempt that does not count.
+                let conflict = e.starts_with("conflict integrating");
                 let store = self.store.lock().unwrap();
                 self.atomic(&store, || {
-                    self.emit_locked(&store, Event::new("merge.blocked", "guild").about_attempt(&attempt).with(json!({"reason": e})));
+                    self.emit_locked(&store, Event::new("merge.blocked", "guild").about_attempt(&attempt).with(json!({"reason": e, "retrying": conflict})));
+                    if !conflict {
+                        self.move_task_locked(&store, task_id, TaskState::Blocked, Some(format!("merge blocked: {e}")))?;
+                        return Ok(());
+                    }
+                    let mut a = store.attempt(&attempt.id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
+                    a.failure = Some(format!("its candidate was accepted but clashes with work integrated meanwhile ({e}); resolve the clash, keep what was accepted"));
+                    store.put_attempt(&a)?;
+                    let mut t = store.task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
+                    t.max_attempts = t.max_attempts.max(t.attempts_made) + 1;
+                    t.winner_attempt_id = None;
+                    t.updated_at = now();
+                    store.put_task(&t)?;
                     self.move_task_locked(&store, task_id, TaskState::Blocked, Some(format!("merge blocked: {e}")))?;
+                    self.move_task_locked(&store, task_id, TaskState::Ready, None)?;
                     Ok(())
                 })?;
+                drop(store);
+                if conflict { self.tick(); return Ok(json!({"completed": false, "retrying": task_id, "conflict": e})); }
                 Err(ApiError::conflict(e))
             }
         }
+    }
+}
+
+/// Names for members who come without one: Greek and Roman heroes.
+const HEROES: &[&str] = &["Aquiles", "Héctor", "Ulises", "Penélope", "Perseo", "Teseo", "Atalanta", "Jasón", "Medea", "Heracles", "Andrómaca", "Casandra", "Eneas", "Dido", "Orfeo", "Antígona", "Electra", "Patroclo", "Diomedes", "Ifigenia", "Belerofonte", "Hipólita", "Néstor", "Áyax", "Camila", "Lucrecia", "Horacio", "Escipión", "Cincinato", "Cornelia", "Rómulo", "Clelia"];
+
+/// Two members never share a name: in the status and the escalations
+/// nobody could tell which one is meant (FB-048).
+fn unique_name(others: &[Member], name: &str) -> Res<()> {
+    let wanted = name.trim().to_lowercase();
+    if wanted.is_empty() { return Err(ApiError::invalid("a member's name cannot be empty")); }
+    match others.iter().find(|m| m.name.trim().to_lowercase() == wanted) {
+        Some(m) => Err(ApiError::conflict(format!("{} is already the name of {} ({}): pick another", name.trim(), m.id, m.harness))),
+        None => Ok(()),
     }
 }
 
@@ -3925,6 +4036,8 @@ enum Carried {
     Partial,
     /// Its work did not apply on the current base: where it is.
     Left { branch: String, head: String, base: String },
+    /// Its work is there, clashing with what was integrated meanwhile.
+    Conflicts { files: Vec<String> },
 }
 
 fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>, feedback: &[String], continued: Carried) -> String {
@@ -3955,6 +4068,7 @@ fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design:
             Carried::Candidate => s.push_str("Your worktree already holds the last candidate. Keep what was not objected to and make exactly the changes asked for above.\n"),
             Carried::Partial => s.push_str("The last attempt stopped before it finished; your worktree already holds what it had written. Go on from it — check what is there first — instead of starting over.\n"),
             Carried::Left { branch, head, base } => s.push_str(&format!("The last attempt's work did not apply on the current base. It is on branch `{branch}` (commit {head}): see it with `git diff {base} {head}` and `git show {head}:<path>`, and reuse it instead of starting over.\n")),
+            Carried::Conflicts { files } => s.push_str(&format!("Your worktree holds the last attempt's work on top of what was integrated meanwhile, and they clash in: {}. Those files have git conflict markers (<<<<<<< ======= >>>>>>>): resolve each keeping both changes unless the task says otherwise, remove the markers, run the tests, then do what is asked above. Do not merge or rebase branches; the guild already did.\n", files.join(", "))),
             Carried::Nothing => s.push_str("Avoid what was objected to above.\n"),
         }
     }
@@ -4184,6 +4298,8 @@ mod tests {
         let permission = prompts.iter().find(|p| p.contains("Decision needed: permission")).expect("woken for the permission");
         assert!(permission.contains("mock-install x.txt") && permission.contains(crate::orchestrator::ORCHESTRATOR_BOUNDS) && permission.contains("x.txt exists"));
         let candidate = prompts.iter().find(|p| p.contains("Decision needed: candidate")).expect("woken for the candidate");
+        // Its whole reply, not the summary cut short (FB-043).
+        assert!(candidate.contains("Its whole reply:\n\nWrote x.txt. Done."), "{candidate}");
         assert!(candidate.contains("Diff:") && candidate.contains("x.txt"));
         let events = service.handle("events.after", &json!({"after": 0, "limit": 10_000})).unwrap();
         let kinds: Vec<&str> = events.as_array().unwrap().iter().filter_map(|e| e["type"].as_str()).collect();
@@ -4686,6 +4802,61 @@ mod tests {
         // It went on from the first candidate, and is still measured against the quest's base.
         assert_eq!(second.base_sha, first.base_sha);
         assert_eq!(second.files_changed, 2, "a.txt from the first candidate plus b.txt");
+    }
+
+    #[test]
+    fn a_clash_at_integration_goes_back_to_its_member_marked_and_free() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        let mock = Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "rules.gd".into(), content: "rent first\n".into() }));
+        service.register(mock.clone());
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        for id in ["aria", "bram"] { service.handle("member.add", &json!({"id": id, "harness": "mock", "roles": ["implementer"]})).unwrap(); }
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
+        // Two tasks in parallel, both writing the same file from the same base.
+        service.handle("task.create", &json!({"questId": quest_id, "id": "a", "title": "A", "memberId": "aria", "maxAttempts": 1})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "b", "title": "B", "memberId": "bram", "maxAttempts": 1})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "both candidates", |s| s.tasks.iter().filter(|t| t.state == TaskState::Verifying).count() == 2);
+        service.handle("task.accept", &json!({"taskId": "a", "integrate": true})).unwrap();
+        // B's candidate is the same file from the same base, so it can only clash if it differs: make it differ.
+        let b = service.snapshot().unwrap().attempts.into_iter().find(|x| x.task_id == "b").unwrap();
+        let wt = service.store.lock().unwrap().workspace(b.workspace_id.as_ref().unwrap()).unwrap().unwrap();
+        workspaces::git(Path::new(&wt.path), &["reset", "-q", "--hard", &wt.base_sha]).unwrap();
+        std::fs::write(Path::new(&wt.path).join("rules.gd"), "food first\n").unwrap();
+        let c = workspaces::commit_candidate(&wt, "guild candidate: B").unwrap().unwrap();
+        service.update_attempt(&b.id, |x| x.candidate = Some(c.clone())).unwrap();
+        // FB-044: before, B was Blocked and the next try spent its last attempt.
+        let r = service.handle("task.accept", &json!({"taskId": "b", "integrate": true})).unwrap();
+        assert_eq!(r["retrying"], "b", "{r}");
+        let snap = wait_for(&service, "b's retry submitted", |s| s.attempts.iter().filter(|x| x.task_id == "b").count() == 2 && s.tasks.iter().any(|t| t.id == "b" && t.state == TaskState::Verifying));
+        let t = snap.tasks.iter().find(|t| t.id == "b").unwrap();
+        assert_eq!((t.attempts_made, t.max_attempts), (2, 2), "the retry does not count against it");
+        let prompt = mock.prompts().into_iter().rev().find(|p| p.contains("clash in: rules.gd")).unwrap_or_else(|| mock.prompts().last().cloned().unwrap_or_default());
+        assert!(prompt.contains("clash in: rules.gd"), "{prompt}");
+        assert!(prompt.contains("conflict markers") && prompt.contains("Do not merge or rebase"), "{prompt}");
+        // An integration done by hand completes the task (FB-045).
+        service.handle("task.complete", &json!({"taskId": "b", "sha": "a9d0df6"})).unwrap();
+        assert_eq!(service.snapshot().unwrap().tasks.iter().find(|t| t.id == "b").unwrap().state, TaskState::Completed);
+        assert!(service.handle("task.complete", &json!({"taskId": "b"})).is_err(), "only once");
+    }
+
+    #[test]
+    fn two_members_never_share_a_name_and_one_without_a_name_gets_a_hero() {
+        let (_home, service, _quest) = setup(MockBehaviour::Hang);
+        service.handle("member.add", &json!({"id": "tools-eng", "harness": "mock", "name": "Lira"})).unwrap();
+        // FB-048: a second Lira (another id) is refused, at add and at set.
+        assert!(service.handle("member.add", &json!({"id": "lira", "harness": "mock", "name": "lira"})).unwrap_err().message.contains("already the name of tools-eng"));
+        let hero = service.handle("member.add", &json!({"id": "sim-eng", "harness": "mock"})).unwrap()["name"].as_str().unwrap().to_string();
+        assert!(HEROES.contains(&hero.as_str()), "{hero}");
+        let other = service.handle("member.add", &json!({"id": "eng3", "harness": "mock"})).unwrap()["name"].as_str().unwrap().to_string();
+        assert_ne!(hero, other);
+        assert!(service.handle("member.update", &json!({"memberId": "eng3", "name": hero})).is_err());
+        // Re-adding a member under its own name is fine.
+        service.handle("member.add", &json!({"id": "tools-eng", "harness": "mock", "name": "Lira"})).unwrap();
     }
 
     #[test]
