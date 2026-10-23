@@ -43,3 +43,9 @@ vino de integrar trabajo paralelo.
 - evidencia: Vesna (`r2-review2`) lanzó las mutaciones en segundo plano, terminó el turno y entregó `REFUGE_REVIEW_05` con marcadores `__MUTTABLE__` sin llenar; el orquestador falló los 3 intentos. Con la instrucción explícita de correr en primer plano (`r2-review3`) salió bien.
 - costo: tres intentos de una revisión larga (opus) perdidos.
 - propuesta: no aceptar una entrega con procesos hijos vivos del miembro (o esperar a que terminen), y avisarle al miembro antes de cerrar el turno.
+
+### FB-048 · La guild permite dos miembros con el mismo nombre
+- tipo: − · causa: guild · estado: propuesta
+- evidencia: había dos «Lira» (`lira` y `tools-eng`) y dos «Orin» (`orin` en Kiro y `sim-eng` en Claude). En `guild_status` y en las escalaciones no se sabía cuál era cuál. El usuario pidió nombres únicos de héroes griegos y romanos, y hubo que renombrar a mano (`lira` → Teseo, `orin` → Perseo).
+- costo: confusión al asignar tareas y al leer escalaciones durante toda la noche.
+- propuesta: `member add` y `member set --name` rechazan un nombre que ya usa otro miembro; si no se da `--name`, la guild propone uno único de una lista temática (por ejemplo, héroes y semidioses griegos y romanos) que el proyecto puede configurar.
