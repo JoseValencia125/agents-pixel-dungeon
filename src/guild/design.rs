@@ -467,6 +467,9 @@ pub struct DesignDecision {
     pub id: String,
     pub project_id: String,
     pub decision: String,
+    /// The decisions this one replaces.
+    #[serde(default)]
+    pub supersedes: Vec<String>,
     #[serde(default)]
     pub why: String,
     #[serde(default)]

@@ -299,7 +299,8 @@ fn command(cmd: &str, ctx: &Ctx) -> Verdict {
                     let inner = words.get(2).cloned().unwrap_or_default();
                     match command(&inner, ctx) { Verdict::Allow => continue, other => return other }
                 }
-                Some(file) if !file.starts_with('-') && !absolute(file) && !file.starts_with('~') && !file.contains("..") => { words.remove(0); name = String::new(); }
+                // A script of its own: in the worktree, or in its scratch folder (FB-040).
+                Some(file) if !file.starts_with('-') && !file.starts_with('~') && !file.contains("..") && (!absolute(file) || !ctx.outside(file)) => { words.remove(0); name = String::new(); }
                 _ => return Verdict::Ask,
             }
         }
@@ -357,6 +358,11 @@ mod tests {
         assert_eq!(describe("Write File", r#"{"path": "/wt/a1/notes/x.md", "text": "…"}"#, "/wt/a1"), "file: /wt/a1/notes/x.md (inside its worktree)");
         assert_eq!(describe("Replace in File", r#"{"path": "/Users/me/.zshrc"}"#, "/wt/a1"), "file: /Users/me/.zshrc (OUTSIDE its worktree)");
         assert_eq!(describe("Bash: sh …", r#"{"command": "sh /wt/a1/tools/matrix.sh 84"}"#, "/wt/a1"), "command: sh /wt/a1/tools/matrix.sh 84");
+        // FB-040: a script in its scratch folder or worktree, by its absolute path, is its own; elsewhere it asks.
+        let scratch = crate::paths::scratch_dir("a1").join("mutate.sh").display().to_string();
+        let detail = serde_json::json!({"command": format!("sh {scratch} 3 && sh /wt/a1/tools/run.sh")}).to_string();
+        assert_eq!(decide_request("Bash: sh …", &detail, &[], "/wt/a1"), Verdict::Allow);
+        assert_eq!(decide_request("Bash: sh …", r#"{"command": "sh /usr/local/bin/x.sh"}"#, &[], "/wt/a1"), Verdict::Ask);
         assert_eq!(trusted_programs("godot --headless -s tools/a.gd 2>&1 | tail -n 15"), ["godot", "tail"]);
         assert!(trusted_programs("git fetch && cargo bench && sh x.sh && rm -rf out && curl x").is_empty(), "never these");
     }

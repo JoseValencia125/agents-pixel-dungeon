@@ -58,8 +58,9 @@ USAGE
   guild decisions <task>             how each candidate was chosen: by the policy, a judge or you
   guild question new <project> --question TEXT [--context TEXT] [--system ID]
   guild question resolve <project> <Q-id> --decision TEXT [--why TEXT] [--answer TEXT] [--evidence TEXT]... [--rejected TEXT]...
+  guild question reopen <project> <Q-id> [--why TEXT]   open a question resolved by mistake; its decision no longer answers it
   guild questions <project>          open and resolved questions, with their decisions
-  guild decision new <project> --decision TEXT [--why TEXT] [--question Q-id]... [--system ID]... [--evidence TEXT]... [--rejected TEXT]...
+  guild decision new <project> --decision TEXT [--why TEXT] [--question Q-id]... [--system ID]... [--evidence TEXT]... [--rejected TEXT]... [--supersedes DEC-id]...  (tasks under way that cite a replaced decision get a note)
   guild design <project> system set <id> --name N [--maturity undefined|concept|hypothesis|prototyping|validated|production|revised] [--intent TEXT] [--current TEXT] [--known TEXT]... [--unknown TEXT]...
                                      [--formula TEXT]... [--knob TEXT]... [--edge TEXT]... [--accept TEXT]... [--depends ID]...
                                      production needs the current design, edge cases, acceptance criteria and no unknowns
@@ -596,6 +597,11 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                     println!("{} · {}", r["id"].as_str().unwrap_or(""), r["question"].as_str().unwrap_or(""));
                     Ok(())
                 }
+                "reopen" => {
+                    let r = call(&ensure_running()?, "question.reopen", json!({"projectId": a.pos(1, "project")?, "questionId": a.pos(2, "question id")?, "why": a.flag("why")}))?;
+                    println!("{} open again", r["id"].as_str().unwrap_or(""));
+                    Ok(())
+                }
                 "resolve" => {
                     let r = call(&ensure_running()?, "question.resolve", json!({"projectId": a.pos(1, "project")?, "questionId": a.pos(2, "question id")?, "decision": a.flag("decision"), "why": a.flag("why"), "answer": a.flag("answer"), "evidence": a.all("evidence"), "rejectedAlternatives": a.all("rejected")}))?;
                     println!("{} resolved by {} · {}", r["question"]["id"].as_str().unwrap_or(""), r["decision"]["id"].as_str().unwrap_or(""), r["decision"]["decision"].as_str().unwrap_or(""));
@@ -617,7 +623,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
         }
         "decision" => {
             if a.pos(0, "subcommand")? != "new" { return Err(USAGE.into()); }
-            let r = call(&ensure_running()?, "decision.create", json!({"projectId": a.pos(1, "project")?, "decision": a.flag("decision"), "why": a.flag("why"), "questionIds": a.all("question"), "systemIds": a.all("system"), "evidence": a.all("evidence"), "rejectedAlternatives": a.all("rejected")}))?;
+            let r = call(&ensure_running()?, "decision.create", json!({"projectId": a.pos(1, "project")?, "decision": a.flag("decision"), "why": a.flag("why"), "questionIds": a.all("question"), "systemIds": a.all("system"), "evidence": a.all("evidence"), "rejectedAlternatives": a.all("rejected"), "supersedes": a.all("supersedes")}))?;
             println!("{} · {}", r["id"].as_str().unwrap_or(""), r["decision"].as_str().unwrap_or(""));
             Ok(())
         }
