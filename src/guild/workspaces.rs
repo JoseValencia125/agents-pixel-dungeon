@@ -84,17 +84,29 @@ pub fn provision(project: &Project, quest_id: &str, task_id: &str, attempt_id: &
 
 /// Bring an earlier candidate's changes into a fresh worktree, uncommitted,
 /// on top of its base (which may have moved on since: other tasks were
-/// integrated), so a retry goes on from it. Git merges in three ways; on a
-/// conflict the worktree is put back as it was and false is returned.
-pub fn carry(workspace: &Workspace, candidate: &Candidate) -> bool {
+/// integrated), so a retry goes on from it. Git merges in three ways; a
+/// conflict stays in the files, marked, and says which; anything else puts
+/// the worktree back as it was.
+pub fn carry(workspace: &Workspace, candidate: &Candidate) -> Carry {
     let path = Path::new(&workspace.path);
     let range = format!("{}..{}", candidate.base_sha, candidate.head_sha);
-    if git(path, &["cherry-pick", "--no-commit", &range]).is_ok() { return true; }
+    if git(path, &["cherry-pick", "--no-commit", &range]).is_ok() { return Carry::Applied; }
+    // It clashes with what was integrated meanwhile: the worktree keeps both,
+    // with the conflict markers in the files, for the member to resolve
+    // (members cannot merge branches themselves).
+    let conflicted: Vec<String> = git(path, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default().lines().map(str::to_string).filter(|l| !l.is_empty()).collect();
+    if !conflicted.is_empty() && git(path, &["cherry-pick", "--quit"]).is_ok() && git(path, &["reset", "-q"]).is_ok() {
+        return Carry::Conflicts(conflicted);
+    }
     let _ = git(path, &["cherry-pick", "--abort"]);
     let _ = git(path, &["reset", "--hard", &workspace.base_sha]);
     let _ = git(path, &["clean", "-fdq"]);
-    false
+    Carry::Failed
 }
+
+/// How a candidate went onto a newer base.
+#[derive(Debug, PartialEq)]
+pub enum Carry { Applied, Conflicts(Vec<String>), Failed }
 
 /// Run the project's setup command in the worktree, returning its output.
 pub fn setup(workspace: &Workspace, argv: &[String], timeout_seconds: u64) -> GitResult<String> {

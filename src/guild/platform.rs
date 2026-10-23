@@ -109,11 +109,51 @@ pub fn interrupt_tree(pid: i32) {
     terminate_tree(pid, true);
 }
 
+/// Processes still running inside these folders (their working directory
+/// is one of them or below), but the harnesses themselves: what a member
+/// left in the background when its turn ended. Empty where `lsof` is not.
+pub fn processes_in(dirs: &[&Path]) -> Vec<(i32, String)> {
+    if cfg!(windows) { return vec![]; }
+    let Ok(out) = command("lsof").args(["-n", "-P", "-a", "-d", "cwd", "-F", "pcn"]).output() else { return vec![] };
+    let me = std::process::id() as i32;
+    // lsof gives resolved paths (/private/var/… for /var/…).
+    let dirs: Vec<PathBuf> = dirs.iter().flat_map(|d| [d.to_path_buf(), d.canonicalize().unwrap_or_else(|_| d.to_path_buf())]).collect();
+    let (mut found, mut pid, mut name) = (vec![], 0, String::new());
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        match line.split_at(line.len().min(1)) {
+            ("p", rest) => { pid = rest.parse().unwrap_or(0); name.clear(); }
+            ("c", rest) => name = rest.to_string(),
+            ("n", rest) => {
+                let inside = dirs.iter().any(|d| Path::new(rest).starts_with(d));
+                let harness = ["claude", "kiro-cli", "kiro-cli-chat", "codex", "node", "lsof"].iter().any(|h| name == *h || name.starts_with("kiro-cli"));
+                if inside && !harness && pid != me && pid > 0 { found.push((pid, name.clone())); }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
+
+    #[test]
+    #[cfg(unix)]
+    fn what_runs_in_a_folder_is_found_and_the_harness_is_not() {
+        if which("lsof").is_none() { return; }
+        let dir = std::env::temp_dir().join(format!("guild-bg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child = Command::new("sleep").arg("30").current_dir(&dir).stdout(Stdio::null()).spawn().unwrap();
+        let found = processes_in(&[dir.as_path()]);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(found.iter().any(|(pid, name)| *pid == child.id() as i32 && name == "sleep"), "{found:?}");
+        assert!(processes_in(&[Path::new("/nonexistent/guild")]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn finds_a_runnable_file_by_its_bare_name() {
