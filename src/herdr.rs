@@ -1438,6 +1438,13 @@ pub fn shell_blocker(screen: &str) -> Option<String> {
     Some(trf("zsh preguntó si corregir «{}»: algo en la shell nueva se comió parte del comando. Abre una terminal y revisa qué pregunta al arrancar.", &[&typed]))
 }
 
+/// A shell another program wraps, which Herdr does not take for a shell
+/// and so never starts an agent in: Kiro CLI's terminal (`zsh (kiro-cli-term)`),
+/// which Kiro adds to ~/.zshrc and ~/.zprofile, again on updates.
+pub fn wrapped_shell(process: &str) -> Option<String> {
+    process.contains("kiro-cli-t").then(|| tr("La terminal de Kiro CLI envuelve el shell de los paneles (zsh (kiro-cli-term)) y Herdr no lanza agentes ahí. Agrega a ~/.zshenv: [[ -n \"${HERDR_PANE_ID:-}\" ]] && export PROCESS_LAUNCHED_BY_Q=1 — así Kiro se salta solo en Herdr."))
+}
+
 /// The hint under a menu driven by arrow keys ("Enter to confirm · Esc to
 /// cancel"; Kiro's "↑↓ to navigate · ↵ to select" and "esc to close · Enter
 /// to see more options"; Codex's "enter select · esc back" and "Press enter

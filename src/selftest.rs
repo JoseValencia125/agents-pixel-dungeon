@@ -184,6 +184,9 @@ pub fn run() {
     assert!(shell_blocker("[oh-my-zsh] Would you like to update? [Y/n] ").is_some(), "A waiting oh-my-zsh prompt not recognised");
     assert!(shell_blocker("➜  x iro-cli\nzsh: correct 'iro-cli' to 'kiro-cli' [nyae]?").is_some_and(|w| w.contains("iro-cli")), "zsh's correction prompt not recognised");
     assert_eq!(shell_blocker("Restored session: Sun Oct 11\n➜  agents-pixel-dungeon "), None, "A plain shell prompt taken for a question");
+    // Herdr reports the process name cut at 15 characters.
+    assert!(crate::herdr::wrapped_shell("zsh (kiro-cli-t").is_some_and(|w| w.contains("PROCESS_LAUNCHED_BY_Q")), "Kiro's wrapped shell not explained");
+    assert_eq!(crate::herdr::wrapped_shell("zsh"), None, "A plain zsh taken for a wrapped one");
     // Codex (0.162) marks its highlight, its prompt and past messages with ›.
     let approval: Vec<String> = ["› Run the shell command: touch b.txt", "• Running touch b.txt", "  Would you like to run the following command?", "  $ touch b.txt", "› 1. Yes, proceed (y)", "  2. Yes, and don't ask again for commands that start with `touch b.txt;",  "     touch c.txt` (p)", "  3. No, and tell Codex what to do differently (esc)", "  Press enter to confirm or esc to cancel"].iter().map(|l| l.to_string()).collect();
     let menu = MenuOptions::new(&approval);
