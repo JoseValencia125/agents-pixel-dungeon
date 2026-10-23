@@ -77,6 +77,16 @@ pub struct Project {
     /// (`[permissions] programs`); the ones its own commands run count too.
     #[serde(default)]
     pub permitted_programs: Vec<String>,
+    /// Folders its members may read without asking (`[permissions] read`).
+    #[serde(default)]
+    pub permitted_reads: Vec<String>,
+    /// Commands its members may run as they are, `*` for anything
+    /// (`[permissions] commands`), and whether they may search the web
+    /// (`[permissions] web`, on by default) (FB-063).
+    #[serde(default)]
+    pub permitted_commands: Vec<String>,
+    #[serde(default = "default_true")]
+    pub web: bool,
     pub created_at: String,
 }
 
@@ -120,6 +130,10 @@ pub struct Quest {
     pub integration_ref: String,
     /// The commit the integration branch was created from.
     pub base_sha: Option<String>,
+    /// Folders outside the worktrees its members may read without asking
+    /// (references, captures): absolute paths, never written to (FB-052).
+    #[serde(default)]
+    pub read_paths: Vec<String>,
     pub plan_version: u32,
     pub created_at: String,
     pub updated_at: String,
@@ -185,6 +199,15 @@ pub struct Task {
     /// its attempts do not ask again.
     #[serde(default)]
     pub granted: Granted,
+    /// Images the work must leave in its worktree (paths relative to it, `*`
+    /// in the file name): kept with the candidate even when git ignores them,
+    /// for whoever judges visual work to see (FB-050).
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    /// A short trial: its deliverable is what it shows (its evidence) and
+    /// what it learned; accepting it never integrates it (FB-058).
+    #[serde(default)]
+    pub spike: bool,
     pub version: u32,
     pub created_at: String,
     pub updated_at: String,
@@ -456,6 +479,9 @@ pub struct Granted {
     pub commands: Vec<String>,
     #[serde(default)]
     pub programs: Vec<String>,
+    /// Folders the user allowed reading always (FB-052).
+    #[serde(default)]
+    pub reads: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -748,7 +774,7 @@ mod tests {
         Task {
             id: id.into(), quest_id: "q".into(), title: id.into(), instructions: String::new(), acceptance: vec![],
             depends_on: deps.iter().map(|s| s.to_string()).collect(), role: "implementer".into(), member_id: None, model_id: None,
-            priority: 0, state: TaskState::Pending, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), version: 1,
+            priority: 0, state: TaskState::Pending, block_reason: None, attempts_made: 0, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), evidence: vec![], spike: false, version: 1,
             created_at: now(), updated_at: now(),
         }
     }

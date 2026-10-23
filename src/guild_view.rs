@@ -732,6 +732,35 @@ pub fn panel(ui: &mut Ui, view: &mut GuildView, agent: &Agent, _now: f64, wide: 
         }
         if let Some(f) = &a.failure { ui.label(mono(f, 11.0).color(Color32::from_rgb(255, 120, 110))); }
     });
+    // What it shows: its step captures while it works, the images kept with
+    // its candidate after (FB-050, FB-059). A click opens one full size.
+    let mut shots: Vec<String> = a.verifier_results.iter().flat_map(|v| v.evidence.iter().cloned()).collect();
+    let live = a.state.is_active() && shots.is_empty();
+    if live {
+        let dir = guild::paths::scratch_dir(&a.id).join("evidence");
+        let mut found: Vec<String> = std::fs::read_dir(&dir).map(|r| r.flatten().map(|e| e.path().display().to_string()).collect()).unwrap_or_default();
+        found.retain(|p| [".png", ".jpg", ".jpeg", ".webp", ".gif"].iter().any(|x| p.to_lowercase().ends_with(x)));
+        found.sort();
+        shots = found;
+    }
+    if !shots.is_empty() {
+        ui.label(mono(&trf(if live { "Capturas en vivo ({})" } else { "Capturas ({})" }, &[&shots.len()]), 10.5).strong().color(DIM));
+        egui::ScrollArea::horizontal().id_salt(("guild-shots", &a.id)).max_height(if wide { 150.0 } else { 100.0 }).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let side = if wide { 140.0 } else { 90.0 };
+                for path in &shots {
+                    let Some(tex) = crate::guild_mode::thumbnail(ui.ctx(), &mut view.visual, path) else { continue };
+                    let size = tex.size_vec2();
+                    let scale = (side / size.x.max(size.y)).min(1.0);
+                    let name = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    let shown = ui.add(egui::Image::new(&tex).fit_to_exact_size(size * scale).sense(egui::Sense::click()));
+                    if shown.on_hover_text(format!("{name} · {}", tr("clic para abrirla"))).clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(format!("file://{}", path.replace(' ', "%20"))));
+                    }
+                }
+            });
+        });
+    }
     // Decisions.
     if let Some(p) = &a.pending_permission {
         ui.label(mono(&trf("Pide permiso: {}", &[&p.title]), 11.5).strong().color(Color32::from_rgb(255, 159, 10)));
@@ -762,6 +791,8 @@ pub fn panel(ui: &mut Ui, view: &mut GuildView, agent: &Agent, _now: f64, wide: 
             (s, _) if s.is_active() => {
                 if matches!(s, AttemptState::Running | AttemptState::WaitingInput) {
                     if button(ui, &tr("Interrumpir"), Color32::from_rgb(255, 159, 10)) { view.command("attempt.interrupt", json!({"attemptId": a.id})); }
+                    // On the harness and model its member has now, from what it wrote (FB-054).
+                    if button(ui, &tr("Reiniciar"), Color32::from_rgb(120, 170, 255)) { view.command("attempt.restart", json!({"attemptId": a.id})); }
                 }
                 if button(ui, &tr("Cancelar intento"), Color32::from_rgb(200, 200, 205)) { view.command("attempt.cancel", json!({"attemptId": a.id})); }
             }
@@ -1096,7 +1127,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
     let member = |id: &str, name: &str, harness: HarnessKind, model: &str, role: &str| Member { id: id.into(), name: name.into(), roles: vec![role.into()], harness, model_id: Some(model.into()), mode: None, role_prompt: String::new(), enabled: true, switched: None };
     let task = |id: &str, title: &str, state: TaskState, deps: &[&str]| Task {
         id: id.into(), quest_id: "q1".into(), title: tr(title), instructions: String::new(), acceptance: vec![], depends_on: deps.iter().map(|s| s.to_string()).collect(), role: "implementer".into(),
-        member_id: None, model_id: None, priority: 0, state, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), version: 1, created_at: t.clone(), updated_at: t.clone(),
+        member_id: None, model_id: None, priority: 0, state, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), evidence: vec![], spike: false, version: 1, created_at: t.clone(), updated_at: t.clone(),
     };
     let attempt = |id: &str, task: &str, member: &str, harness: HarnessKind, model: &str, state: AttemptState| Attempt {
         id: id.into(), task_id: task.into(), task_version: 1, quest_id: "q1".into(), project_id: "verbrawl".into(), member_id: member.into(), harness, model_requested: Some(model.into()), model_effective: Some(model.into()),
@@ -1126,7 +1157,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         schema_version: SCHEMA_VERSION,
         last_seq: 0,
         service_version: "demo".into(),
-        projects: vec![Project { id: "verbrawl".into(), name: "Verbrawl".into(), repo_path: "~/demo/verbrawl".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=human".into(), "seed={seed}".into()], timeout_seconds: 300 }), ai_play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=agent".into(), "seed={seed}".into()], timeout_seconds: 300 }), permitted_programs: vec![], created_at: t.clone() }],
+        projects: vec![Project { id: "verbrawl".into(), name: "Verbrawl".into(), repo_path: "~/demo/verbrawl".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=human".into(), "seed={seed}".into()], timeout_seconds: 300 }), ai_play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=agent".into(), "seed={seed}".into()], timeout_seconds: 300 }), permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, created_at: t.clone() }],
         decisions: vec![],
         hypotheses: demo_hypotheses(&t),
         questions: vec![guild::design::DesignQuestion { id: "Q-001".into(), project_id: "verbrawl".into(), question: tr("¿Las palabras largas son demasiado dominantes?"), context: "OBS-002".into(), system_id: Some("combat".into()), status: "open".into(), raised_by: "playtest".into(), source: Some("OBS-002".into()), hypothesis_ids: vec!["h1".into()], experiment_ids: vec!["e1".into()], decision_id: None, answer: String::new(), created_at: t.clone(), resolved_at: None }],
@@ -1155,7 +1186,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
             d
         }],
         roles: guild::config::role_catalog(),
-        quests: vec![Quest { id: "q1".into(), project_id: "verbrawl".into(), title: tr("Efectos de estado"), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some("490acd6".into()), plan_version: 1, created_at: t.clone(), updated_at: t.clone() }],
+        quests: vec![Quest { id: "q1".into(), project_id: "verbrawl".into(), title: tr("Efectos de estado"), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some("490acd6".into()), read_paths: vec![], plan_version: 1, created_at: t.clone(), updated_at: t.clone() }],
         tasks: vec![
             task("t1", "Contrato de datos", TaskState::Completed, &[]),
             task("t2", "Lógica de combate", TaskState::Running, &["t1"]),

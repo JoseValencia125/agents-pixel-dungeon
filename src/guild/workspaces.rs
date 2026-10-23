@@ -361,6 +361,38 @@ pub fn integrate(project: &Project, quest: &Quest, candidate: &Candidate, task: 
     result
 }
 
+/// Words that say a task brings back something that existed (FB-062).
+const BRING_BACK: &[&str] = &["restaur", "recuper", "volver", "vuelv", "devolv", "prototip", "borrad", "eliminad", "como era", "como estaba", "restore", "recover", "bring back", "previous", "removed", "deleted", "prototype", "revert", "used to"];
+
+/// Files that existed in `dir`'s history and are gone now, whose names
+/// share words with the task's text: (the commit that deleted it, the
+/// path), best matches first. Only when the text speaks of bringing
+/// something back; `docs/REMOVED_*.md` notes are listed too.
+pub fn deleted_matching(dir: &Path, text: &str, limit: usize) -> Vec<(String, String)> {
+    let lower = text.to_lowercase();
+    if !BRING_BACK.iter().any(|w| lower.contains(w)) { return vec![]; }
+    let words: Vec<String> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 4).map(str::to_string).collect();
+    let Ok(log) = git(dir, &["log", "--diff-filter=D", "--name-only", "--format=@%H", "-n", "300"]) else { return vec![] };
+    let mut sha = String::new();
+    let mut found: Vec<(usize, String, String)> = vec![];
+    for line in log.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if let Some(h) = line.strip_prefix('@') { sha = h.to_string(); continue; }
+        if dir.join(line).exists() || found.iter().any(|(_, _, p)| p == line) { continue; }
+        let parts: Vec<String> = line.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 4).map(str::to_string).collect();
+        let score = parts.iter().filter(|p| words.iter().any(|w| w.starts_with(p.as_str()) || p.starts_with(w.as_str()))).count();
+        if score > 0 { found.push((score, sha[..12.min(sha.len())].to_string(), line.to_string())); }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out: Vec<(String, String)> = found.into_iter().take(limit).map(|(_, s, p)| (s, p)).collect();
+    if let Ok(entries) = std::fs::read_dir(dir.join("docs")) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("REMOVED") && name.ends_with(".md") { out.push((String::new(), format!("docs/{name}"))); }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,8 +405,33 @@ mod tests {
         std::fs::write(repo.join("README.md"), "hello\n").unwrap();
         git(&repo, &["add", "-A"]).unwrap();
         git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]).unwrap();
-        let project = Project { id: "p".into(), name: "p".into(), repo_path: repo.display().to_string(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], created_at: now() };
+        let project = Project { id: "p".into(), name: "p".into(), repo_path: repo.display().to_string(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, created_at: now() };
         (dir, project)
+    }
+
+    #[test]
+    fn a_task_bringing_something_back_is_shown_where_the_history_has_it() {
+        // FB-062: the prototype's look was in git (91de469) and the members rebuilt it from scratch.
+        let (_dir, project) = temp_repo();
+        let repo = Path::new(&project.repo_path);
+        let commit = |m: &str| git(repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", m]).unwrap();
+        std::fs::create_dir_all(repo.join("shaders")).unwrap();
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("shaders/neon_glow.gdshader"), "shader\n").unwrap();
+        std::fs::write(repo.join("shaders/rain.gdshader"), "rain\n").unwrap();
+        std::fs::write(repo.join("scripts.gd"), "x\n").unwrap();
+        git(repo, &["add", "-A"]).unwrap();
+        commit("prototype");
+        git(repo, &["rm", "-q", "shaders/neon_glow.gdshader", "shaders/rain.gdshader"]).unwrap();
+        std::fs::write(repo.join("docs/REMOVED_LOOK.md"), "what went\n").unwrap();
+        git(repo, &["add", "-A"]).unwrap();
+        commit("clean up");
+        let found = deleted_matching(repo, "Restaurar el look neón del prototipo: el glow de los edificios", 10);
+        assert_eq!(found[0].1, "shaders/neon_glow.gdshader", "{found:?}");
+        assert_eq!(found[0].0.len(), 12);
+        assert!(!found.iter().any(|f| f.1 == "shaders/rain.gdshader"), "only what the task speaks of: {found:?}");
+        assert!(found.iter().any(|f| f.1 == "docs/REMOVED_LOOK.md" && f.0.is_empty()));
+        assert!(deleted_matching(repo, "Add the glow to the buildings", 10).is_empty(), "a task that brings nothing back hears nothing");
     }
 
     #[test]
@@ -390,8 +447,8 @@ mod tests {
         let candidate = commit_candidate(&ws, "candidate").unwrap().unwrap();
         assert_eq!(candidate.files_changed, 1);
         assert_ne!(candidate.head_sha, base);
-        let quest = Quest { id: "q1".into(), project_id: "p".into(), title: "q".into(), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some(base.clone()), plan_version: 1, created_at: now(), updated_at: now() };
-        let task = Task { id: "t1".into(), quest_id: "q1".into(), title: "add file".into(), instructions: String::new(), acceptance: vec![], depends_on: vec![], role: "implementer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Accepted, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), version: 1, created_at: now(), updated_at: now() };
+        let quest = Quest { id: "q1".into(), project_id: "p".into(), title: "q".into(), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some(base.clone()), read_paths: vec![], plan_version: 1, created_at: now(), updated_at: now() };
+        let task = Task { id: "t1".into(), quest_id: "q1".into(), title: "add file".into(), instructions: String::new(), acceptance: vec![], depends_on: vec![], role: "implementer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Accepted, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), evidence: vec![], spike: false, version: 1, created_at: now(), updated_at: now() };
         let merged = integrate(&project, &quest, &candidate, &task).unwrap();
         assert_ne!(merged, base);
         let files = git(Path::new(&project.repo_path), &["ls-tree", "--name-only", &merged]).unwrap();
