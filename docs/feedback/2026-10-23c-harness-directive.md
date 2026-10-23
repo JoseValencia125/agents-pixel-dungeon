@@ -44,3 +44,11 @@ Qué funcionó para iterar lo visual rápido y qué lo frenó. Las «+» son pr�
 - kind: fails · cause: guild · status: open · project: harness-directive · by orchestrator · 2026-10-23T20:12:01.663Z
 - evidence: Se pidió volver al look del prototipo y los miembros reconstruyeron desde cero; todo estaba en git (91de469). Propuesta: cuando una tarea menciona algo que existió, la guild busca en el historial (archivos borrados, docs/REMOVED_*.md) y adjunta las rutas al brief.
 
+
+## FB-063 · − El orquestador de la guild escala permisos inofensivos que debería decidir solo; no hay política por proyecto
+
+**Postura del usuario (23-10-2026): «100 %: el orquestador solo debe escalar lo extremadamente peligroso».**
+
+**Evidencia:** en una tarde, el orquestador (Oro) escaló al humano decenas de permisos: leer referencias fuera del worktree, `git add`/`commit` en el propio worktree, `git fetch`, `web_search` de APIs de Godot, importar el proyecto. Dana esperó 45 min y Alba 26 min con el trabajo detenido. El delegado terminó respondiendo a mano lo que el orquestador debía decidir.
+
+**Propuesta:** invertir el criterio por defecto: el orquestador aprueba todo lo que se queda dentro del worktree, del scratch de la tarea, de lecturas del repo y de rutas de referencia declaradas, git en la propia rama, red de solo lectura (fetch, búsqueda de documentación) y herramientas del proyecto. Escala solo lo extremadamente peligroso: borrar fuera del worktree, escribir en el checkout del usuario, push a ramas compartidas, credenciales, red con escritura, comandos destructivos del sistema. Una política por proyecto en `.guild/guild.toml` (rutas de lectura, comandos permitidos) para ajustar el resto.
