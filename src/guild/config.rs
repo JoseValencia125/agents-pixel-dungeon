@@ -25,6 +25,16 @@ pub struct GuildFile {
     pub ai_play: Option<PlaytestSection>,
     #[serde(default)]
     pub permissions: PermissionsSection,
+    #[serde(default)]
+    pub merge: MergeSection,
+}
+
+/// How integration joins what two tasks changed in the same file.
+#[derive(Debug, Default, Deserialize)]
+pub struct MergeSection {
+    /// Files (git patterns) that only grow: both sides' lines are kept (FB-068).
+    #[serde(default)]
+    pub union: Vec<String>,
 }
 
 /// What members may run without asking, beyond the guild's routine list
@@ -81,6 +91,8 @@ pub struct ProjectSection {
     pub target_ref: Option<String>,
     #[serde(default)]
     pub setup: Vec<String>,
+    /// Cores for heavy work, shared among the attempts at once (FB-073).
+    pub threads: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

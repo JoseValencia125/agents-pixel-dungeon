@@ -64,7 +64,7 @@ impl KiroAcp {
         self.procs.lock().unwrap().get(&session.id).cloned().ok_or_else(|| HarnessError::TransportLost("session has no process".into()))
     }
 
-    fn spawn(&self, cwd: &PathBuf, log_name: &str) -> HarnessResult<Arc<Proc>> {
+    fn spawn(&self, cwd: &PathBuf, log_name: &str, env: &[(String, String)]) -> HarnessResult<Arc<Proc>> {
         if !self.binary.exists() {
             return Err(HarnessError::RuntimeFailed(format!("kiro-cli not found at {}", self.binary.display())));
         }
@@ -76,6 +76,7 @@ impl KiroAcp {
         let mut cmd = Command::new(&self.binary);
         cmd.arg("acp");
         if self.engine == Engine::V3 { cmd.arg("--agent-engine=v3"); }
+        cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         cmd.current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::from(stderr));
         crate::platform::detach(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| HarnessError::RuntimeFailed(format!("cannot start kiro-cli acp: {e}")))?;
@@ -326,7 +327,7 @@ impl KiroAcp {
     /// `session/load`, which replays its history first.
     fn open_session(&self, options: &SessionOptions, load: Option<&str>) -> HarnessResult<SessionRef> {
         let id = crate::domain::new_id();
-        let proc = self.spawn(&options.cwd, &format!("kiro-{id}"))?;
+        let proc = self.spawn(&options.cwd, &format!("kiro-{id}"), &options.env)?;
         let init = proc.call(
             "initialize",
             json!({"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}}, "clientInfo": {"name": "agents-pixel-dungeon-guild", "version": env!("CARGO_PKG_VERSION")}}),
@@ -502,7 +503,7 @@ impl HarnessAdapter for KiroAcp {
         }
         // No session: open a throwaway one in the guild's own folder.
         let cwd = crate::paths::home().join("probe");
-        let session = self.create_session(&SessionOptions { cwd, model_id: None, mode: None, role_prompt: String::new() })?;
+        let session = self.create_session(&SessionOptions { cwd, model_id: None, mode: None, role_prompt: String::new(), env: vec![] })?;
         let models = self.list_models(Some(&session));
         let _ = self.stop(&session);
         models

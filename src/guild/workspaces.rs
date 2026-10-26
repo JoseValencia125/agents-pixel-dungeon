@@ -87,10 +87,12 @@ pub fn provision(project: &Project, quest_id: &str, task_id: &str, attempt_id: &
 /// integrated), so a retry goes on from it. Git merges in three ways; a
 /// conflict stays in the files, marked, and says which; anything else puts
 /// the worktree back as it was.
-pub fn carry(workspace: &Workspace, candidate: &Candidate) -> Carry {
+pub fn carry(workspace: &Workspace, candidate: &Candidate, union: &[String]) -> Carry {
     let path = Path::new(&workspace.path);
     let range = format!("{}..{}", candidate.base_sha, candidate.head_sha);
-    if git(path, &["cherry-pick", "--no-commit", &range]).is_ok() { return Carry::Applied; }
+    let mut pick = union_args(&workspace.project_id, union);
+    pick.extend(["cherry-pick".into(), "--no-commit".into(), range]);
+    if git(path, &pick.iter().map(String::as_str).collect::<Vec<_>>()).is_ok() { return Carry::Applied; }
     // It clashes with what was integrated meanwhile: the worktree keeps both,
     // with the conflict markers in the files, for the member to resolve
     // (members cannot merge branches themselves).
@@ -102,6 +104,20 @@ pub fn carry(workspace: &Workspace, candidate: &Candidate) -> Carry {
     let _ = git(path, &["reset", "--hard", &workspace.base_sha]);
     let _ = git(path, &["clean", "-fdq"]);
     Carry::Failed
+}
+
+/// The files that only grow (registries, lists of tests), joined line by
+/// line when two branches add to them (`[merge] union` in `.guild/guild.toml`,
+/// FB-068): git's union driver, through an attributes file of the guild's.
+pub fn union_args(project_id: &str, union: &[String]) -> Vec<String> {
+    if union.is_empty() { return vec![]; }
+    let file = crate::paths::worktrees_dir().join(project_id).join(".union-attributes");
+    let text: String = union.iter().map(|p| format!("{} merge=union\n", p.trim())).collect();
+    if std::fs::read_to_string(&file).ok().as_deref() != Some(text.as_str()) {
+        if let Some(dir) = file.parent() { let _ = std::fs::create_dir_all(dir); }
+        if std::fs::write(&file, &text).is_err() { return vec![]; }
+    }
+    vec!["-c".into(), format!("core.attributesFile={}", file.display())]
 }
 
 /// How a candidate went onto a newer base.
@@ -341,7 +357,9 @@ pub fn integrate(project: &Project, quest: &Quest, candidate: &Candidate, task: 
     let _ = git(repo, &["worktree", "prune"]);
     git(repo, &["worktree", "add", "--detach", &tmp.display().to_string(), &expected])?;
     let result = (|| -> GitResult<String> {
-        let merge = git(&tmp, &["merge", "--squash", &candidate.head_sha]);
+        let mut squash = union_args(&project.id, &project.merge_union);
+        squash.extend(["merge".into(), "--squash".into(), candidate.head_sha.clone()]);
+        let merge = git(&tmp, &squash.iter().map(String::as_str).collect::<Vec<_>>());
         if let Err(err) = merge {
             let _ = git(&tmp, &["merge", "--abort"]);
             return Err(format!("conflict integrating {}: {err}", task.title));
@@ -405,7 +423,7 @@ mod tests {
         std::fs::write(repo.join("README.md"), "hello\n").unwrap();
         git(&repo, &["add", "-A"]).unwrap();
         git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]).unwrap();
-        let project = Project { id: "p".into(), name: "p".into(), repo_path: repo.display().to_string(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, created_at: now() };
+        let project = Project { id: "p".into(), name: "p".into(), repo_path: repo.display().to_string(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, merge_union: vec![], threads: None, created_at: now() };
         (dir, project)
     }
 
@@ -435,6 +453,32 @@ mod tests {
     }
 
     #[test]
+    fn files_that_only_grow_are_joined_when_two_tasks_add_to_them() {
+        // FB-068: five tasks each added their profile to one registry and clashed at integration.
+        let _guard = crate::paths::test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (dir, mut project) = temp_repo();
+        std::env::set_var("HPD_GUILD_HOME", dir.path().join("home").display().to_string());
+        let repo = Path::new(&project.repo_path);
+        std::fs::write(repo.join("tests.txt"), "core\n").unwrap();
+        git(repo, &["add", "-A"]).unwrap();
+        git(repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "tests"]).unwrap();
+        let base = rev_parse(repo, "HEAD").unwrap();
+        let quest = Quest { id: "q1".into(), project_id: "p".into(), title: "q".into(), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some(base.clone()), read_paths: vec![], notes: vec![], plan_version: 1, created_at: now(), updated_at: now() };
+        let mut cands = vec![];
+        for (id, line) in [("a1", "park\n"), ("a2", "school\n")] {
+            let ws = provision(&project, "q1", id, id, &base).unwrap();
+            std::fs::write(Path::new(&ws.path).join("tests.txt"), format!("core\n{line}")).unwrap();
+            cands.push((commit_candidate(&ws, "c").unwrap().unwrap(), id));
+        }
+        let task = |id: &str| Task { id: id.into(), quest_id: "q1".into(), title: id.into(), instructions: String::new(), acceptance: vec![], depends_on: vec![], role: "implementer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Accepted, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), evidence: vec![], spike: false, version: 1, created_at: now(), updated_at: now() };
+        integrate(&project, &quest, &cands[0].0, &task("a1")).unwrap();
+        assert!(integrate(&project, &quest, &cands[1].0, &task("a2")).unwrap_err().starts_with("conflict integrating"), "without the rule they clash");
+        project.merge_union = vec!["tests.txt".into()];
+        let merged = integrate(&project, &quest, &cands[1].0, &task("a2")).unwrap();
+        assert_eq!(git(repo, &["show", &format!("{merged}:tests.txt")]).unwrap(), "core\npark\nschool");
+    }
+
+    #[test]
     fn a_worktree_is_created_committed_and_integrated() {
         let _guard = crate::paths::test_lock().lock().unwrap_or_else(|e| e.into_inner());
         let (dir, project) = temp_repo();
@@ -447,7 +491,7 @@ mod tests {
         let candidate = commit_candidate(&ws, "candidate").unwrap().unwrap();
         assert_eq!(candidate.files_changed, 1);
         assert_ne!(candidate.head_sha, base);
-        let quest = Quest { id: "q1".into(), project_id: "p".into(), title: "q".into(), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some(base.clone()), read_paths: vec![], plan_version: 1, created_at: now(), updated_at: now() };
+        let quest = Quest { id: "q1".into(), project_id: "p".into(), title: "q".into(), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/q1".into(), base_sha: Some(base.clone()), read_paths: vec![], notes: vec![], plan_version: 1, created_at: now(), updated_at: now() };
         let task = Task { id: "t1".into(), quest_id: "q1".into(), title: "add file".into(), instructions: String::new(), acceptance: vec![], depends_on: vec![], role: "implementer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Accepted, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), evidence: vec![], spike: false, version: 1, created_at: now(), updated_at: now() };
         let merged = integrate(&project, &quest, &candidate, &task).unwrap();
         assert_ne!(merged, base);

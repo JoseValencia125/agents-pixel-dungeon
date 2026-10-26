@@ -87,6 +87,14 @@ pub struct Project {
     pub permitted_commands: Vec<String>,
     #[serde(default = "default_true")]
     pub web: bool,
+    /// Files that only grow (registries, lists of tests), joined line by
+    /// line at integration when two tasks add to them (`[merge] union`, FB-068).
+    #[serde(default)]
+    pub merge_union: Vec<String>,
+    /// The cores heavy work may use in all, shared among the attempts that
+    /// run at once (`[project] threads`, FB-073); all of the machine's if unset.
+    #[serde(default)]
+    pub threads: Option<u32>,
     pub created_at: String,
 }
 
@@ -134,6 +142,10 @@ pub struct Quest {
     /// (references, captures): absolute paths, never written to (FB-052).
     #[serde(default)]
     pub read_paths: Vec<String>,
+    /// What holds for every task of the quest until withdrawn: running
+    /// members get it at once, the others with their task (FB-069).
+    #[serde(default)]
+    pub notes: Vec<String>,
     pub plan_version: u32,
     pub created_at: String,
     pub updated_at: String,
@@ -641,6 +653,18 @@ pub struct Snapshot {
     /// How many attempts may run at once.
     #[serde(default)]
     pub concurrency: usize,
+    /// Open tasks of a quest that change the same files (FB-068).
+    #[serde(default)]
+    pub overlaps: Vec<Overlap>,
+}
+
+/// Two open tasks of one quest that change (or name) the same files: they
+/// will clash at integration unless one waits for the other (FB-068).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Overlap {
+    pub quest_id: String,
+    pub tasks: [String; 2],
+    pub files: Vec<String>,
 }
 
 /// What `probe` found out about an installed harness.
@@ -722,19 +746,15 @@ pub fn room_state(task: Option<&Task>, attempt: Option<&Attempt>) -> &'static st
     }
 }
 
-/// Dependencies must exist, stay inside the quest, never point at
-/// themselves and never form a cycle.
+/// Dependencies must exist among `tasks` (a project's, so they may cross
+/// its quests, FB-071), never point at themselves and never form a cycle.
 pub fn validate_dag(tasks: &[Task]) -> Result<(), String> {
     use std::collections::{HashMap, HashSet};
     let by_id: HashMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
     for t in tasks {
         for d in &t.depends_on {
             if d == &t.id { return Err(format!("task {} depends on itself", t.id)); }
-            match by_id.get(d.as_str()) {
-                None => return Err(format!("task {} depends on unknown task {d}", t.id)),
-                Some(p) if p.quest_id != t.quest_id => return Err(format!("task {} depends on {d} from another quest", t.id)),
-                _ => {}
-            }
+            if !by_id.contains_key(d.as_str()) { return Err(format!("task {} depends on unknown task {d}", t.id)); }
         }
     }
     // Kahn's algorithm: whatever is left has a cycle.

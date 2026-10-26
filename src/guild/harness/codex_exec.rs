@@ -28,6 +28,7 @@ pub struct CodexExec {
 struct CodexSession {
     cwd: PathBuf,
     model: Option<String>,
+    env: Vec<(String, String)>,
     /// Codex's thread id, known after the first turn starts.
     thread_id: Option<String>,
     proc: Option<Arc<LineProc>>,
@@ -136,27 +137,28 @@ impl HarnessAdapter for CodexExec {
 
     fn create_session(&self, options: &SessionOptions) -> HarnessResult<SessionRef> {
         let id = crate::domain::new_id();
-        let s = CodexSession { cwd: options.cwd.clone(), model: options.model_id.clone(), thread_id: None, proc: None, interrupted: false };
+        let s = CodexSession { cwd: options.cwd.clone(), model: options.model_id.clone(), env: options.env.clone(), thread_id: None, proc: None, interrupted: false };
         self.sessions.lock().unwrap().insert(id.clone(), Arc::new(Mutex::new(s)));
         Ok(SessionRef { id, native_id: None })
     }
 
     fn resume_session(&self, options: &SessionOptions, native_id: &str) -> HarnessResult<SessionRef> {
         let id = crate::domain::new_id();
-        let s = CodexSession { cwd: options.cwd.clone(), model: options.model_id.clone(), thread_id: Some(native_id.into()), proc: None, interrupted: false };
+        let s = CodexSession { cwd: options.cwd.clone(), model: options.model_id.clone(), env: options.env.clone(), thread_id: Some(native_id.into()), proc: None, interrupted: false };
         self.sessions.lock().unwrap().insert(id.clone(), Arc::new(Mutex::new(s)));
         Ok(SessionRef { id, native_id: Some(native_id.into()) })
     }
 
     fn prompt(&self, session: &SessionRef, request_id: &str, text: &str) -> HarnessResult<TurnHandle> {
         let shared = self.session(session)?;
-        let (cwd, model, thread_id) = {
+        let (cwd, model, thread_id, env) = {
             let mut s = shared.lock().unwrap();
             if s.proc.is_some() { return Err(HarnessError::RuntimeFailed("a turn is already running in this session".into())); }
             s.interrupted = false;
-            (s.cwd.clone(), s.model.clone(), s.thread_id.clone())
+            (s.cwd.clone(), s.model.clone(), s.thread_id.clone(), s.env.clone())
         };
         let mut cmd = Command::new(&self.binary);
+        cmd.envs(env);
         cmd.arg("exec");
         match &thread_id {
             Some(t) => { cmd.args(["resume", t, "--json"]); }
