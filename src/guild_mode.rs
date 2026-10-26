@@ -772,7 +772,7 @@ mod tests {
 
     #[test]
     fn the_project_is_the_repository_that_holds_the_folder() {
-        let p = |id: &str, path: &str| Project { id: id.into(), name: id.into(), repo_path: path.into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, created_at: String::new() };
+        let p = |id: &str, path: &str| Project { id: id.into(), name: id.into(), repo_path: path.into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, merge_union: vec![], threads: None, created_at: String::new() };
         let snap = Snapshot { projects: vec![p("a", "/r/app"), p("b", "/r/app/game"), p("c", "/r/application")], ..Default::default() };
         assert_eq!(project_for(&snap, "/r/app/game/src").map(|p| p.id.as_str()), Some("b"));
         assert_eq!(project_for(&snap, "/r/app").map(|p| p.id.as_str()), Some("a"));

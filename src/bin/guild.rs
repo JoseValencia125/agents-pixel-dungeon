@@ -44,19 +44,25 @@ USAGE
   guild member add <id> --harness kiro|codex|claude|mock [--role R]... [--model M] [--mode MODE] [--name N]
   guild member set <id> [--role R]... [--model M] [--mode MODE] [--name N] [--harness H] [--enable|--disable]
   guild member remove <id>
+  guild member release <id> [--reason TEXT]  free a member stuck on work that is over: a candidate waiting is turned down, a turn is stopped
   guild models [kiro|codex|claude|mock]  the models the harness announces
 
   guild quest new <project> <title> [--description TEXT] [--read FOLDER]...
                                      --read: a folder outside the repository its members may read without asking
   guild quest set <quest> [--title T] [--description TEXT] [--read FOLDER]... [--no-read]
   guild quest sync <quest> [--from REF]   bring the project's target (or REF) into the quest's branch; later attempts start from it
+  guild quest note <quest> <text> [--later]  a rule for every task of the quest until withdrawn: members at work are stopped and handed it,
+                                     the others and tasks created later read it with their task
+  guild quest unnote <quest> <n|text>  withdraw a quest note (its number, from 1, as `quest notes` lists them)
+  guild quest notes <quest>          the quest's notes
   guild task new <quest> <title> [--instructions TEXT] [--accept TEXT]... [--depends ID,ID]
                                      [--role R] [--member ID] [--model M] [--priority N] [--max-attempts N] [--id ID]
                                      [--strategy single|reviewed|race] [--candidates N] [--select policy|judge|user] [--auto-integrate] [--timeout MIN]
                                      [--evidence PATH]... [--spike]
                                      a race runs N members at once; the selection picks among the candidates that passed the verifiers;
                                      --evidence: an image the work must leave in its worktree (* in the name), kept and shown with the candidate;
-                                     --spike: a short trial (30 min) whose captures and report are the result, never integrated
+                                     --spike: a short trial (30 min) whose captures and report are the result, never integrated;
+                                     --depends may name a task of another quest of the project: its quest's branch is brought in first
   guild task done <task> [--sha SHA] [--reason TEXT]  a blocked or accepted task integrated by hand is completed; its dependants start
   guild task note <task> <text> [--later]  add to a task that already started: a member at work is stopped and handed it now
                                      (--later: when its turn ends); a retry reads it with the instructions
@@ -100,6 +106,8 @@ USAGE
   guild finding verify <project> <F-id> [--ref REF]   replay its moves on its build (or REF): reproduced, fixed…
   guild finding promote <project> <F-id> [--question T] [--system ID]
   guild finding set <project> <F-id> <unverified|reproduced|not_reproduced|fixed|wont_fix>
+  guild gallery [<project>] [--open]  the evidence gallery: every image the members left, by quest and task, with its reference;
+                                     the guild keeps it up to date as work comes in
   guild records [--project ID] [--task ID]   one row per finished attempt: strategy, member, harness, model, duration, size, verifiers, judge score, winner
   guild start <quest>  |  guild pause <quest>  |  guild resume <quest>  |  guild cancel-quest <quest>
 
@@ -202,7 +210,7 @@ fn parse(args: &[String]) -> Args<'_> {
     Args { positional, flags }
 }
 
-fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground" | "detach" | "enable" | "disable" | "no-depends" | "override" | "full" | "spike" | "no-spike" | "later" | "no-read") }
+fn is_boolean_flag(name: &str) -> bool { matches!(name, "daemon" | "follow" | "integrate" | "json" | "foreground" | "detach" | "enable" | "disable" | "no-depends" | "override" | "full" | "spike" | "no-spike" | "later" | "no-read" | "open") }
 
 impl Args<'_> {
     fn flag(&self, name: &str) -> Option<&str> { self.flags.iter().rev().find(|(k, _)| *k == name).and_then(|(_, v)| *v) }
@@ -460,6 +468,22 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             println!("member {} · {} · {} · {}", r["id"].as_str().unwrap_or(""), r["harness"].as_str().unwrap_or(""), r["roles"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", "), if r["enabled"] == true { "enabled" } else { "disabled" });
             Ok(())
         }
+        "member" if a.positional.first().copied() == Some("release") => {
+            let r = call(&ensure_running()?, "member.release", json!({"memberId": a.pos(1, "member id")?, "reason": a.flag("reason")}))?;
+            let n = r["attempts"].as_array().map(Vec::len).unwrap_or(0);
+            println!("{} is free{}", r["released"].as_str().unwrap_or(""), if n == 0 { " (it had nothing open)".to_string() } else { format!(" ({n} attempts closed)") });
+            Ok(())
+        }
+        "gallery" => {
+            let r = call(&ensure_running()?, "gallery.build", json!({"projectId": a.positional.first()}))?;
+            let pages: Vec<&str> = r["pages"].as_array().into_iter().flatten().filter_map(|p| p["path"].as_str()).collect();
+            if pages.is_empty() { println!("no images yet: the gallery appears once a member leaves evidence"); }
+            for p in &pages {
+                println!("{p}");
+                if a.has("open") { let _ = guild::platform::command(if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" }).arg(p).spawn(); }
+            }
+            Ok(())
+        }
         "member" if a.positional.first().copied() == Some("remove") => {
             call(&ensure_running()?, "member.remove", json!({"memberId": a.pos(1, "member id")?}))?;
             println!("removed");
@@ -514,6 +538,22 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             let r = call(&ensure_running()?, "quest.sync", json!({"questId": a.pos(1, "quest")?, "from": a.flag("from")}))?;
             if r["changed"] == true { println!("quest {} now has {} ({} files): {}", r["questId"].as_str().unwrap_or(""), r["from"].as_str().unwrap_or(""), r["files"].as_array().map(Vec::len).unwrap_or(0), r["files"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")); }
             else { println!("quest {} already has {}", r["questId"].as_str().unwrap_or(""), r["from"].as_str().unwrap_or("")); }
+            Ok(())
+        }
+        "quest" if matches!(a.positional.first().copied(), Some("note" | "unnote" | "notes")) => {
+            let sub = a.pos(0, "subcommand")?;
+            let quest = a.pos(1, "quest")?;
+            let client = ensure_running()?;
+            let r = match sub {
+                "note" => call(&client, "quest.note", json!({"questId": quest, "text": a.pos(2, "note")?, "later": a.has("later")}))?,
+                "unnote" => { let w = a.pos(2, "note number or text")?; call(&client, "quest.note", json!({"questId": quest, "withdraw": w.parse::<u64>().map(Value::from).unwrap_or_else(|_| json!(w))}))? }
+                _ => { let snap = call(&client, "guild.snapshot", json!({}))?; snap["quests"].as_array().into_iter().flatten().find(|q| q["id"] == quest).map(|q| json!({"notes": q["notes"]})).ok_or_else(|| format!("no quest {quest}"))? }
+            };
+            if let Some(w) = r["withdrawn"].as_str() { println!("withdrawn: {w}"); }
+            if let Some(n) = r["redirected"].as_array().filter(|n| !n.is_empty()) { println!("{} members at work were stopped and read it now", n.len()); }
+            let notes: Vec<&str> = r["notes"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            if notes.is_empty() { println!("the quest has no notes"); }
+            for (i, n) in notes.iter().enumerate() { println!("{}. {n}", i + 1); }
             Ok(())
         }
         "quest" if a.positional.first().copied() == Some("set") => {

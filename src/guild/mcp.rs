@@ -80,7 +80,7 @@ fn tools() -> Value {
                 "acceptance": {"type": "array", "items": {"type": "string"}},
                 "role": {"type": "string", "description": "A role some member holds; defaults to implementer"},
                 "member": {"type": "string", "description": "A member's name or id, to pin the task to it"},
-                "dependsOn": {"type": "array", "items": {"type": "string"}},
+                "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "Ids of this plan, or a task id of another quest of the project: its quest's branch is brought in before the task starts"},
                 "candidates": {"type": "integer", "description": "Run a race of this many members (default 1)"},
                 "timeoutMinutes": {"type": "integer", "description": "How long an attempt may work on it (default the guild's, 30)"},
                 "evidence": {"type": "array", "items": {"type": "string"}, "description": "Images the member must leave in its worktree (paths relative to it, * in the name): kept with the candidate even if git ignores them, shown to you and the user"},
@@ -89,8 +89,8 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"questId": {"type": "string", "description": "Without it, every quest under way"}, "timeoutSeconds": {"type": "integer", "description": "Default 300, at most 540"}}}},
         {"name": "guild_task", "description": "One task in full: instructions, notes, attempts, failures, verifier results, candidate size, pending permission (whole command, file and whether it is inside the worktree) and the end of the member's transcript. full: true gives the member's whole last reply and every verifier's whole output.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id, "full": {"type": "boolean"}}}},
-        {"name": "guild_note", "description": "Add to a task that already started: a member at work is stopped and handed the note at once, in the same session, to correct course (later: true waits until its turn ends); a retry and the orchestrator read it with the instructions.",
-         "inputSchema": {"type": "object", "required": ["taskId", "text"], "properties": {"taskId": task_id, "text": {"type": "string"}, "later": {"type": "boolean"}}}},
+        {"name": "guild_note", "description": "Add to a task that already started: a member at work is stopped and handed the note at once, in the same session, to correct course (later: true waits until its turn ends); a retry and the orchestrator read it with the instructions. With questId instead of taskId, a note for the whole quest: every open task reads it (members at work at once, the rest when they start, and tasks created later) until withdrawn (withdraw: its number, from 1).",
+         "inputSchema": {"type": "object", "required": ["text"], "properties": {"taskId": task_id, "questId": {"type": "string"}, "text": {"type": "string"}, "later": {"type": "boolean"}, "withdraw": {"type": "integer"}}}},
         {"name": "guild_diff", "description": "The diff of a task's latest candidate.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id}}},
         {"name": "guild_decide", "description": "Decide on a task: accept (integrates the candidate into the quest's branch; a spike is completed without integrating), reject (with a reason; the member retries if attempts remain), retry (a candidate still waiting is rejected with the reason; a task at work starts again on its member's current harness and model, from what it wrote, without costing an attempt), or cancel (in one step; replacedBy: the tasks that waited for it wait for that task instead). accept with attemptId and override: true takes a verified attempt that was failed (by the orchestrator, a judge or a reject).",
@@ -155,6 +155,12 @@ fn quest_report(snap: &Snapshot, q: &Quest) -> String {
     let done = tasks.iter().filter(|t| t.state == TaskState::Completed).count();
     let mut s = format!("quest {} {:?} · {}/{} done · branch {} · {}\n", q.id, q.state, done, tasks.len(), q.integration_ref.trim_start_matches("refs/heads/"), q.title);
     for t in tasks { s.push_str(&task_line(snap, t)); s.push('\n'); }
+    for (i, n) in q.notes.iter().enumerate() { s.push_str(&format!("  quest note {}: {n}\n", i + 1)); }
+    // Tasks that will clash at integration unless one waits for the other (FB-068).
+    for o in snap.overlaps.iter().filter(|o| o.quest_id == q.id) {
+        let title = |id: &str| snap.tasks.iter().find(|t| t.id == id).map(|t| t.title.clone()).unwrap_or_else(|| id.to_string());
+        s.push_str(&format!("  ⚠ «{}» and «{}» both change {}: put one after the other (`task set {} --depends {}`), or list a file that only grows under [merge] union in .guild/guild.toml\n", title(&o.tasks[0]), title(&o.tasks[1]), o.files.join(", "), o.tasks[1], o.tasks[0]));
+    }
     s.push_str(&doc_line(snap, &q.project_id));
     s
 }
@@ -195,7 +201,12 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
         "guild_status" => {
             let snap = snapshot(call)?;
             let mut out = String::new();
-            for p in &snap.projects { out.push_str(&format!("project {} · {} · {}\n", p.id, p.name, p.repo_path)); out.push_str(&doc_line(&snap, &p.id)); }
+            for p in &snap.projects {
+                out.push_str(&format!("project {} · {} · {}\n", p.id, p.name, p.repo_path));
+                let gallery = crate::gallery::gallery_path(&p.id);
+                if gallery.exists() { out.push_str(&format!("  evidence gallery (give the user this link): {}\n", crate::gallery::file_url(&gallery))); }
+                out.push_str(&doc_line(&snap, &p.id));
+            }
             let busy: Vec<&str> = snap.attempts.iter().filter(|a| a.state.is_active()).map(|a| a.member_id.as_str()).collect();
             out.push_str("members:\n");
             for m in snap.members.iter().filter(|m| m.enabled) {
@@ -332,6 +343,15 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
             let mut text = r["text"].as_str().unwrap_or("").to_string();
             if crate::domain::cut(&mut text, 60_000) { text.push_str("\n… (truncated)"); }
             Ok(text)
+        }
+        "guild_note" if s("taskId").is_none() => {
+            let quest = need("questId")?;
+            let r = match args.get("withdraw").and_then(Value::as_u64) {
+                Some(n) => call("quest.note", json!({"questId": quest, "withdraw": n, "by": "delegate"}))?,
+                None => call("quest.note", json!({"questId": quest, "text": need("text")?, "by": "delegate", "later": args.get("later").and_then(Value::as_bool).unwrap_or(false)}))?,
+            };
+            let at_work = r["redirected"].as_array().map(Vec::len).unwrap_or(0);
+            Ok(format!("the quest has {} notes{}", r["notes"].as_array().map(Vec::len).unwrap_or(0), if at_work > 0 { format!("; {at_work} members at work were stopped and read it now") } else { String::new() }))
         }
         "guild_note" => {
             let r = call("task.note", json!({"taskId": need("taskId")?, "text": need("text")?, "by": "delegate", "later": args.get("later").and_then(Value::as_bool).unwrap_or(false)}))?;
