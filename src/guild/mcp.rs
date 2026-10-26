@@ -201,6 +201,9 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
         "guild_status" => {
             let snap = snapshot(call)?;
             let mut out = String::new();
+            if let Some(free) = snap.disk_low {
+                out.push_str(&format!("⚠ disk: {:.1} GB free — no work starts until there is room. Finished worktrees are removed by themselves (`guild gc` now); tell the user if it stays low.\n", free as f64 / (1u64 << 30) as f64));
+            }
             for p in &snap.projects {
                 out.push_str(&format!("project {} · {} · {}\n", p.id, p.name, p.repo_path));
                 let gallery = crate::gallery::gallery_path(&p.id);

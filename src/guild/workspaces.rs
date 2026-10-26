@@ -120,6 +120,45 @@ pub fn union_args(project_id: &str, union: &[String]) -> Vec<String> {
     vec!["-c".into(), format!("core.attributesFile={}", file.display())]
 }
 
+/// Give a new checkout the project's ignored folders (`[project] seed`:
+/// an import cache, fetched assets) as copy-on-write clones of the user's
+/// checkout, so it neither rebuilds them nor takes their room again until
+/// it changes them (FB-075). Where the disk cannot clone, nothing is copied
+/// and the setup builds them as before. Returns the folders seeded.
+pub fn seed(project: &Project, dir: &Path) -> Vec<String> {
+    let repo = Path::new(&project.repo_path);
+    let mut out = vec![];
+    for rel in &project.seed {
+        let rel = rel.trim().trim_matches('/');
+        if rel.is_empty() || rel.split('/').any(|c| c == "..") { continue; }
+        let (from, to) = (repo.join(rel), dir.join(rel));
+        if !from.exists() || to.exists() { continue; }
+        if let Some(parent) = to.parent() { let _ = std::fs::create_dir_all(parent); }
+        let clone: &[&str] = if cfg!(target_os = "macos") { &["-cR"] } else if cfg!(target_os = "linux") { &["-R", "--reflink=always"] } else { continue };
+        let ok = std::process::Command::new("cp").args(clone).arg(&from).arg(&to)
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        if ok { out.push(rel.to_string()) } else { let _ = std::fs::remove_dir_all(&to); let _ = std::fs::remove_file(&to); }
+    }
+    out
+}
+
+/// Bytes free on the disk that holds `path`; `None` where it cannot be read.
+pub fn free_bytes(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut probe = path.to_path_buf();
+        while !probe.exists() { probe = probe.parent()?.to_path_buf(); }
+        let c = std::ffi::CString::new(probe.as_os_str().as_bytes()).ok()?;
+        let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 { return None; }
+        #[allow(clippy::unnecessary_cast)]
+        Some(s.f_bavail as u64 * s.f_frsize as u64)
+    }
+    #[cfg(not(unix))]
+    { let _ = path; None }
+}
+
 /// How a candidate went onto a newer base.
 #[derive(Debug, PartialEq)]
 pub enum Carry { Applied, Conflicts(Vec<String>), Failed }
@@ -423,7 +462,7 @@ mod tests {
         std::fs::write(repo.join("README.md"), "hello\n").unwrap();
         git(&repo, &["add", "-A"]).unwrap();
         git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]).unwrap();
-        let project = Project { id: "p".into(), name: "p".into(), repo_path: repo.display().to_string(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, merge_union: vec![], threads: None, created_at: now() };
+        let project = Project { id: "p".into(), name: "p".into(), repo_path: repo.display().to_string(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, merge_union: vec![], threads: None, seed: vec![], created_at: now() };
         (dir, project)
     }
 
@@ -476,6 +515,35 @@ mod tests {
         project.merge_union = vec!["tests.txt".into()];
         let merged = integrate(&project, &quest, &cands[1].0, &task("a2")).unwrap();
         assert_eq!(git(repo, &["show", &format!("{merged}:tests.txt")]).unwrap(), "core\npark\nschool");
+    }
+
+    #[test]
+    fn a_new_worktree_borrows_the_ignored_folders_instead_of_copying_them() {
+        // FB-075: each worktree imported its own 1.3 GB .godot/ and copied assets/city.
+        let _guard = crate::paths::test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (dir, mut project) = temp_repo();
+        std::env::set_var("HPD_GUILD_HOME", dir.path().join("home").display().to_string());
+        let repo = Path::new(&project.repo_path);
+        std::fs::write(repo.join(".gitignore"), ".godot/\n").unwrap();
+        std::fs::create_dir_all(repo.join(".godot/imported")).unwrap();
+        std::fs::write(repo.join(".godot/imported/city.ctex"), "texture").unwrap();
+        git(repo, &["add", "-A"]).unwrap();
+        git(repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "ignore"]).unwrap();
+        project.seed = vec![".godot".into(), "../outside".into(), "missing".into()];
+        let ws = provision(&project, "q1", "t1", "a1", &rev_parse(repo, "HEAD").unwrap()).unwrap();
+        let seeded = seed(&project, Path::new(&ws.path));
+        let copy = Path::new(&ws.path).join(".godot/imported/city.ctex");
+        if seeded.is_empty() {
+            assert!(!copy.exists(), "a disk that cannot clone leaves the setup to build it");
+        } else {
+            assert_eq!(seeded, vec![".godot".to_string()]);
+            assert_eq!(std::fs::read_to_string(&copy).unwrap(), "texture");
+            std::fs::write(&copy, "changed").unwrap();
+            assert_eq!(std::fs::read_to_string(repo.join(".godot/imported/city.ctex")).unwrap(), "texture", "the user's checkout is untouched");
+        }
+        if cfg!(target_os = "macos") { assert!(!seeded.is_empty(), "APFS clones"); }
+        assert!(seed(&project, Path::new(&ws.path)).is_empty(), "what is there stays");
+        assert!(free_bytes(Path::new(&ws.path)).is_some_and(|b| b > 0) || cfg!(not(unix)));
     }
 
     #[test]

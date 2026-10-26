@@ -18,7 +18,7 @@ const USAGE: &str = "\
 agents-pixel-dungeon-guild — the guild that plans, builds, verifies and integrates
 
 USAGE
-  guild serve [--daemon] [--concurrency N] [--attempt-timeout MIN]
+  guild serve [--daemon] [--concurrency N] [--attempt-timeout MIN] [--min-free-gb N (default 20)]
   guild mcp                          an MCP server on stdio, so Claude Code orchestrates the guild
   guild status                       the guild at a glance
   guild orchestrate [<path>]         make the agent running this the guild's orchestrator: adds the repository
@@ -108,6 +108,8 @@ USAGE
   guild finding set <project> <F-id> <unverified|reproduced|not_reproduced|fixed|wont_fix>
   guild gallery [<project>] [--open]  the evidence gallery: every image the members left, by quest and task, with its reference;
                                      the guild keeps it up to date as work comes in
+  guild gc                           remove the worktrees of finished attempts now (their branches stay); the guild also does it
+                                     every minute, and stops starting work while the disk has less than --min-free-gb free
   guild records [--project ID] [--task ID]   one row per finished attempt: strategy, member, harness, model, duration, size, verifiers, judge score, winner
   guild start <quest>  |  guild pause <quest>  |  guild resume <quest>  |  guild cancel-quest <quest>
 
@@ -226,7 +228,7 @@ fn serve(args: &[String]) -> Result<(), String> {
     if a.has("daemon") {
         // The daemon gets the same settings this command was given.
         let mut forward: Vec<String> = vec![];
-        for key in ["concurrency", "attempt-timeout"] {
+        for key in ["concurrency", "attempt-timeout", "min-free-gb"] {
             if let Some(v) = a.flag(key) { forward.push(format!("--{key}")); forward.push(v.to_string()); }
         }
         return daemonize(&forward);
@@ -236,6 +238,7 @@ fn serve(args: &[String]) -> Result<(), String> {
     let mut settings = Settings::default();
     if let Some(n) = a.flag("concurrency").and_then(|s| s.parse().ok()) { settings.concurrency = n; }
     if let Some(m) = a.flag("attempt-timeout").and_then(|s| s.parse::<u64>().ok()) { settings.attempt_timeout = Duration::from_secs(m * 60); }
+    if let Some(g) = a.flag("min-free-gb").and_then(|s| s.parse::<u64>().ok()) { settings.min_free_bytes = g << 30; }
     let store = Store::open(&paths::db_path())?;
     let service = Service::new(store, settings);
     service.log_to(&paths::log_path());
@@ -482,6 +485,12 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
                 println!("{p}");
                 if a.has("open") { let _ = guild::platform::command(if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" }).arg(p).spawn(); }
             }
+            Ok(())
+        }
+        "gc" => {
+            let r = call(&ensure_running()?, "workspace.gc", json!({}))?;
+            let gb = |v: &Value| v.as_u64().map(|b| format!("{:.1} GB", b as f64 / (1u64 << 30) as f64)).unwrap_or_else(|| "?".into());
+            println!("removed {} finished worktrees, {} freed; {} free on the worktrees' disk", r["removed"], gb(&r["freedBytes"]), gb(&r["freeBytes"]));
             Ok(())
         }
         "member" if a.positional.first().copied() == Some("remove") => {

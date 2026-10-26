@@ -1166,7 +1166,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         schema_version: SCHEMA_VERSION,
         last_seq: 0,
         service_version: "demo".into(),
-        projects: vec![Project { id: "verbrawl".into(), name: "Verbrawl".into(), repo_path: "~/demo/verbrawl".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=human".into(), "seed={seed}".into()], timeout_seconds: 300 }), ai_play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=agent".into(), "seed={seed}".into()], timeout_seconds: 300 }), permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, merge_union: vec![], threads: None, created_at: t.clone() }],
+        projects: vec![Project { id: "verbrawl".into(), name: "Verbrawl".into(), repo_path: "~/demo/verbrawl".into(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=human".into(), "seed={seed}".into()], timeout_seconds: 300 }), ai_play: Some(PlaytestRunner { argv: vec!["python3".into(), "wordfight.py".into(), "profile=agent".into(), "seed={seed}".into()], timeout_seconds: 300 }), permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, merge_union: vec![], threads: None, seed: vec![], created_at: t.clone() }],
         decisions: vec![],
         hypotheses: demo_hypotheses(&t),
         questions: vec![guild::design::DesignQuestion { id: "Q-001".into(), project_id: "verbrawl".into(), question: tr("¿Las palabras largas son demasiado dominantes?"), context: "OBS-002".into(), system_id: Some("combat".into()), status: "open".into(), raised_by: "playtest".into(), source: Some("OBS-002".into()), hypothesis_ids: vec!["h1".into()], experiment_ids: vec!["e1".into()], decision_id: None, answer: String::new(), created_at: t.clone(), resolved_at: None }],
@@ -1219,6 +1219,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         orchestrator: Some("kael".into()),
         orchestrator_busy: false,
         overlaps: vec![],
+        disk_low: None,
         concurrency: 3,
     }
 }
