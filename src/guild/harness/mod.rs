@@ -76,6 +76,8 @@ pub struct SessionOptions {
     pub model_id: Option<String>,
     pub mode: Option<String>,
     pub role_prompt: String,
+    /// Extra environment for the agent and what it runs (`GUILD_THREADS`, FB-073).
+    pub env: Vec<(String, String)>,
 }
 
 /// What an adapter reports while a turn runs. `Tool` carries the room

@@ -11,6 +11,7 @@ pub mod config;
 pub mod design;
 pub mod experiment;
 pub mod feedback;
+pub mod gallery;
 pub mod domain;
 pub mod harness;
 pub mod ipc;

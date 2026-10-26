@@ -354,6 +354,7 @@ impl Store {
             orchestrator: None,
             orchestrator_busy: false,
             concurrency: 0,
+            overlaps: vec![],
         })
     }
 }

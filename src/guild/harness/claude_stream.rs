@@ -26,6 +26,7 @@ pub struct ClaudeStream {
 
 struct ClaudeSession {
     cwd: PathBuf,
+    env: Vec<(String, String)>,
     inner: Mutex<Inner>,
 }
 
@@ -68,6 +69,7 @@ impl ClaudeStream {
         if let Some(m) = &model { cmd.args(["--model", m]); }
         if let Some(n) = &native { cmd.args(["--resume", n]); }
         scrub_env(&mut cmd);
+        cmd.envs(s.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let proc = LineProc::spawn(cmd, &s.cwd, &format!("claude-{id}"))?;
         let stdout = proc.take_stdout().ok_or_else(|| HarnessError::TransportLost("no stdout".into()))?;
         s.inner.lock().unwrap().proc = Some(proc.clone());
@@ -246,14 +248,14 @@ impl HarnessAdapter for ClaudeStream {
 
     fn create_session(&self, options: &SessionOptions) -> HarnessResult<SessionRef> {
         let id = crate::domain::new_id();
-        let s = Arc::new(ClaudeSession { cwd: options.cwd.clone(), inner: Mutex::new(Inner { model: options.model_id.clone(), ..Default::default() }) });
+        let s = Arc::new(ClaudeSession { cwd: options.cwd.clone(), env: options.env.clone(), inner: Mutex::new(Inner { model: options.model_id.clone(), ..Default::default() }) });
         self.sessions.lock().unwrap().insert(id.clone(), s);
         Ok(SessionRef { id, native_id: None })
     }
 
     fn resume_session(&self, options: &SessionOptions, native_id: &str) -> HarnessResult<SessionRef> {
         let id = crate::domain::new_id();
-        let s = Arc::new(ClaudeSession { cwd: options.cwd.clone(), inner: Mutex::new(Inner { model: options.model_id.clone(), native_id: Some(native_id.into()), ..Default::default() }) });
+        let s = Arc::new(ClaudeSession { cwd: options.cwd.clone(), env: options.env.clone(), inner: Mutex::new(Inner { model: options.model_id.clone(), native_id: Some(native_id.into()), ..Default::default() }) });
         self.sessions.lock().unwrap().insert(id.clone(), s);
         Ok(SessionRef { id, native_id: Some(native_id.into()) })
     }

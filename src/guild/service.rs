@@ -91,6 +91,10 @@ pub struct Service {
     /// How many attempts run at once: the settings' until the orchestrator
     /// or the user changes it (`guild.concurrency`), then kept in the store.
     concurrency: AtomicUsize,
+    /// Files open tasks share, worked out every so often (FB-068).
+    overlaps: Mutex<(Option<Instant>, Vec<Overlap>)>,
+    /// When the galleries were last written, and up to which event (FB-074).
+    gallery: Mutex<(Option<Instant>, u64)>,
     pub settings: Settings,
     pub stop: Arc<AtomicBool>,
     log_file: Mutex<Option<std::fs::File>>,
@@ -138,6 +142,8 @@ impl Service {
             settling: Mutex::new((HashSet::new(), HashSet::new())),
             decisions: Mutex::new(vec![]),
             running: Mutex::new(HashMap::new()),
+            overlaps: Mutex::new((None, vec![])),
+            gallery: Mutex::new((None, 0)),
             settings,
             stop: Arc::new(AtomicBool::new(false)),
             log_file: Mutex::new(None),
@@ -394,6 +400,11 @@ impl Service {
         for (id, state, reason) in scheduler::readiness(&tasks) {
             self.move_task(&id, state, reason)?;
         }
+        // A candidate left waiting on a task that is over keeps its member busy
+        // for nothing: it goes (FB-070).
+        let stale: Vec<Attempt> = self.store.lock().unwrap().active_attempts()?.into_iter()
+            .filter(|a| a.state == AttemptState::Submitted && tasks.iter().find(|t| t.id == a.task_id).is_none_or(|t| t.state.is_terminal())).collect();
+        for a in stale { let _ = self.move_attempt(&a.id, AttemptState::Cancelled, Some("its task is over".into())); }
         for q in quests.iter().filter(|q| q.state == QuestState::Running) {
             let of_quest: Vec<&Task> = tasks.iter().filter(|t| t.quest_id == q.id).collect();
             if !of_quest.is_empty() && of_quest.iter().all(|t| t.state == TaskState::Completed) {
@@ -409,6 +420,8 @@ impl Service {
             }
         }
         self.experiments_tick()?;
+        if self.overlaps.lock().unwrap().0.is_none_or(|at| at.elapsed() > OVERLAP_EVERY) { self.refresh_overlaps(); }
+        self.gallery_tick();
         // Dispatch.
         let running_quests: Vec<String> = quests.iter().filter(|q| q.state == QuestState::Running).map(|q| q.id.clone()).collect();
         let tasks = self.store.lock().unwrap().tasks()?;
@@ -1240,7 +1253,7 @@ impl Service {
         let env = vec![("GUILD_TELEMETRY".to_string(), telemetry.display().to_string()), ("GUILD_PLAYTEST".to_string(), pt.id.clone())];
         let started = Instant::now();
         let adapter = self.adapter(member.harness.clone())?;
-        let options = SessionOptions { cwd: cwd.clone(), model_id: member.model_id.clone(), mode: member.mode.clone(), role_prompt: config::default_role_prompt(if persona == "exploit_hunter" { "exploit-hunter" } else { "ai-player" }) };
+        let options = SessionOptions { cwd: cwd.clone(), model_id: member.model_id.clone(), mode: member.mode.clone(), role_prompt: config::default_role_prompt(if persona == "exploit_hunter" { "exploit-hunter" } else { "ai-player" }), env: vec![] };
         let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()));
         let session = match session {
             Ok(s) => s,
@@ -2039,6 +2052,25 @@ impl Service {
             (a, t, q, p, m)
         };
         self.move_attempt(attempt_id, AttemptState::Provisioning, None)?;
+        // What it waits for in other quests is on their branches: bring it in (FB-071).
+        let elsewhere: Vec<Quest> = {
+            let store = self.store.lock().unwrap();
+            let mut v: Vec<Quest> = vec![];
+            for d in &task.depends_on {
+                if let Some(q) = store.task(d)?.filter(|t| t.quest_id != quest.id).and_then(|t| store.quest(&t.quest_id).ok().flatten()) {
+                    if !v.iter().any(|x| x.id == q.id) { v.push(q); }
+                }
+            }
+            v
+        };
+        for other in elsewhere {
+            let (old, new, files) = workspaces::sync_quest(&project, &quest, &other.integration_ref).map_err(|e| ApiError::conflict(format!("bringing in quest {} ({}), which this task waits for: {e}", other.id, other.title)))?;
+            if old != new {
+                let mut ev = Event::new("quest.synced", "guild").with(json!({"questId": quest.id, "from": other.integration_ref, "oldSha": old, "newSha": new, "files": files, "for": task.id}));
+                ev.project_id = Some(project.id.clone());
+                self.emit(ev);
+            }
+        }
         let base = workspaces::ensure_integration_branch(&project, &quest).map_err(ApiError::internal)?;
         // A retry learns why the earlier attempts were turned down and, when
         // the last one left a candidate (and this is not a race), goes on
@@ -2050,8 +2082,12 @@ impl Service {
             v
         };
         let feedback: Vec<String> = earlier.iter().rev().take(3).rev().filter_map(|a| a.failure.clone()).collect();
-        // Its candidate, else what it had written when it stopped.
-        let resume_from = if attempt.kind == AttemptKind::Work && task.candidates <= 1 {
+        // Its candidate, else what it had written when it stopped. After a clash
+        // at integration, the accepted candidate, even in a race (FB-067).
+        let clash = self.clash_source(&task.id, attempt_id);
+        let resume_from = if let Some(a) = &clash {
+            a.candidate.clone().map(|c| (c, false, workspaces::branch_name(&quest.id, &task.id, &a.id)))
+        } else if attempt.kind == AttemptKind::Work && task.candidates <= 1 {
             earlier.last().and_then(|a| a.candidate.clone().map(|c| (c, false)).or_else(|| a.partial.clone().map(|c| (c, true))).map(|(c, partial)| (c, partial, workspaces::branch_name(&quest.id, &task.id, &a.id))))
         } else { None };
         let workspace = workspaces::provision(&project, &quest.id, &task.id, attempt_id, &base).map_err(ApiError::internal)?;
@@ -2059,7 +2095,7 @@ impl Service {
         // when they do not apply, the member is told where they are.
         let continued = match &resume_from {
             None => Carried::Nothing,
-            Some((c, partial, branch)) => match workspaces::carry(&workspace, c) {
+            Some((c, partial, branch)) => match workspaces::carry(&workspace, c, &project.merge_union) {
                 workspaces::Carry::Applied => if *partial { Carried::Partial } else { Carried::Candidate },
                 workspaces::Carry::Conflicts(files) => Carried::Conflicts { files },
                 workspaces::Carry::Failed => Carried::Left { branch: branch.clone(), head: c.head_sha.clone(), base: c.base_sha.clone() },
@@ -2086,7 +2122,7 @@ impl Service {
         let role_for_prompt = match attempt.kind { AttemptKind::Judge => "judge".to_string(), AttemptKind::Analysis => "design-analyst".to_string(), AttemptKind::Work => task.role.clone() };
         let role_prompt = if member.role_prompt.trim().is_empty() || attempt.kind != AttemptKind::Work { config::default_role_prompt(&role_for_prompt) } else { member.role_prompt.clone() };
         let _ = std::fs::create_dir_all(crate::paths::scratch_dir(attempt_id));
-        let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_requested.clone(), mode: member.mode.clone(), role_prompt: role_prompt.clone() };
+        let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_requested.clone(), mode: member.mode.clone(), role_prompt: role_prompt.clone(), env: vec![("GUILD_THREADS".into(), self.threads_for(&project).to_string())] };
         let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
         let design = self.store.lock().unwrap().design(&project.id)?;
         let prompt = match attempt.kind {
@@ -2095,7 +2131,8 @@ impl Service {
             AttemptKind::Work => {
                 let found = workspaces::deleted_matching(Path::new(&workspace.path), &format!("{}\n{}", task.title, task.instructions), 15);
                 let reads: Vec<String> = project.permitted_reads.iter().chain(quest.read_paths.iter()).cloned().collect();
-                compose_prompt(&role_prompt, &task, &workspace, design.as_ref(), &feedback, continued, &Context { reads, deleted: found })
+                if clash.is_some() { compose_clash_prompt(&role_prompt, &task, &workspace, continued, &reads) }
+                else { compose_prompt(&role_prompt, &task, &workspace, design.as_ref(), &feedback, continued, &Context { reads, deleted: found, quest_notes: quest.notes.clone(), threads: self.threads_for(&project) }) }
             }
         };
         self.run_turn(attempt_id, &attempt, &member, &adapter, session, &prompt)
@@ -2115,7 +2152,8 @@ impl Service {
         if !Path::new(&workspace.path).exists() { return Err(ApiError::conflict("the worktree is gone")); }
         let adapter = self.adapter(member.harness.clone())?;
         let role_prompt = if member.role_prompt.trim().is_empty() { config::default_role_prompt(&task.role) } else { member.role_prompt.clone() };
-        let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_effective.clone().or(attempt.model_requested.clone()), mode: member.mode.clone(), role_prompt };
+        let threads = self.store.lock().unwrap().project(&attempt.project_id)?.map(|p| self.threads_for(&p)).unwrap_or(1);
+        let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_effective.clone().or(attempt.model_requested.clone()), mode: member.mode.clone(), role_prompt, env: vec![("GUILD_THREADS".into(), threads.to_string())] };
         let session = adapter.resume_session(&options, native_id).map_err(|e| ApiError::new("harness", e.to_string()))?;
         self.update_attempt(attempt_id, |a| a.resumed += 1)?;
         self.emit(Event::new("session.resumed", "harness").about_attempt(&attempt).with(json!({"nativeId": native_id, "harness": member.harness.clone()})));
@@ -2152,8 +2190,13 @@ impl Service {
             slot.harness = member.harness.clone();
         }
         self.move_attempt(attempt_id, AttemptState::Running, None)?;
-        let notes_of = |s: &Service| s.store.lock().unwrap().task(&attempt.task_id).ok().flatten().map(|t| t.notes).unwrap_or_default();
-        let mut seen = notes_of(self).len();
+        // The task's notes and its quest's (FB-069), in the order they were given.
+        let notes_of = |s: &Service| {
+            let store = s.store.lock().unwrap();
+            let quest = store.quest(&attempt.quest_id).ok().flatten().map(|q| q.notes).unwrap_or_default();
+            quest.into_iter().chain(store.task(&attempt.task_id).ok().flatten().map(|t| t.notes).unwrap_or_default()).collect::<Vec<String>>()
+        };
+        let mut seen = notes_of(self);
         let handle = adapter.prompt(&session, attempt_id, prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
         self.emit(Event::new("turn.started", "guild").about_attempt(attempt).with(json!({"turnId": handle.turn_id, "promptChars": prompt.len()})));
         let mut outcome = self.follow_turn(attempt_id, attempt, adapter, &session, handle);
@@ -2166,30 +2209,51 @@ impl Service {
             store.attempt(attempt_id).ok().flatten().and_then(|a| a.workspace_id).and_then(|w| store.workspace(&w).ok().flatten()).map(|w| PathBuf::from(w.path))
         };
         let scratch = crate::paths::scratch_dir(attempt_id);
-        let mut waited_for = false;
+        let mut waits = 0;
         for round in 1..=8 {
             let redirected = matches!(&outcome, TurnOutcome::Completed { stop_reason } if stop_reason == "redirected");
             let done = matches!(&outcome, TurnOutcome::Completed { stop_reason } if stop_reason != "interrupted");
             if attempt.kind != AttemptKind::Work || !done || self.cancel_requested(attempt_id) { break; }
-            let notes = notes_of(self);
-            let running: Vec<(i32, String)> = match (&folders, waited_for) {
-                (Some(wt), false) => crate::platform::processes_in(&[wt.as_path(), scratch.as_path()]),
-                _ => vec![],
-            };
-            if notes.len() <= seen && running.is_empty() { break; }
-            let mut follow = String::new();
-            if !running.is_empty() {
-                waited_for = true;
-                let list: Vec<String> = running.iter().take(8).map(|(pid, name)| format!("{name} (pid {pid})")).collect();
-                follow.push_str(&format!("You finished while what you started is still running in your worktree: {}. Wait for it to end, use what it produces, then finish; your work is committed only when you reply.\n", list.join(", ")));
+            let in_folders = || folders.as_ref().map(|wt| crate::platform::processes_in(&[wt.as_path(), scratch.as_path()])).unwrap_or_default();
+            // What it left running (a render, a build): the guild waits for it and
+            // wakes the member when it ends, instead of the member sleeping blind (FB-072).
+            let mut running = in_folders();
+            let mut finished = vec![];
+            if !running.is_empty() && !redirected && notes_of(self).iter().all(|n| seen.contains(n)) {
+                // The first wait is short, in case it is something forgotten (an editor left
+                // open); once the member says it waits for it, up to its time limit at a time.
+                waits += 1;
+                let cap = if waits == 1 { FIRST_BACKGROUND_WAIT } else { self.running.lock().unwrap().get(attempt_id).map(|r| r.limit).unwrap_or_default().max(Duration::from_secs(30 * 60)) };
+                self.emit(Event::new("attempt.waiting_background", "guild").about_attempt(attempt).with(json!({"processes": describe_processes(&running), "maxMinutes": cap.as_secs() / 60})));
+                if let Some(r) = self.running.lock().unwrap().get_mut(attempt_id) { r.waiting_since.get_or_insert_with(Instant::now); }
+                let since = Instant::now();
+                while !self.cancel_requested(attempt_id) && !self.stop.load(Ordering::Relaxed) && since.elapsed() < cap && notes_of(self).iter().all(|n| seen.contains(n)) {
+                    std::thread::sleep(BACKGROUND_POLL);
+                    let now_running = in_folders();
+                    if now_running.is_empty() { finished = std::mem::take(&mut running); break; }
+                    running = now_running;
+                }
+                if let Some(r) = self.running.lock().unwrap().get_mut(attempt_id) { if let Some(w) = r.waiting_since.take() { r.waited += w.elapsed(); } }
+                self.emit(Event::new("attempt.background_finished", "guild").about_attempt(attempt).with(json!({"finished": describe_processes(&finished), "stillRunning": describe_processes(&running), "waitedSeconds": since.elapsed().as_secs()})));
+                if self.cancel_requested(attempt_id) { break; }
             }
-            if notes.len() > seen {
-                let added: String = notes[seen..].iter().map(|n| format!("- {}\n", n.trim())).collect();
+            let notes = notes_of(self);
+            let added: Vec<&String> = notes.iter().filter(|n| !seen.contains(n)).collect();
+            if added.is_empty() && running.is_empty() && finished.is_empty() { break; }
+            let mut follow = String::new();
+            if !finished.is_empty() {
+                follow.push_str(&format!("What you left running has finished: {}. Your worktree is as you left it. Use what it produced (check its log for errors), then finish with the summary of the whole task.\n", describe_processes(&finished).join(", ")));
+            }
+            if !running.is_empty() {
+                follow.push_str(&format!("What you left running is still running: {}. Look at its log: if it is stuck, stop it and say so; if it is getting on, end your turn again saying what you wait for and the guild wakes you when it ends. Do not wait with sleep; your work is committed only when you finish.\n", describe_processes(&running).join(", ")));
+            }
+            if !added.is_empty() {
+                let added: String = added.iter().map(|n| format!("- {}\n", n.trim())).collect();
                 if redirected { follow.push_str(&format!("The lead stopped you to correct course. Read this before you go on:\n{added}")); }
                 else { follow.push_str(&format!("While you worked, the lead added to the task:\n{added}")); }
+                follow.push_str(if redirected { "\nGo on from where you are, in the same worktree, doing it this way; finish with the summary of the whole task." } else { "\nTake this into account now, in the same worktree, then finish with the updated summary." });
             }
-            seen = notes.len();
-            follow.push_str(if redirected { "\nGo on from where you are, in the same worktree, doing it this way; finish with the summary of the whole task." } else { "\nTake this into account now, in the same worktree, then finish with the updated summary." });
+            seen = notes;
             let Ok(handle) = adapter.prompt(&session, &format!("{attempt_id}-note{round}"), &follow) else { break };
             let _ = self.update_attempt(attempt_id, |a| a.turns += 1);
             self.emit(Event::new("turn.started", "guild").about_attempt(attempt).with(json!({"turnId": handle.turn_id, "promptChars": follow.len(), "notes": true})));
@@ -2492,6 +2556,19 @@ impl Service {
                         })?;
                     }
                 }
+                // Its work was accepted already: a clash resolved and verified goes in (FB-067).
+                if candidate.is_some() && mass.is_none() && !own_gates && self.clash_source(&task.id, attempt_id).is_some() {
+                    let verified = self.store.lock().unwrap().attempt(attempt_id)?.is_some_and(|a| passes_gates(&a));
+                    if verified {
+                        self.settle_task(&task.id)?;
+                        if self.store.lock().unwrap().task(&task.id)?.is_none_or(|t| t.state != TaskState::Verifying) { return Ok(()); }
+                        let reason = "its clash with work integrated meanwhile was resolved and verified; the work itself had been accepted";
+                        if let Err(e) = self.task_accept(&json!({"taskId": task.id, "attemptId": attempt_id, "integrate": true, "by": "guild", "reason": reason})) {
+                            self.log(&format!("task {}: integrating the resolved clash failed: {}", task.id, e.message));
+                        }
+                        return Ok(());
+                    }
+                }
                 // A choice left to the user goes to the orchestrator first, if the guild has one.
                 if candidate.is_some() && task.candidates <= 1 && task.strategy.selection() == Selection::User {
                     if let Some(m) = &mass { self.update_attempt(attempt_id, |a| a.escalation = Some(format!("it deletes many files — {}: only you or the delegate accept that", m.tail.lines().next().unwrap_or(""))))?; }
@@ -2533,6 +2610,95 @@ impl Service {
         }
     }
 
+    /// Work out which open tasks of each running quest change, or name, the
+    /// same files, and say so once per pair (FB-068). Files that only grow
+    /// (`[merge] union`) do not count: they are joined at integration.
+    fn refresh_overlaps(&self) -> Vec<Overlap> {
+        let (projects, quests, tasks, attempts, workspaces) = {
+            let store = self.store.lock().unwrap();
+            let Ok(snap) = store.snapshot(SERVICE_VERSION, vec![]) else { return vec![] };
+            (snap.projects, snap.quests, snap.tasks, snap.attempts, snap.workspaces)
+        };
+        let mut found = vec![];
+        for q in quests.iter().filter(|q| q.state == QuestState::Running) {
+            let Some(project) = projects.iter().find(|p| p.id == q.project_id) else { continue };
+            let open: Vec<&Task> = tasks.iter().filter(|t| t.quest_id == q.id && !t.state.is_terminal() && !matches!(t.state, TaskState::Draft | TaskState::Integrating) && !t.spike).collect();
+            let files: Vec<(&Task, Vec<String>)> = open.iter().map(|t| {
+                let mut f = named_files(Path::new(&project.repo_path), &t.instructions);
+                for a in attempts.iter().filter(|a| a.task_id == t.id && a.kind == AttemptKind::Work && a.state.is_active()) {
+                    if let Some(ws) = a.workspace_id.as_ref().and_then(|id| workspaces.iter().find(|w| &w.id == id)).filter(|w| Path::new(&w.path).exists()) {
+                        f.extend(changed_files(ws));
+                    }
+                }
+                f.retain(|x| !project.merge_union.iter().any(|p| crate::policy::pattern_matches(p, x)));
+                f.sort();
+                f.dedup();
+                (*t, f)
+            }).collect();
+            for (i, (a, fa)) in files.iter().enumerate() {
+                for (b, fb) in files.iter().skip(i + 1) {
+                    if a.depends_on.contains(&b.id) || b.depends_on.contains(&a.id) { continue; }
+                    let shared: Vec<String> = fa.iter().filter(|f| fb.contains(f)).cloned().collect();
+                    if !shared.is_empty() { found.push(Overlap { quest_id: q.id.clone(), tasks: [a.id.clone(), b.id.clone()], files: shared }); }
+                }
+            }
+        }
+        // Never hold the cache while the store is taken: commands take them the other way round.
+        let new: Vec<Overlap> = {
+            let mut cache = self.overlaps.lock().unwrap();
+            let new = found.iter().filter(|o| !cache.1.iter().any(|c| c.tasks == o.tasks)).cloned().collect();
+            *cache = (Some(Instant::now()), found.clone());
+            new
+        };
+        for o in new {
+            let mut ev = Event::new("tasks.overlap", "guild").with(json!({"questId": o.quest_id, "tasks": o.tasks, "files": o.files}));
+            ev.quest_id = Some(o.quest_id.clone());
+            self.emit(ev);
+        }
+        found
+    }
+
+    /// Write each project's evidence gallery again when something happened
+    /// since the last time, at most every `GALLERY_EVERY` (FB-074).
+    fn gallery_tick(&self) {
+        let last = self.store.lock().unwrap().last_seq().unwrap_or(0);
+        {
+            let mut g = self.gallery.lock().unwrap();
+            if g.1 == last || g.0.is_some_and(|at| at.elapsed() < GALLERY_EVERY) { return; }
+            *g = (Some(Instant::now()), last);
+        }
+        let _ = self.write_galleries(None);
+    }
+
+    /// The galleries of one project or all, as (project, page) for those that have images.
+    fn write_galleries(&self, project: Option<&str>) -> Res<Vec<(String, PathBuf)>> {
+        let snap = self.snapshot()?;
+        let mut out = vec![];
+        for p in snap.projects.iter().filter(|p| project.is_none_or(|w| w == p.id)) {
+            if let Some(path) = crate::gallery::write(&snap, &p.id).map_err(|e| ApiError::internal(e.to_string()))? { out.push((p.id.clone(), path)); }
+        }
+        Ok(out)
+    }
+
+    /// The cores one attempt's heavy work may use: the project's budget (the
+    /// whole machine's when unset) shared among the attempts that may run at
+    /// once, at least one (FB-073).
+    fn threads_for(&self, project: &Project) -> u32 {
+        let budget = project.threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4));
+        (budget / self.concurrency.load(Ordering::Relaxed).max(1) as u32).max(1)
+    }
+
+    /// The accepted attempt an attempt only has to bring in again: the last
+    /// one before it was accepted and then clashed at integration (FB-067).
+    fn clash_source(&self, task_id: &str, attempt_id: &str) -> Option<Attempt> {
+        let store = self.store.lock().unwrap();
+        let me = store.attempt(attempt_id).ok().flatten()?;
+        if me.kind != AttemptKind::Work { return None; }
+        let mut earlier: Vec<Attempt> = store.attempts_of_task(task_id).ok()?.into_iter().filter(|a| a.id != attempt_id && a.kind == AttemptKind::Work && a.failure.is_some() && a.created_at <= me.created_at).collect();
+        earlier.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        earlier.pop().filter(|a| a.state == AttemptState::Passed && a.candidate.is_some() && a.failure.as_deref().is_some_and(|f| f.starts_with(CLASH)))
+    }
+
     /// An attempt that stops before finishing keeps what it had written, as
     /// a commit on its branch, so the retry goes on from it (F-HD-03).
     fn keep_partial(&self, attempt: &Attempt, task: &Task, workspace: Option<&Workspace>) {
@@ -2561,13 +2727,21 @@ impl Service {
             files.extend(found);
         }
         if files.is_empty() && task.evidence.is_empty() { return None; }
+        // Resolving a clash re-renders nothing: the accepted candidate's images stand (FB-067).
+        let inherited = if missing.is_empty() { None } else {
+            self.clash_source(&task.id, attempt_id).and_then(|a| a.verifier_results.into_iter().find(|r| r.id == "evidence" && r.status == "passed"))
+        };
         let dir = crate::paths::artifacts_dir().join(attempt_id).join(format!("evidence-task-{}", new_id()));
         let _ = std::fs::create_dir_all(&dir);
         for (i, f) in files.iter().enumerate() {
             let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("evidence.png");
             let _ = std::fs::copy(f, dir.join(format!("{:02}-{name}", i + 1)));
         }
-        let evidence = self.keep_evidence(attempt_id, &dir);
+        let mut evidence = self.keep_evidence(attempt_id, &dir);
+        if let Some(r) = inherited {
+            evidence.extend(r.evidence);
+            return Some(VerifierResult { id: "evidence".into(), required: true, status: "passed".into(), exit_code: None, duration_ms: 0, log_artifact_id: None, tail: format!("{} images, those asked for kept from the accepted candidate", evidence.len()), evidence });
+        }
         let tail = if missing.is_empty() { format!("{} images to look at", evidence.len()) } else { format!("missing: {} (the task asked for them)", missing.join(", ")) };
         Some(VerifierResult { id: "evidence".into(), required: !task.evidence.is_empty(), status: if missing.is_empty() { "passed".into() } else { "failed".into() }, exit_code: None, duration_ms: 0, log_artifact_id: None, tail, evidence })
     }
@@ -2745,7 +2919,8 @@ impl Service {
             // captures of the running game. Images left there become evidence.
             let evidence_dir = crate::paths::artifacts_dir().join(attempt_id).join(format!("evidence-{}-{}", v.id, new_id()));
             let _ = std::fs::create_dir_all(&evidence_dir);
-            let env = vec![("GUILD_EVIDENCE".to_string(), evidence_dir.display().to_string())];
+            let threads = self.store.lock().unwrap().project(&attempt.project_id).ok().flatten().map(|p| self.threads_for(&p)).unwrap_or(1);
+            let env = vec![("GUILD_EVIDENCE".to_string(), evidence_dir.display().to_string()), ("GUILD_THREADS".to_string(), threads.to_string())];
             let (status, code, output) = match workspaces::run_with_timeout_env(Path::new(&workspace.path), &v.argv, v.timeout_seconds, &env) {
                 Ok((0, out)) => ("passed", Some(0), out),
                 Ok((code, out)) => ("failed", Some(code), out),
@@ -2869,6 +3044,7 @@ impl Service {
         snap.orchestrator = crate::orchestrator::pick(&snap.members, &self.available_harnesses()).map(|m| m.id);
         snap.orchestrator_busy = self.orchestrating.lock().unwrap().is_some();
         snap.concurrency = self.concurrency.load(Ordering::Relaxed);
+        snap.overlaps = self.overlaps.lock().unwrap().1.clone();
         // Each running attempt's work so far against its limit, for whoever watches the time.
         {
             let running = self.running.lock().unwrap();
@@ -2999,8 +3175,14 @@ impl Service {
             "task.update" => self.task_update(params),
             "task.note" => self.task_note(params),
             "task.complete" => self.task_complete(params),
+            "member.release" => self.member_release(params),
             "quest.start" => self.quest_start(params),
             "quest.sync" => self.quest_sync(params),
+            "quest.note" => self.quest_note(params),
+            "gallery.build" => {
+                let pages = self.write_galleries(p_opt(params, "projectId").as_deref())?;
+                Ok(json!({"pages": pages.iter().map(|(p, path)| json!({"projectId": p, "path": path})).collect::<Vec<_>>()}))
+            }
             "quest.update" => self.quest_update(params),
             "attempt.restart" => self.attempt_restart(p_str(params, "attemptId")?),
             "quest.pause" => self.quest_set(params, QuestState::Paused, &[QuestState::Running]),
@@ -3060,6 +3242,8 @@ impl Service {
             permitted_reads: file.as_ref().map(|f| f.permissions.read.iter().map(|r| crate::policy::expand_home(r)).collect()).unwrap_or_default(),
             permitted_commands: file.as_ref().map(|f| f.permissions.commands.clone()).unwrap_or_default(),
             web: file.as_ref().and_then(|f| f.permissions.web).unwrap_or(true),
+            merge_union: file.as_ref().map(|f| f.merge.union.clone()).unwrap_or_default(),
+            threads: file.as_ref().and_then(|f| f.project.threads).filter(|n| *n > 0),
             created_at: existing.map(|p| p.created_at).unwrap_or_else(now),
         };
         store.put_project(&project)?;
@@ -3192,7 +3376,7 @@ impl Service {
         let cwd = crate::paths::home().join("orchestrator").join(&project.id);
         std::fs::create_dir_all(&cwd).map_err(|e| ApiError::internal(e.to_string()))?;
         let adapter = self.adapter(member.harness.clone())?;
-        let options = SessionOptions { cwd, model_id: member.model_id.clone(), mode: member.mode.clone(), role_prompt: role_prompt.into() };
+        let options = SessionOptions { cwd, model_id: member.model_id.clone(), mode: member.mode.clone(), role_prompt: role_prompt.into(), env: vec![] };
         let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
         let handle = adapter.prompt(&session, &new_id(), prompt).map_err(|e| ApiError::new("harness", e.to_string()))?;
         let started = Instant::now();
@@ -3531,6 +3715,7 @@ impl Service {
             integration_ref: format!("refs/heads/guild/quest/{}", &id[id.len() - 8..]),
             base_sha: None,
             read_paths: parse_read_paths(params)?.unwrap_or_default(),
+            notes: vec![],
             plan_version: 1,
             created_at: now(),
             updated_at: now(),
@@ -3583,7 +3768,8 @@ impl Service {
             created_at: now(),
             updated_at: now(),
         };
-        let mut all = store.tasks_of_quest(quest_id)?;
+        // A dependency may be in another quest of the project (FB-071).
+        let mut all = tasks_of_project(&store, &quest.project_id)?;
         all.retain(|t| t.id != task.id);
         all.push(task.clone());
         validate_dag(&all).map_err(ApiError::invalid)?;
@@ -3626,8 +3812,9 @@ impl Service {
         let deps_changed = params.get("dependsOn").is_some_and(|d| d.is_array()) && p_list(params, "dependsOn") != task.depends_on;
         if deps_changed {
             task.depends_on = p_list(params, "dependsOn");
-            let mut all = store.tasks_of_quest(&task.quest_id)?;
-            if let Some(missing) = task.depends_on.iter().find(|d| !all.iter().any(|t| &t.id == *d)) { return Err(ApiError::invalid(format!("no task {missing} in this quest"))); }
+            let project_id = store.quest(&task.quest_id)?.map(|q| q.project_id).unwrap_or_default();
+            let mut all = tasks_of_project(&store, &project_id)?;
+            if let Some(missing) = task.depends_on.iter().find(|d| !all.iter().any(|t| &t.id == *d)) { return Err(ApiError::invalid(format!("no task {missing} in this project"))); }
             all.retain(|t| t.id != task.id);
             all.push(task.clone());
             validate_dag(&all).map_err(ApiError::invalid)?;
@@ -3664,8 +3851,47 @@ impl Service {
                 Ok(())
             })?;
         }
+        // Its candidates still waiting go with it, or their members stay busy (FB-070).
+        self.close_open_attempts(task_id, "its task was completed by hand");
         self.tick();
         Ok(serde_json::to_value(self.store.lock().unwrap().task(task_id)?).unwrap())
+    }
+
+    /// End what a finished task still has open: a candidate waiting for a
+    /// decision is cancelled, a turn at work is stopped. Its members are free.
+    fn close_open_attempts(&self, task_id: &str, reason: &str) {
+        let active = self.store.lock().unwrap().active_attempts().unwrap_or_default();
+        for a in active.iter().filter(|a| a.task_id == task_id) {
+            if matches!(a.state, AttemptState::Submitted | AttemptState::Verifying) {
+                let _ = self.move_attempt(&a.id, AttemptState::Cancelled, Some(reason.into()));
+            } else {
+                let _ = self.attempt_cancel(&a.id);
+            }
+        }
+    }
+
+    /// Free a member by force: what it has waiting for a decision is turned
+    /// down (cancelled when its task is over), a turn at work is stopped (FB-070).
+    fn member_release(self: &Arc<Service>, params: &Value) -> ApiResult {
+        let member_id = p_str(params, "memberId")?;
+        let reason = p_opt(params, "reason").unwrap_or_else(|| "released by the user".into());
+        let (active, tasks) = {
+            let store = self.store.lock().unwrap();
+            store.member(member_id)?.ok_or_else(|| ApiError::not_found(format!("member {member_id}")))?;
+            (store.active_attempts()?.into_iter().filter(|a| a.member_id == member_id).collect::<Vec<_>>(), store.tasks()?)
+        };
+        let mut released = vec![];
+        for a in active {
+            let over = tasks.iter().find(|t| t.id == a.task_id).is_none_or(|t| t.state.is_terminal());
+            let done = match a.state {
+                AttemptState::Submitted | AttemptState::Verifying if over || a.kind != AttemptKind::Work => self.move_attempt(&a.id, AttemptState::Cancelled, Some(reason.clone())).map(|_| ()),
+                AttemptState::Submitted | AttemptState::Verifying => self.task_reject(&json!({"taskId": a.task_id, "attemptId": a.id, "reason": reason})).map(|_| ()),
+                _ => self.attempt_cancel(&a.id).map(|_| ()),
+            };
+            if done.is_ok() { released.push(a.id); }
+        }
+        self.tick();
+        Ok(json!({"released": member_id, "attempts": released}))
     }
 
     /// Add to a task that already started: a member at work is stopped and
@@ -3700,6 +3926,49 @@ impl Service {
         let mut out = serde_json::to_value(task).unwrap();
         out["redirected"] = json!(redirected);
         Ok(out)
+    }
+
+    /// A note for the whole quest (FB-069): every open task reads it — a
+    /// member at work is stopped and handed it, the others get it with
+    /// their task, and so do tasks created later — until it is withdrawn
+    /// (`withdraw`: its number, from 1, or its text).
+    fn quest_note(&self, params: &Value) -> ApiResult {
+        let quest_id = p_str(params, "questId")?;
+        let store = self.store.lock().unwrap();
+        let mut quest = store.quest(quest_id)?.ok_or_else(|| ApiError::not_found(format!("quest {quest_id}")))?;
+        let by = p_opt(params, "by").unwrap_or_else(|| "user".into());
+        if let Some(w) = params.get("withdraw").filter(|w| !w.is_null()) {
+            let at = match (w.as_u64(), w.as_str()) {
+                (Some(n), _) => (n as usize).checked_sub(1).filter(|i| *i < quest.notes.len()),
+                (_, Some(t)) => quest.notes.iter().position(|n| n.trim() == t.trim()).or_else(|| t.trim().parse::<usize>().ok().and_then(|n| n.checked_sub(1)).filter(|i| *i < quest.notes.len())),
+                _ => None,
+            }.ok_or_else(|| ApiError::invalid("no such note on the quest"))?;
+            let text = quest.notes.remove(at);
+            quest.updated_at = now();
+            self.atomic(&store, || {
+                store.put_quest(&quest)?;
+                self.emit_locked(&store, Event::new("quest.note_withdrawn", &by).about_quest(&quest).with(json!({"text": text})));
+                Ok(())
+            })?;
+            return Ok(json!({"questId": quest.id, "notes": quest.notes, "withdrawn": text}));
+        }
+        let text = p_str(params, "text")?.trim().to_string();
+        if text.is_empty() { return Err(ApiError::invalid("an empty note")); }
+        quest.notes.push(text.clone());
+        quest.updated_at = now();
+        self.atomic(&store, || {
+            store.put_quest(&quest)?;
+            self.emit_locked(&store, Event::new("quest.noted", &by).about_quest(&quest).with(json!({"text": text, "notes": quest.notes.len()})));
+            Ok(())
+        })?;
+        let mut redirected = vec![];
+        if !params.get("later").and_then(Value::as_bool).unwrap_or(false) {
+            let tasks: Vec<String> = store.tasks_of_quest(quest_id)?.into_iter().map(|t| t.id).collect();
+            let working: Vec<String> = store.active_attempts()?.into_iter().filter(|a| a.kind == AttemptKind::Work && a.state == AttemptState::Running && tasks.contains(&a.task_id)).map(|a| a.id).collect();
+            let mut running = self.running.lock().unwrap();
+            for id in working { if let Some(r) = running.get_mut(&id) { r.redirect_requested = true; redirected.push(id); } }
+        }
+        Ok(json!({"questId": quest.id, "notes": quest.notes, "redirected": redirected}))
     }
 
     /// Bring the project's target (or `from`) into a quest's branch, so the
@@ -3752,7 +4021,7 @@ impl Service {
             }
             let tasks = store.tasks_of_quest(quest_id)?;
             if tasks.is_empty() { return Err(ApiError::invalid("the quest has no tasks")); }
-            validate_dag(&tasks).map_err(ApiError::invalid)?;
+            validate_dag(&tasks_of_project(&store, &quest.project_id)?).map_err(ApiError::invalid)?;
             let project = store.project(&quest.project_id)?.ok_or_else(|| ApiError::not_found("project"))?;
             let base = workspaces::ensure_integration_branch(&project, &quest).map_err(ApiError::internal)?;
             self.atomic(&store, || {
@@ -3889,8 +4158,10 @@ impl Service {
             t.updated_at = now();
             changed.push(t.id.clone());
         }
-        validate_dag(&all).map_err(ApiError::invalid)?;
         let quest = store.quest(&old_task.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
+        let mut whole: Vec<Task> = tasks_of_project(&store, &quest.project_id)?.into_iter().filter(|t| !all.iter().any(|a| a.id == t.id)).collect();
+        whole.extend(all.iter().cloned());
+        validate_dag(&whole).map_err(ApiError::invalid)?;
         self.atomic(&store, || {
             for t in all.iter().filter(|t| changed.contains(&t.id)) {
                 store.put_task(t)?;
@@ -3948,7 +4219,13 @@ impl Service {
             }
             None => {
                 drop(running);
-                // Queued or submitted: nothing runs, decide now.
+                // Queued or submitted: nothing runs, decide now. A candidate of a
+                // finished task has nothing left to decide: it just goes (FB-070).
+                let over = self.store.lock().unwrap().task(&attempt.task_id)?.is_none_or(|t| t.state.is_terminal());
+                if over {
+                    self.move_attempt(attempt_id, AttemptState::Cancelled, Some("its task is over".into()))?;
+                    return Ok(json!({"cancelled": attempt_id}));
+                }
                 if matches!(attempt.state, AttemptState::Submitted | AttemptState::Verifying) {
                     return Err(ApiError::conflict("the attempt already submitted a candidate; reject it instead"));
                 }
@@ -4134,7 +4411,7 @@ impl Service {
                         return Ok(());
                     }
                     let mut a = store.attempt(&attempt.id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
-                    a.failure = Some(format!("its candidate was accepted but clashes with work integrated meanwhile ({e}); resolve the clash, keep what was accepted"));
+                    a.failure = Some(format!("{CLASH} ({e}); resolve the clash, keep what was accepted"));
                     store.put_attempt(&a)?;
                     let mut t = store.task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
                     t.max_attempts = t.max_attempts.max(t.attempts_made) + 1;
@@ -4153,8 +4430,49 @@ impl Service {
     }
 }
 
+/// How an accepted candidate that clashed at integration is marked; its
+/// retry only resolves the clash (FB-067).
+const CLASH: &str = "its candidate was accepted but clashes with work integrated meanwhile";
+
 /// How many deleted files make a candidate need someone to read the list (FB-049).
 const MASS_DELETION: usize = 20;
+
+/// How often, at most, the evidence galleries are written again (FB-074).
+const GALLERY_EVERY: Duration = Duration::from_secs(20);
+
+/// How often the guild looks again at which open tasks share files (FB-068).
+const OVERLAP_EVERY: Duration = Duration::from_secs(30);
+
+/// The repository's files a task's text names (`tools/run_tests.sh`), as
+/// they are written; only paths that exist count.
+fn named_files(repo: &Path, text: &str) -> Vec<String> {
+    let mut out: Vec<String> = text.split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';'))
+        .map(|w| w.trim_end_matches(['.', ':']).trim_start_matches("./"))
+        .filter(|w| (w.contains('/') || w.contains('.')) && !w.contains("://") && !w.starts_with('/') && !w.starts_with('~') && !w.contains(".."))
+        .filter(|w| repo.join(w).is_file())
+        .map(str::to_string).collect();
+    out.dedup();
+    out
+}
+
+/// What a worktree changed against its base, committed or not, new files included.
+fn changed_files(ws: &Workspace) -> Vec<String> {
+    let dir = Path::new(&ws.path);
+    let mut out: Vec<String> = workspaces::git(dir, &["diff", "--name-only", &ws.base_sha]).unwrap_or_default().lines().map(str::to_string).collect();
+    out.extend(workspaces::git(dir, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines().map(str::to_string));
+    out.retain(|l| !l.is_empty());
+    out
+}
+
+/// How often the guild looks whether what a member left running has ended (FB-072).
+const BACKGROUND_POLL: Duration = if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(5) };
+
+/// How long the guild first waits for what a member left running before
+/// asking it whether that is still wanted (FB-072).
+const FIRST_BACKGROUND_WAIT: Duration = Duration::from_secs(10 * 60);
+
+/// Processes as the member reads them.
+fn describe_processes(list: &[(i32, String)]) -> Vec<String> { list.iter().take(8).map(|(pid, name)| format!("{name} (pid {pid})")).collect() }
 
 /// How long a spike may run unless it says otherwise (FB-058).
 const SPIKE_MINUTES: u32 = 30;
@@ -4323,6 +4641,12 @@ fn parse_strategy(params: &Value) -> Res<ExecutionStrategy> {
     })
 }
 
+/// Every task of a project's quests: dependencies may cross quests (FB-071).
+fn tasks_of_project(store: &Store, project_id: &str) -> Res<Vec<Task>> {
+    let quests: Vec<String> = store.quests()?.into_iter().filter(|q| q.project_id == project_id).map(|q| q.id).collect();
+    Ok(store.tasks()?.into_iter().filter(|t| quests.contains(&t.quest_id)).collect())
+}
+
 /// What a retry's worktree starts with from the attempt before it.
 #[derive(Clone, Debug, PartialEq)]
 enum Carried {
@@ -4343,6 +4667,10 @@ enum Carried {
 struct Context {
     reads: Vec<String>,
     deleted: Vec<(String, String)>,
+    /// What holds for the whole quest (FB-069).
+    quest_notes: Vec<String>,
+    /// Cores its heavy work may use (FB-073).
+    threads: u32,
 }
 
 fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design: Option<&crate::design::GameDesign>, feedback: &[String], continued: Carried, ctx: &Context) -> String {
@@ -4352,6 +4680,10 @@ fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design:
     s.push_str(&task.title);
     s.push_str("\n\n");
     s.push_str(task.instructions.trim());
+    if !ctx.quest_notes.is_empty() {
+        s.push_str("\n\n## For the whole quest\nThe lead set these for every task of the quest; they win over the instructions above:\n");
+        for n in &ctx.quest_notes { s.push_str(&format!("- {}\n", n.trim())); }
+    }
     if !task.notes.is_empty() {
         s.push_str("\n\n## Notes the lead added after the task started\n");
         for n in &task.notes { s.push_str(&format!("- {}\n", n.trim())); }
@@ -4368,6 +4700,11 @@ fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design:
     ));
     if !ctx.reads.is_empty() {
         s.push_str(&format!("- You may read (never change) these folders without asking: {}.\n", ctx.reads.join(", ")));
+    }
+    s.push_str("- Something long (a render, a build, a batch export): start it in the background from your worktree with its log in your scratch folder, then end your turn saying what you wait for. The guild wakes you in this same session when it ends; never wait with `sleep`.\n");
+    // The machine is shared with the other members (FB-073).
+    if ctx.threads > 0 {
+        s.push_str(&format!("- Heavy work (renders, builds, simulations, exports) uses at most {n} cores, shared with the members working beside you: pass it to the tool (`blender -t {n}`, `make -j{n}`, `--threads {n}`); `$GUILD_THREADS` holds it too. Never 0 or \"all cores\".\n", n = ctx.threads));
     }
     // What it shows, while it works and at the end (FB-050, FB-059).
     let live = crate::paths::scratch_dir(&workspace.attempt_id).join("evidence");
@@ -4399,6 +4736,27 @@ fn compose_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, design:
     s
 }
 
+/// The prompt of an attempt that only brings an accepted candidate in on
+/// top of what was integrated meanwhile: resolve the clash, redo nothing (FB-067).
+fn compose_clash_prompt(role_prompt: &str, task: &Task, workspace: &Workspace, continued: Carried, reads: &[String]) -> String {
+    let mut s = String::new();
+    s.push_str(role_prompt.trim());
+    s.push_str(&format!("\n\n# Task: bring in your accepted work — {}\n\n", task.title));
+    s.push_str("The work of this task was done and accepted. While it was being verified, other tasks were integrated into the quest's branch, and the two do not merge on their own. Your only job now is to make them fit.\n\n");
+    match &continued {
+        Carried::Conflicts { files } => s.push_str(&format!("Your worktree holds the accepted work on top of the quest's branch. They clash in: {}. Those files have git conflict markers (<<<<<<< ======= >>>>>>>): resolve each keeping both sides — what was accepted and what was integrated — unless they truly exclude each other; then keep what this task asked for and say so in your summary.\n", files.join(", "))),
+        Carried::Left { branch, head, base } => s.push_str(&format!("The accepted work did not apply on the quest's branch. It is on branch `{branch}` (commit {head}): see it with `git diff {base} {head}` and bring it over file by file (`git show {head}:<path>`), fitting it to what is there now.\n")),
+        _ => s.push_str("Your worktree holds the accepted work on top of the quest's branch, and it applied this time. Check that it still works.\n"),
+    }
+    s.push_str("\n## Do not redo the work\n- Do not run again what produced it: renders, generators, exports, captures. Its files and images are already there.\n- Touch only the files with conflicts, and whatever they break; leave the rest as it is.\n- Run the project's tests, then reply with a short summary of how you resolved each file.\n- Do not merge or rebase branches; the guild already did.\n");
+    s.push_str(&format!("\n## Rules\n- Your working directory is a dedicated git worktree on branch `{}`. Work only inside it.\n- Do not commit, push or switch branches; the guild commits your work when you finish.\n- Scratch files go in `{}`, never in /tmp.\n", workspace.branch, crate::paths::scratch_dir(&workspace.attempt_id).display()));
+    if !reads.is_empty() { s.push_str(&format!("- You may read (never change) these folders without asking: {}.\n", reads.join(", "))); }
+    s.push_str("\n## The task, for context (already done)\n");
+    s.push_str(task.instructions.trim());
+    s.push('\n');
+    s
+}
+
 /// Idempotent commands: a repeated `idempotencyKey` returns the first result.
 impl Handler for Arc<Service> {
     fn handle(&self, method: &str, params: &Value) -> ApiResult {
@@ -4410,6 +4768,8 @@ impl Handler for Arc<Service> {
         if let Some(k) = &key {
             self.store.lock().unwrap().remember_command(k, &result)?;
         }
+        // Which open tasks share files is worked out again after a change to them (FB-068).
+        if method.starts_with("quest.") || method.starts_with("task.") { self.overlaps.lock().unwrap().0 = None; }
         if method.starts_with("quest.") || method.starts_with("task.") || method.starts_with("member.") || method.starts_with("project.") { self.tick(); }
         Ok(result)
     }
@@ -5153,18 +5513,144 @@ mod tests {
         let c = workspaces::commit_candidate(&wt, "guild candidate: B").unwrap().unwrap();
         service.update_attempt(&b.id, |x| x.candidate = Some(c.clone())).unwrap();
         // FB-044: before, B was Blocked and the next try spent its last attempt.
+        // FB-067: the retry keeps both sides and redoes nothing.
+        mock.set_behaviour(MockBehaviour::Succeed { file: "rules.gd".into(), content: "rent first\nfood first\n".into() });
         let r = service.handle("task.accept", &json!({"taskId": "b", "integrate": true})).unwrap();
         assert_eq!(r["retrying"], "b", "{r}");
-        let snap = wait_for(&service, "b's retry submitted", |s| s.attempts.iter().filter(|x| x.task_id == "b").count() == 2 && s.tasks.iter().any(|t| t.id == "b" && t.state == TaskState::Verifying));
+        let snap = wait_for(&service, "b's clash resolved and integrated", |s| s.attempts.iter().filter(|x| x.task_id == "b").count() == 2 && s.tasks.iter().any(|t| t.id == "b" && t.state == TaskState::Completed));
         let t = snap.tasks.iter().find(|t| t.id == "b").unwrap();
         assert_eq!((t.attempts_made, t.max_attempts), (2, 2), "the retry does not count against it");
         let prompt = mock.prompts().into_iter().rev().find(|p| p.contains("clash in: rules.gd")).unwrap_or_else(|| mock.prompts().last().cloned().unwrap_or_default());
-        assert!(prompt.contains("clash in: rules.gd"), "{prompt}");
-        assert!(prompt.contains("conflict markers") && prompt.contains("Do not merge or rebase"), "{prompt}");
-        // An integration done by hand completes the task (FB-045).
-        service.handle("task.complete", &json!({"taskId": "b", "sha": "a9d0df6"})).unwrap();
-        assert_eq!(service.snapshot().unwrap().tasks.iter().find(|t| t.id == "b").unwrap().state, TaskState::Completed);
-        assert!(service.handle("task.complete", &json!({"taskId": "b"})).is_err(), "only once");
+        assert!(prompt.contains("clash in: rules.gd") && prompt.contains("bring in your accepted work"), "{prompt}");
+        assert!(prompt.contains("conflict markers") && prompt.contains("Do not redo the work") && prompt.contains("Do not merge or rebase"), "{prompt}");
+        assert!(!prompt.contains("Earlier attempts were turned down"), "it is not told its work was refused: {prompt}");
+        // Integrated without anyone accepting it again.
+        let quest = snap.quests.iter().find(|q| q.id == quest_id).unwrap();
+        assert_eq!(workspaces::git(&repo, &["show", &format!("{}:rules.gd", quest.integration_ref)]).unwrap(), "rent first\nfood first");
+        assert!(snap.decisions.iter().any(|d| d.task_id == "b" && d.by == "guild"), "{:?}", snap.decisions);
+    }
+
+    #[test]
+    fn a_task_completed_by_hand_lets_its_member_go() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "A"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "submitted", |s| s.tasks[0].state == TaskState::Verifying);
+        // FB-045: integrated by hand; FB-070: its candidate kept Alba "Submitted" and out of work.
+        service.handle("task.complete", &json!({"taskId": "t1", "sha": "a9d0df6"})).unwrap();
+        let snap = service.snapshot().unwrap();
+        assert_eq!(snap.tasks[0].state, TaskState::Completed);
+        assert_eq!(snap.attempts[0].state, AttemptState::Cancelled);
+        assert!(service.handle("task.complete", &json!({"taskId": "t1"})).is_err(), "only once");
+        // One left stuck by an older guild goes at the next tick.
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t2", "title": "B"})).unwrap();
+        let snap = wait_for(&service, "t2 submitted", |s| s.tasks.iter().any(|t| t.id == "t2" && t.state == TaskState::Verifying));
+        let stuck = snap.attempts.iter().find(|a| a.task_id == "t2").unwrap().id.clone();
+        {
+            let store = service.store.lock().unwrap();
+            let mut t = store.task("t2").unwrap().unwrap();
+            t.state = TaskState::Completed;
+            store.put_task(&t).unwrap();
+        }
+        let snap = wait_for(&service, "the stale candidate gone", |s| s.attempts.iter().any(|a| a.id == stuck && a.state == AttemptState::Cancelled));
+        assert!(snap.attempts.iter().all(|a| a.state.is_terminal()));
+        // And a member can always be freed by hand.
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t3", "title": "C", "maxAttempts": 1})).unwrap();
+        wait_for(&service, "t3 submitted", |s| s.tasks.iter().any(|t| t.id == "t3" && t.state == TaskState::Verifying));
+        let r = service.handle("member.release", &json!({"memberId": "aria"})).unwrap();
+        assert_eq!(r["attempts"].as_array().map(Vec::len), Some(1), "{r}");
+        assert!(service.snapshot().unwrap().attempts.iter().all(|a| a.state.is_terminal()));
+    }
+
+    #[test]
+    fn a_quest_note_reaches_every_task_until_it_is_withdrawn() {
+        let (_home, service, quest_id, mock) = setup_with_mock(MockBehaviour::Hang);
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Park"})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t2", "title": "School", "dependsOn": ["t1"]})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "running", |s| s.attempts.first().is_some_and(|a| a.state == AttemptState::Running));
+        mock.set_behaviour(MockBehaviour::Succeed { file: "park.txt".into(), content: "park\n".into() });
+        // FB-069: eight notes one by one, and a task already running still re-rendered 12 weathers.
+        let r = service.handle("quest.note", &json!({"questId": quest_id, "text": "only the sunny day in this first test"})).unwrap();
+        assert_eq!(r["redirected"].as_array().map(Vec::len), Some(1), "{r}");
+        wait_for(&service, "t1 submitted", |s| s.tasks.iter().any(|t| t.id == "t1" && t.state == TaskState::Verifying));
+        assert!(mock.prompts().last().unwrap().contains("only the sunny day"), "the member at work got it");
+        mock.set_behaviour(MockBehaviour::Succeed { file: "school.txt".into(), content: "school\n".into() });
+        service.handle("task.accept", &json!({"taskId": "t1", "integrate": true})).unwrap();
+        wait_for(&service, "t2 submitted", |s| s.tasks.iter().any(|t| t.id == "t2" && t.state == TaskState::Verifying));
+        let first = mock.prompts().into_iter().find(|p| p.contains("# Task: School")).unwrap();
+        assert!(first.contains("## For the whole quest") && first.contains("only the sunny day"), "{first}");
+        let r = service.handle("quest.note", &json!({"questId": quest_id, "withdraw": 1})).unwrap();
+        assert_eq!(r["notes"], json!([]));
+        assert!(service.handle("quest.note", &json!({"questId": quest_id, "withdraw": 1})).is_err());
+    }
+
+    #[test]
+    fn a_task_waits_for_a_task_of_another_quest_and_starts_from_its_branch() {
+        let (_home, service, first, mock) = setup_with_mock(MockBehaviour::Succeed { file: "blocks.txt".into(), content: "dead city\n".into() });
+        service.handle("task.create", &json!({"questId": first, "id": "city", "title": "Dead megacity"})).unwrap();
+        service.handle("quest.start", &json!({"questId": first})).unwrap();
+        // FB-071: «depends on unknown task» across quests.
+        let second = service.handle("quest.create", &json!({"projectId": "p", "title": "3D view"})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": second, "id": "streets", "title": "Real streets", "dependsOn": ["city"]})).unwrap();
+        service.handle("quest.start", &json!({"questId": second})).unwrap();
+        wait_for(&service, "city submitted", |s| s.tasks.iter().any(|t| t.id == "city" && t.state == TaskState::Verifying));
+        assert!(service.snapshot().unwrap().tasks.iter().any(|t| t.id == "streets" && t.state == TaskState::Pending), "it waits");
+        mock.set_behaviour(MockBehaviour::Succeed { file: "streets.txt".into(), content: "streets\n".into() });
+        service.handle("task.accept", &json!({"taskId": "city", "integrate": true})).unwrap();
+        let snap = wait_for(&service, "streets submitted", |s| s.tasks.iter().any(|t| t.id == "streets" && t.state == TaskState::Verifying));
+        let a = snap.attempts.iter().find(|a| a.task_id == "streets").unwrap();
+        assert!(worktree_of(&snap, a).join("blocks.txt").exists(), "it starts with what the other quest integrated");
+        assert!(service.handle("task.create", &json!({"questId": second, "id": "x", "title": "X", "dependsOn": ["nowhere"]})).is_err());
+    }
+
+    #[test]
+    fn two_open_tasks_naming_the_same_file_are_flagged_until_one_waits() {
+        let (_home, service, quest_id, _mock) = setup_with_mock(MockBehaviour::Hang);
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Park", "instructions": "Add the park profile to `README.md`."})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t2", "title": "School", "instructions": "Add the school profile to README.md."})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        // FB-068: five deliveries each added their profile to one file and clashed.
+        let snap = wait_for(&service, "the overlap", |s| !s.overlaps.is_empty());
+        assert_eq!(snap.overlaps[0].files, ["README.md"]);
+        assert!(service.store.lock().unwrap().events_after(0, 1000).unwrap().iter().any(|e| e.kind == "tasks.overlap"));
+        service.handle("task.update", &json!({"taskId": "t2", "dependsOn": ["t1"]})).unwrap();
+        wait_for(&service, "no overlap", |s| s.overlaps.is_empty());
+    }
+
+    #[test]
+    fn what_a_member_left_running_is_waited_for_by_the_guild() {
+        let (_home, service, quest_id, mock) = setup_with_mock(MockBehaviour::AskPermission { file: "render.txt".into(), content: "rendered\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Render the blocks"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "waiting", |s| s.attempts.first().is_some_and(|a| a.state == AttemptState::WaitingInput));
+        // FB-072: Gala slept 1790 s after her 2.5 h render had ended.
+        let mut render = std::process::Command::new("sleep").arg("2").current_dir(worktree_of(&snap, &snap.attempts[0])).spawn().unwrap();
+        service.handle("permission.respond", &json!({"attemptId": snap.attempts[0].id, "requestId": "perm-1", "optionId": "allow"})).unwrap();
+        let snap = wait_for(&service, "submitted", |s| s.attempts[0].state == AttemptState::Submitted);
+        let _ = render.wait();
+        assert_eq!(snap.attempts[0].turns, 2, "woken once, when it ended");
+        let last = mock.prompts().last().cloned().unwrap();
+        assert!(last.contains("What you left running has finished") && last.contains("sleep"), "{last}");
+        let events = service.store.lock().unwrap().events_after(0, 1000).unwrap();
+        assert!(events.iter().any(|e| e.kind == "attempt.waiting_background") && events.iter().any(|e| e.kind == "attempt.background_finished"));
+        let first = mock.prompts().into_iter().find(|p| p.contains("# Task: Render")).unwrap();
+        assert!(first.contains("$GUILD_THREADS") && first.contains("never wait with `sleep`"), "{first}");
+    }
+
+    #[test]
+    fn heavy_work_gets_its_share_of_the_cores() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        std::fs::create_dir_all(repo.join(".guild")).unwrap();
+        std::fs::write(repo.join(".guild/guild.toml"), "[project]\nthreads = 12\n[merge]\nunion = [\"tools/run_tests.sh\"]\n").unwrap();
+        let service = Service::new(Store::open_in_memory().unwrap(), Settings { concurrency: 3, ..Settings::default() });
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        let project = service.store.lock().unwrap().project("p").unwrap().unwrap();
+        // FB-073: four Blenders, two Godots and the tests at once on 14 cores.
+        assert_eq!((project.threads, project.merge_union.clone()), (Some(12), vec!["tools/run_tests.sh".to_string()]));
+        assert_eq!(service.threads_for(&project), 4);
+        assert_eq!(service.threads_for(&Project { threads: Some(2), ..project }), 1, "never none");
     }
 
     #[test]
@@ -6245,6 +6731,10 @@ mod tests {
         assert_eq!(night.status, "failed");
         assert!(night.tail.contains("captures/night.png"));
         assert!(!passes_gates(of("t2")));
+        // FB-074: the gallery shows them without anyone building it.
+        let r = service.handle("gallery.build", &json!({"projectId": "p"})).unwrap();
+        let page = std::fs::read_to_string(r["pages"][0]["path"].as_str().unwrap()).unwrap();
+        assert!(page.contains("Day look") && page.contains("day.png") && page.contains("waiting for a decision"), "{page}");
     }
 
     #[test]
