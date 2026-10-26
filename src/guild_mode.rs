@@ -714,6 +714,34 @@ mod tests {
     }
 
     #[test]
+    fn an_accepted_candidate_and_a_cancelled_quests_failure_ask_for_nothing_stale() {
+        let mut view = GuildView::new(std::sync::Arc::new(|| {}));
+        view.set_demo(true);
+        view.poll();
+        let mut snap = view.snapshot.clone().unwrap();
+        let orin = snap.members.iter().find(|m| m.name == "Orin").unwrap().clone();
+        let at = snap.attempts.iter().position(|a| a.member_id == orin.id && a.pending_permission.is_some()).unwrap();
+        let (task_id, quest_id) = (snap.attempts[at].task_id.clone(), snap.attempts[at].quest_id.clone());
+        let set_task = |snap: &mut Snapshot, state: TaskState| snap.tasks.iter_mut().find(|t| t.id == task_id).unwrap().state = state;
+        // FB-066: a failure is the user's while its quest is under way, nobody's once it was cancelled.
+        snap.attempts[at].pending_permission = None;
+        snap.attempts[at].state = AttemptState::Failed;
+        snap.attempts[at].failure = Some("the orchestrator: AC-1 requires the mutation table".into());
+        set_task(&mut snap, TaskState::Failed);
+        assert!(asking(&snap).iter().any(|(m, _)| m.id == orin.id));
+        snap.quests.iter_mut().find(|q| q.id == quest_id).unwrap().state = QuestState::Cancelled;
+        assert!(!asking(&snap).iter().any(|(m, _)| m.id == orin.id), "a cancelled quest's failure still asks");
+        // FB-065: accepted, what the orchestrator had escalated is over; it says what is left.
+        snap.quests.iter_mut().find(|q| q.id == quest_id).unwrap().state = QuestState::Running;
+        snap.attempts[at].state = AttemptState::Passed;
+        snap.attempts[at].failure = None;
+        snap.attempts[at].escalation = Some("the required godot-tests verifier failed".into());
+        set_task(&mut snap, TaskState::Accepted);
+        let activity = guild_view::member_agent(&snap, &orin).activity;
+        assert!(!activity.contains("godot-tests") && activity.contains(&trf("{} · aceptado, falta integrarlo o cerrarlo · {}", &[&"", &""]).trim_matches(|c| c == ' ' || c == '·').to_string()), "{activity}");
+    }
+
+    #[test]
     fn files_dropped_on_the_visual_tab_go_to_the_guild_and_it_shows_palettes_and_images() {
         let ctx = egui::Context::default();
         let mut view = GuildView::new(std::sync::Arc::new(|| {}));

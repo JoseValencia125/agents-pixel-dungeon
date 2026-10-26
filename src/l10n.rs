@@ -64,6 +64,8 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("Capturas ({})", ["Captures ({})", "Captures ({})", "Catture ({})", "Capturas ({})"]),
         ("clic para abrirla", ["click to open it", "cliquer pour l'ouvrir", "clic per aprirla", "clique para abri-la"]),
         ("Reiniciar", ["Restart", "Relancer", "Riavvia", "Reiniciar"]),
+        ("{} · aceptado, falta integrarlo o cerrarlo · {}", ["{} · accepted, to integrate or close · {}", "{} · accepté, à intégrer ou fermer · {}", "{} · accettato, da integrare o chiudere · {}", "{} · aceito, falta integrar ou fechar · {}"]),
+        ("Cerrar sin integrar", ["Close without integrating", "Fermer sans intégrer", "Chiudi senza integrare", "Fechar sem integrar"]),
         ("La guild aún no tiene este repositorio. El orquestador lo añade al pasar a modo guild.", ["The guild does not have this repository yet. The orchestrator adds it when it switches to guild mode.", "La guilde n'a pas encore ce dépôt. L'orchestrateur l'ajoute en passant en mode guilde.", "La gilda non ha ancora questo repository. L'orchestratore lo aggiunge passando alla modalità gilda.", "A guilda ainda não tem este repositório. O orquestrador o adiciona ao passar para o modo guilda."]),
         ("Sin misiones. El orquestador las crea cuando le pides trabajo en el Chat.", ["No quests. The orchestrator creates them when you ask for work in the Chat.", "Aucune quête. L'orchestrateur les crée quand tu demandes du travail dans le Chat.", "Nessuna missione. L'orchestratore le crea quando chiedi lavoro nella Chat.", "Sem missões. O orquestrador as cria quando você pede trabalho no Chat."]),
         ("te necesita", ["needs you", "a besoin de toi", "ha bisogno di te", "precisa de você"]),

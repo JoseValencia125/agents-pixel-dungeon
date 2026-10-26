@@ -372,7 +372,9 @@ impl GuildView {
 /// The attempt a member's room shows: the active one, else the latest
 /// one still waiting for a decision, else the latest of the day.
 fn current_attempt<'a>(snap: &'a Snapshot, member: &Member) -> Option<&'a Attempt> {
-    let mine: Vec<&Attempt> = snap.attempts.iter().filter(|a| a.member_id == member.id).collect();
+    // What a cancelled or finished quest left behind waits for nobody (FB-066).
+    let live = |a: &&Attempt| snap.quests.iter().find(|q| q.id == a.quest_id).is_none_or(|q| !matches!(q.state, QuestState::Cancelled | QuestState::Completed | QuestState::Failed));
+    let mine: Vec<&Attempt> = snap.attempts.iter().filter(|a| a.member_id == member.id).filter(live).collect();
     mine.iter().copied().filter(|a| a.state.is_active()).max_by(|a, b| a.created_at.cmp(&b.created_at))
         .or_else(|| mine.iter().copied().filter(|a| matches!(a.state, AttemptState::Failed | AttemptState::TimedOut | AttemptState::Lost) && snap.tasks.iter().any(|t| t.id == a.task_id && matches!(t.state, TaskState::Failed | TaskState::Blocked))).max_by(|a, b| a.created_at.cmp(&b.created_at)))
         .or_else(|| mine.iter().copied().filter(|a| a.state == AttemptState::Passed && snap.tasks.iter().any(|t| t.id == a.task_id && matches!(t.state, TaskState::Accepted | TaskState::Integrating))).max_by(|a, b| a.created_at.cmp(&b.created_at)))
@@ -403,6 +405,7 @@ pub fn member_agent(snap: &Snapshot, m: &Member) -> Agent {
         ("failed", Some(a)) => trf("{} · falló: {}", &[&m.name, &a.failure.clone().unwrap_or_default()]),
         ("verifying", _) => trf("{} · verificando · {}", &[&m.name, &title]),
         ("integrating", _) => trf("{} · integrando · {}", &[&m.name, &title]),
+        ("done", _) if task.is_some_and(|t| t.state == TaskState::Accepted) => trf("{} · aceptado, falta integrarlo o cerrarlo · {}", &[&m.name, &title]),
         ("done", _) => trf("{} · candidato listo · {}", &[&m.name, &title]),
         ("blocked", _) => trf("{} · bloqueado · {}", &[&m.name, &task.and_then(|t| t.block_reason.clone()).unwrap_or(title.clone())]),
         _ => trf("{} · libre · {}", &[&m.name, &m.roles.join(", ")]),
@@ -410,6 +413,8 @@ pub fn member_agent(snap: &Snapshot, m: &Member) -> Agent {
     // The guild's orchestrator on it, or what it left to the user.
     let activity = match attempt {
         Some(a) if a.deciding => trf("{} · el orquestador decide", &[&activity]),
+        // An escalation answered by accepting the candidate is over (FB-065).
+        Some(a) if a.state == AttemptState::Passed => activity,
         Some(a) => match &a.escalation { Some(why) => trf("{} · escalado: {}", &[&activity, why]), None => activity },
         None => activity,
     };
@@ -786,7 +791,11 @@ pub fn panel(ui: &mut Ui, view: &mut GuildView, agent: &Agent, _now: f64, wide: 
                 }
             }
             (AttemptState::Passed, Some(TaskState::Accepted)) => {
-                if let Some(t) = &task { if button(ui, &tr("Integrar"), Color32::from_rgb(48, 209, 88)) { view.command("task.integrate", json!({"taskId": t.id})); } }
+                if let Some(t) = &task {
+                    if button(ui, &tr("Integrar"), Color32::from_rgb(48, 209, 88)) { view.command("task.integrate", json!({"taskId": t.id})); }
+                    // Accepted for what it showed, not to be merged: done as it is (FB-065).
+                    if button(ui, &tr("Cerrar sin integrar"), Color32::from_rgb(200, 200, 205)) { view.command("task.complete", json!({"taskId": t.id, "reason": "closed without integrating, from the dungeon"})); }
+                }
             }
             (s, _) if s.is_active() => {
                 if matches!(s, AttemptState::Running | AttemptState::WaitingInput) {
