@@ -56,3 +56,10 @@ Una jornada con 8–12 miembros produciendo arte en Blender y la vista de Godot 
 - kind: works · cause: guild · status: open · project: harness-directive · by orchestrator · 2026-10-26
 - evidence: El diseñador decidió todo el arte desde una galería web con cada versión lado a lado con su ficha. El orquestador la armó a mano: extraer cada PNG de la rama, achicarlo, escribir el HTML y publicarlo (unas 70 versiones en dos días).
 - proposal: La evidencia de cada tarea (las imágenes de --evidence y sus capturas numeradas) se publica sola en una galería por proyecto, agrupada por quest y tarea, con la referencia declarada al lado y el estado (en curso, aprobada).
+
+
+## FB-075 · − Los worktrees de intentos terminados nunca se borran y llenan el disco
+
+- kind: breaks · cause: guild · status: open · project: harness-directive · by orchestrator · 2026-10-26
+- evidence: `guild/worktrees/harness-directive/` llegó a 258 worktrees y 76 GB (cada uno con su `.godot/` importado, su `assets/city` y renders de Blender, de 0,7 a 2,9 GB). El disco quedó sin espacio (ENOSPC): el setup de un verificador copió `assets/city` a medias y tres candidatos fallaron la misma prueba sin culpa suya; después ni el orquestador podía correr comandos. Se liberaron 65 GB borrando a mano 251 worktrees de intentos terminados, cancelados o rechazados.
+- proposal: Limpieza automática: borrar el worktree de un intento cuando queda Passed e integrado, Cancelled, Rejected o Failed (la rama queda, así que no se pierde nada), y un `guild gc` para lo que quede. Además, antes de preparar un intento o correr el setup, revisar el espacio libre y pausar la cola con un aviso claro si baja de un umbral (p. ej. 20 GB), en vez de dejar que falle a medias.
