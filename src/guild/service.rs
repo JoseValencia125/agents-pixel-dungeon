@@ -5948,7 +5948,9 @@ mod tests {
         wait_for(&service, "no overlap", |s| s.overlaps.is_empty());
     }
 
+    // Finding what runs in a folder needs lsof or /proc: not on Windows.
     #[test]
+    #[cfg(unix)]
     fn what_a_member_left_running_is_waited_for_by_the_guild() {
         let (_home, service, quest_id, mock) = setup_with_mock(MockBehaviour::AskPermission { file: "render.txt".into(), content: "rendered\n".into() });
         service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Render the blocks"})).unwrap();
@@ -7114,7 +7116,7 @@ mod tests {
         assert!(service.handle("quest.update", &json!({"questId": quest_id, "readPaths": ["relative/caps"]})).is_err());
         let q = service.handle("quest.update", &json!({"questId": quest_id, "readPaths": ["~/harness-directive-capturas/"]})).unwrap();
         let folder = q["read_paths"][0].as_str().unwrap().to_string();
-        assert!(folder.starts_with('/') && folder.ends_with("/harness-directive-capturas"), "{folder}");
+        assert!(Path::new(&folder).is_absolute() && Path::new(&folder).ends_with("harness-directive-capturas"), "{folder}");
         service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Match the look"})).unwrap();
         service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
         wait_for(&service, "submitted", |s| s.tasks[0].state == TaskState::Verifying);

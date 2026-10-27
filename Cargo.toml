@@ -52,7 +52,7 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 uds_windows = "1"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_IO"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys = "0.6"

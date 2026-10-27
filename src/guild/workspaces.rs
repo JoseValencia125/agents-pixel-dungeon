@@ -155,7 +155,17 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
         #[allow(clippy::unnecessary_cast)]
         Some(s.f_bavail as u64 * s.f_frsize as u64)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let mut probe = path.to_path_buf();
+        while !probe.exists() { probe = probe.parent()?.to_path_buf(); }
+        let wide: Vec<u16> = probe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let mut free: u64 = 0;
+        let ok = unsafe { windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
+        (ok != 0).then_some(free)
+    }
+    #[cfg(not(any(unix, windows)))]
     { let _ = path; None }
 }
 
