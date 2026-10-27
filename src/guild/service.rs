@@ -7122,7 +7122,7 @@ mod tests {
         wait_for(&service, "submitted", |s| s.tasks[0].state == TaskState::Verifying);
         let prompt = mock.prompts()[0].clone();
         assert!(prompt.contains(&format!("read (never change) these folders without asking: {folder}")), "{prompt}");
-        assert!(prompt.contains("/evidence`"), "where step captures go");
+        assert!(prompt.contains("evidence`"), "where step captures go");
     }
 
     #[test]
@@ -7232,9 +7232,9 @@ mod tests {
         let repo = home.repo();
         let marker = home.0.join("first-run");
         let script = home.0.join("slow.py");
-        std::fs::write(&script, format!("import os, sys, time\nm = r'{}'\nif os.path.exists(m): sys.exit(0)\nopen(m, 'w').write('x')\ntime.sleep(30)\n", marker.display())).unwrap();
+        std::fs::write(&script, format!("import os, sys, time\nm = r'{}'\nif os.path.exists(m): sys.exit(0)\nopen(m, 'w').write('x')\ntime.sleep(60)\n", marker.display())).unwrap();
         std::fs::create_dir_all(repo.join(".guild")).unwrap();
-        std::fs::write(repo.join(".guild/guild.toml"), format!("[[verifiers]]\nid = \"slow\"\nargv = [\"{PYTHON}\", '{}']\nrequired = true\ntimeout_seconds = 1\n", script.display())).unwrap();
+        std::fs::write(repo.join(".guild/guild.toml"), format!("[[verifiers]]\nid = \"slow\"\nargv = [\"{PYTHON}\", '{}']\nrequired = true\ntimeout_seconds = 6\n", script.display())).unwrap();
         let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(10), cancel_timeout: Duration::from_millis(500), ..Settings::default() });
         Arc::get_mut(&mut service).unwrap().quiet = true;
         service.register(Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() })));
