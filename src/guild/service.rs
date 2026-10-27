@@ -105,6 +105,8 @@ pub struct Service {
     disk_low: Mutex<Option<u64>>,
     /// Members that reached their harness's usage limit, until when and why (FB-071).
     paused: Mutex<HashMap<String, (chrono::DateTime<chrono::Utc>, String)>>,
+    /// Integrations that failed for git or the disk, tried again: how many times and when (FB-077).
+    integration_tries: Mutex<HashMap<String, (u32, Instant)>>,
     pub settings: Settings,
     pub stop: Arc<AtomicBool>,
     log_file: Mutex<Option<std::fs::File>>,
@@ -158,6 +160,7 @@ impl Service {
             sweeping: Arc::new(AtomicBool::new(false)),
             disk_low: Mutex::new(None),
             paused: Mutex::new(HashMap::new()),
+            integration_tries: Mutex::new(HashMap::new()),
             settings,
             stop: Arc::new(AtomicBool::new(false)),
             log_file: Mutex::new(None),
@@ -363,7 +366,7 @@ impl Service {
         if t.state == to && t.block_reason == reason { return Ok(t); }
         task_transition(t.state, to).map_err(ApiError::conflict)?;
         t.state = to;
-        t.block_reason = if matches!(to, TaskState::Blocked | TaskState::Failed) { reason.clone() } else { None };
+        t.block_reason = if matches!(to, TaskState::Blocked | TaskState::Failed | TaskState::Accepted) { reason.clone() } else { None };
         t.updated_at = now();
         store.put_task(&t)?;
         let project_id = store.quest(&t.quest_id)?.map(|q| q.project_id).unwrap_or_default();
@@ -441,6 +444,7 @@ impl Service {
         if self.overlaps.lock().unwrap().0.is_none_or(|at| at.elapsed() > OVERLAP_EVERY) { self.refresh_overlaps(); }
         self.gallery_tick();
         self.sweep_tick(false);
+        self.retry_integrations();
         let room = self.disk_has_room();
         // Dispatch.
         let running_quests: Vec<String> = quests.iter().filter(|q| q.state == QuestState::Running).map(|q| q.id.clone()).collect();
@@ -3177,6 +3181,13 @@ impl Service {
                 if let Err(e) = self.task_integrate(&t.id) { self.log(&format!("task {}: integration after restart failed: {}", t.id, e.message)); }
             }
         }
+        // Left blocked by "merge blocked" with its attempt passed, by a guild that did not tell a clash from a failure of git (FB-077).
+        let (all_tasks, quests) = { let store = self.store.lock().unwrap(); (store.tasks().unwrap_or_default(), store.quests().unwrap_or_default()) };
+        for t in all_tasks.iter().filter(|t| t.state == TaskState::Blocked && t.block_reason.as_deref().is_some_and(|r| r.starts_with("merge blocked"))) {
+            if !quests.iter().any(|q| q.id == t.quest_id && q.state == QuestState::Running) || self.accepted_not_landed(&t.id, None).is_none() { continue; }
+            self.log(&format!("integrating task {}, left blocked by a failed merge", t.id));
+            if let Err(e) = self.task_integrate(&t.id) { self.log(&format!("task {}: integration after restart failed: {}", t.id, e.message)); }
+        }
         let active = self.store.lock().unwrap().active_attempts().unwrap_or_default();
         for a in active {
             if self.running.lock().unwrap().contains_key(&a.id) { continue; }
@@ -4539,6 +4550,11 @@ impl Service {
             let id = p_opt(params, "attemptId").ok_or_else(|| ApiError::invalid("override needs the attempt to accept"))?;
             self.revive_candidate(task_id, &id)?;
         }
+        // Already accepted but never landed: it only has to be integrated (FB-077).
+        if let Some(passed) = self.accepted_not_landed(task_id, p_opt(params, "attemptId").as_deref()) {
+            if params.get("integrate").and_then(Value::as_bool).unwrap_or(false) { return self.task_integrate(task_id); }
+            return Ok(json!({"accepted": task_id, "attemptId": passed.id}));
+        }
         let attempt = match p_opt(params, "attemptId") { Some(id) => id, None => self.latest_submitted(task_id)?.id };
         {
             let store = self.store.lock().unwrap();
@@ -4604,6 +4620,54 @@ impl Service {
         Ok(json!({"rejected": task_id, "attemptId": attempt.id}))
     }
 
+    /// A task whose integration failed for git or the disk stays accepted: it is integrated
+    /// again after 30 s, 2 min and 10 min, then it waits for a person with its reason shown (FB-077).
+    fn retry_integrations(self: &Arc<Service>) {
+        let (tasks, quests) = {
+            let store = self.store.lock().unwrap();
+            (store.tasks().unwrap_or_default(), store.quests().unwrap_or_default())
+        };
+        let failed: Vec<&Task> = tasks.iter()
+            .filter(|t| t.state == TaskState::Accepted && t.block_reason.as_deref().is_some_and(|r| r.starts_with(MERGE_FAILED)))
+            .filter(|t| quests.iter().any(|q| q.id == t.quest_id && q.state == QuestState::Running))
+            .collect();
+        let mut tries = self.integration_tries.lock().unwrap();
+        tries.retain(|id, _| failed.iter().any(|t| &t.id == id));
+        for t in failed {
+            let (made, at) = *tries.entry(t.id.clone()).or_insert((0, Instant::now()));
+            let wait = if cfg!(test) { Duration::ZERO } else { INTEGRATION_RETRIES.get(made as usize).copied().unwrap_or(Duration::MAX) };
+            if at.elapsed() < wait { continue; }
+            if made as usize == INTEGRATION_RETRIES.len() {
+                // Enough: it waits for a person, and says so once.
+                tries.insert(t.id.clone(), (made + 1, Instant::now()));
+                let project = quests.iter().find(|q| q.id == t.quest_id).map(|q| q.project_id.clone()).unwrap_or_default();
+                self.emit(Event::new("integration.gave_up", "guild").about_task(t, &project).with(json!({"reason": t.block_reason, "tries": made})));
+                continue;
+            }
+            if made as usize > INTEGRATION_RETRIES.len() { continue; }
+            tries.insert(t.id.clone(), (made + 1, Instant::now()));
+            let (service, id) = (self.clone(), t.id.clone());
+            std::thread::Builder::new().name("integration-retry".into()).spawn(move || {
+                match service.task_integrate(&id) {
+                    Ok(_) => { service.integration_tries.lock().unwrap().remove(&id); }
+                    Err(e) => service.log(&format!("task {id}: integration tried again and failed: {}", e.message)),
+                }
+            }).ok();
+        }
+    }
+
+    /// An accepted task that never landed (its integration failed, or the guild stopped first),
+    /// whose accepted attempt is the one asked for: accepting it again integrates it (FB-077).
+    fn accepted_not_landed(&self, task_id: &str, attempt_id: Option<&str>) -> Option<Attempt> {
+        let store = self.store.lock().unwrap();
+        let task = store.task(task_id).ok().flatten()?;
+        let stuck = task.state == TaskState::Accepted || (task.state == TaskState::Blocked && task.block_reason.as_deref().is_some_and(|r| r.starts_with("merge blocked")));
+        if !stuck { return None; }
+        store.attempts_of_task(task_id).ok()?.into_iter()
+            .filter(|a| a.kind == AttemptKind::Work && a.state == AttemptState::Passed && attempt_id.is_none_or(|id| a.id == id))
+            .max_by(|a, b| a.created_at.cmp(&b.created_at))
+    }
+
     fn task_integrate(self: &Arc<Service>, task_id: &str) -> ApiResult {
         let (task, quest, project, attempt) = {
             let store = self.store.lock().unwrap();
@@ -4645,7 +4709,8 @@ impl Service {
                 self.atomic(&store, || {
                     self.emit_locked(&store, Event::new("merge.blocked", "guild").about_attempt(&attempt).with(json!({"reason": e, "retrying": conflict})));
                     if !conflict {
-                        self.move_task_locked(&store, task_id, TaskState::Blocked, Some(format!("merge blocked: {e}")))?;
+                        // Git or the disk failed, not the work: it stays accepted and the guild tries again (FB-077).
+                        self.move_task_locked(&store, task_id, TaskState::Accepted, Some(format!("{MERGE_FAILED}: {e}")))?;
                         return Ok(());
                     }
                     let mut a = store.attempt(&attempt.id)?.ok_or_else(|| ApiError::not_found("attempt"))?;
@@ -4667,6 +4732,12 @@ impl Service {
         }
     }
 }
+
+/// How an accepted task whose integration failed for git or the disk is marked; the guild tries it again (FB-077).
+const MERGE_FAILED: &str = "merge failed, tried again";
+
+/// How long an integration that failed waits before each new try, and how many tries there are.
+const INTEGRATION_RETRIES: [Duration; 3] = [Duration::from_secs(30), Duration::from_secs(120), Duration::from_secs(600)];
 
 /// How an accepted candidate that clashed at integration is marked; its
 /// retry only resolves the clash (FB-067).
@@ -6954,6 +7025,38 @@ mod tests {
         let a = service.snapshot().unwrap().attempts[0].clone();
         assert_eq!((a.state, a.escalation), (AttemptState::Passed, None));
         service.handle("task.complete", &json!({"taskId": "t1", "reason": "kept for its captures"})).unwrap();
+        assert_eq!(service.snapshot().unwrap().tasks[0].state, TaskState::Completed);
+    }
+
+    #[test]
+    fn a_failure_of_git_leaves_the_task_accepted_and_the_guild_integrates_it_again() {
+        // FB-077: the task was left Blocked with its attempt Passed, and nothing could finish it.
+        let (_home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Look"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "submitted", |s| s.tasks[0].state == TaskState::Verifying);
+        let branch = snap.quests[0].integration_ref.clone();
+        workspaces::FAIL_INTEGRATIONS.lock().unwrap().push((branch.clone(), 3));
+        service.handle("task.accept", &json!({"taskId": "t1", "integrate": true})).unwrap_err();
+        let t = service.snapshot().unwrap().tasks[0].clone();
+        assert_eq!(t.state, TaskState::Accepted, "not Blocked: the work is fine, git failed");
+        assert!(t.block_reason.unwrap().starts_with(MERGE_FAILED));
+        service.tick();
+        let snap = wait_for(&service, "integrated by the guild", |s| s.tasks[0].state == TaskState::Completed);
+        let repo = service.store.lock().unwrap().project(&snap.quests[0].project_id).unwrap().unwrap().repo_path;
+        assert!(workspaces::git(Path::new(&repo), &["ls-tree", "--name-only", &branch]).unwrap().contains("a.txt"));
+    }
+
+    #[test]
+    fn accepting_again_integrates_an_accepted_task_that_never_landed() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Look"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "submitted", |s| s.tasks[0].state == TaskState::Verifying);
+        service.handle("task.accept", &json!({"taskId": "t1"})).unwrap();
+        assert_eq!(service.snapshot().unwrap().attempts[0].state, AttemptState::Passed);
+        // Before: "the task has no submitted candidate", and the only way out was merging by hand.
+        service.handle("task.accept", &json!({"taskId": "t1", "integrate": true})).unwrap();
         assert_eq!(service.snapshot().unwrap().tasks[0].state, TaskState::Completed);
     }
 
