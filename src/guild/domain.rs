@@ -670,6 +670,9 @@ pub struct Snapshot {
     /// until the time shown (UTC, RFC 3339) (FB-071).
     #[serde(default)]
     pub paused_members: Vec<PausedMember>,
+    /// What waits and nobody moves, as the sentinel sees it (see `sentinel`).
+    #[serde(default)]
+    pub stalls: Vec<crate::sentinel::Stall>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -28,6 +28,8 @@ USAGE
   guild concurrency [N]              how many members work at once (1–16), kept between runs
   guild snapshot                     the whole state as JSON
   guild stop                         stop the service
+  guild stalls                       what waits and nobody moves (also at the top of `guild status`)
+  guild ack <wait|task>              say you have a wait: no more notices or alerts for it
 
   guild project add <path> [--id ID] [--name NAME] [--target-ref BRANCH]
                                      the branch quests start from and integrate into (default: the checkout's)
@@ -335,6 +337,17 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "status" => status(&ensure_running()?),
+        "stalls" => {
+            let snap: Snapshot = serde_json::from_value(call(&ensure_running()?, "guild.snapshot", json!({}))?).map_err(|e| e.to_string())?;
+            let lines = guild::mcp::stall_lines(&snap, None);
+            print!("{}", if lines.is_empty() { "nothing waits\n".to_string() } else { lines });
+            Ok(())
+        }
+        "ack" => {
+            let r = call(&ensure_running()?, "stall.ack", json!({"id": a.pos(0, "wait or task")?, "by": "user"}))?;
+            println!("acknowledged: {}", r["acked"]);
+            Ok(())
+        }
         "snapshot" => {
             let snap = call(&ensure_running()?, "guild.snapshot", json!({}))?;
             println!("{}", serde_json::to_string_pretty(&snap).unwrap());
@@ -952,6 +965,7 @@ fn short(id: &str) -> &str { if id.len() > 8 { &id[id.len() - 8..] } else { id }
 fn status(client: &Client) -> Result<(), String> {
     let snap: Snapshot = serde_json::from_value(call(client, "guild.snapshot", json!({}))?).map_err(|e| e.to_string())?;
     println!("guild {} · {} events · {}", snap.service_version, snap.last_seq, paths::home().display());
+    print!("{}", guild::mcp::stall_lines(&snap, None));
     for h in &snap.harnesses {
         println!("  harness {:<6} {} {}", h.kind, if h.available { "ready" } else { "unavailable" }, if h.available { h.runtime_version.clone() } else { h.detail.clone() });
     }

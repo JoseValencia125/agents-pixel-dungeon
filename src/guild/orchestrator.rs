@@ -115,13 +115,15 @@ pub enum DecisionKind {
     Candidate,
     /// A task whose attempts ran out.
     Failure,
+    /// A wait nobody moves (a task blocked, a dependency that never released, verifiers that hang): the sentinel asks what to do.
+    Stall,
 }
 
 impl DecisionKind {
-    pub fn as_str(self) -> &'static str { match self { DecisionKind::Permission => "permission", DecisionKind::Candidate => "candidate", DecisionKind::Failure => "failure" } }
+    pub fn as_str(self) -> &'static str { match self { DecisionKind::Permission => "permission", DecisionKind::Candidate => "candidate", DecisionKind::Failure => "failure", DecisionKind::Stall => "stall" } }
     /// The answers it may give; `escalate` leaves it to the delegate or the user.
     pub fn choices(self) -> &'static [&'static str] {
-        match self { DecisionKind::Permission => &["allow", "refuse", "escalate"], DecisionKind::Candidate => &["accept", "reject", "escalate"], DecisionKind::Failure => &["retry", "escalate"] }
+        match self { DecisionKind::Permission => &["allow", "refuse", "escalate"], DecisionKind::Candidate => &["accept", "reject", "escalate"], DecisionKind::Failure => &["retry", "escalate"], DecisionKind::Stall => &["retry", "nudge", "integrate", "cancel", "escalate"] }
     }
 }
 
@@ -318,6 +320,7 @@ mod tests {
         assert!(parse_ruling("```json\n{\"decision\": \"accept\"}\n```", DecisionKind::Permission).is_none(), "accept is not a permission's answer");
         assert!(parse_ruling("I would allow it.", DecisionKind::Permission).is_none(), "no block, no ruling");
         assert_eq!(DecisionKind::Failure.choices(), &["retry", "escalate"], "a failure is never accepted");
+        assert!(DecisionKind::Stall.choices().contains(&"nudge") && !DecisionKind::Stall.choices().contains(&"accept"), "nor is a stall");
     }
 
     #[test]
