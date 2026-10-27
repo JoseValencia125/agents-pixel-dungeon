@@ -18,6 +18,7 @@ struct Session {
 }
 
 pub struct Terminals {
+    fonts_ready: bool,
     sessions: Vec<Session>,
     sender: mpsc::Sender<(u64, PtyEvent)>,
     receiver: mpsc::Receiver<(u64, PtyEvent)>,
@@ -27,8 +28,32 @@ pub struct Terminals {
 impl Default for Terminals {
     fn default() -> Self {
         let (sender, receiver) = mpsc::channel();
-        Self { sessions: Vec::new(), sender, receiver, finished: Vec::new() }
+        Self { fonts_ready: false, sessions: Vec::new(), sender, receiver, finished: Vec::new() }
     }
+}
+
+/// Symbol fonts the system has, tried after egui's own for what a shell
+/// prompt draws (➜ ✗ and the like), which would show as "?" and a box.
+fn symbol_fonts() -> Vec<PathBuf> {
+    [
+        "/System/Library/Fonts/Menlo.ttc", "/System/Library/Fonts/Apple Symbols.ttf", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+        "C:\\Windows\\Fonts\\seguisym.ttf", "C:\\Windows\\Fonts\\consola.ttf",
+    ].iter().map(PathBuf::from).filter(|p| p.exists()).collect()
+}
+
+/// The app sets no fonts of its own, so egui's defaults are the base.
+fn install_symbol_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    for (i, path) in symbol_fonts().into_iter().enumerate() {
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let name = format!("terminal-symbols-{i}");
+        fonts.font_data.insert(name.clone(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+        for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+            fonts.families.entry(family).or_default().push(name.clone());
+        }
+    }
+    ctx.set_fonts(fonts);
 }
 
 fn working_directory(cwd: &str) -> PathBuf {
@@ -114,6 +139,10 @@ impl Terminals {
 
     pub fn show(&mut self, ctx: &egui::Context) {
         self.drain_events();
+        if !self.fonts_ready && self.sessions.iter().any(|s| s.visible) {
+            install_symbol_fonts(ctx);
+            self.fonts_ready = true;
+        }
         for session in &mut self.sessions {
             if !session.visible { continue; }
             let sender = self.sender.clone();

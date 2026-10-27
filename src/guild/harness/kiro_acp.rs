@@ -10,7 +10,7 @@ use crate::domain::{HarnessId, HarnessKind, ModelOption, PermissionOption};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
@@ -97,6 +97,38 @@ impl KiroAcp {
 
 impl Default for KiroAcp {
     fn default() -> Self { KiroAcp::new() }
+}
+
+/// Credits the v3 engine's sessions (`~/.kiro/sessions/<hash>/sess_*`, what
+/// the guild runs over ACP) spent: each turn leaves a `usage_summary` in its
+/// `messages.jsonl`. `workspace` keeps only the sessions that worked inside
+/// that folder (an attempt's worktree); `month` ("2026-10", local time) only
+/// the turns that ended in it. Returns the credits and the turns counted.
+pub fn v3_credits(home: &Path, workspace: Option<&str>, month: Option<&str>) -> (f64, u32) {
+    let mut total = (0.0, 0);
+    let Ok(hashes) = std::fs::read_dir(home.join(".kiro").join("sessions")) else { return total };
+    for session in hashes.flatten().filter_map(|h| std::fs::read_dir(h.path()).ok()).flat_map(|d| d.flatten()) {
+        let dir = session.path();
+        if !session.file_name().to_string_lossy().starts_with("sess_") { continue; }
+        if let Some(folder) = workspace {
+            let meta: Value = std::fs::read_to_string(dir.join("session.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+            let inside = meta.get("workspacePaths").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).any(|p| Path::new(p).starts_with(folder));
+            if !inside { continue; }
+        }
+        let Ok(text) = std::fs::read_to_string(dir.join("messages.jsonl")) else { continue };
+        for line in text.lines().filter(|l| l.contains("\"usage_summary\"")) {
+            let Ok(m) = serde_json::from_str::<Value>(line) else { continue };
+            if let Some(month) = month {
+                let at = m.get("timestamp").and_then(Value::as_str).and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+                if at.map(|t| t.with_timezone(&chrono::Local).format("%Y-%m").to_string() != month).unwrap_or(true) { continue; }
+            }
+            let used: f64 = m.pointer("/payload/promptTurnSummaries").and_then(Value::as_array).into_iter().flatten()
+                .filter_map(|s| s.get("usage").and_then(Value::as_f64)).sum();
+            total.0 += used;
+            total.1 += 1;
+        }
+    }
+    total
 }
 
 fn find_binary() -> PathBuf {
@@ -419,7 +451,7 @@ impl HarnessAdapter for KiroAcp {
             permission_requests: Support::Supported,
             model_discovery: Support::Supported,
             model_switch: ModelSwitch::BetweenTurns,
-            usage_reporting: Support::Unknown,
+            usage_reporting: if self.engine == Engine::V3 { Support::Supported } else { Support::Unknown },
             native_fork: if self.engine == Engine::V3 { Support::Supported } else { Support::Unknown },
             mcp: Support::Supported,
             subagents: Support::Unknown,
@@ -572,6 +604,25 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&detail).unwrap()["path"], "/wt/a1/notes/hello.txt");
         assert_eq!(crate::policy::decide_request("Write File", &detail, &[], "/wt/a1"), crate::policy::Verdict::Allow);
         assert_eq!(permission_detail(&json!({"toolCallId": "unknown", "title": "x"}), &inner.lock().unwrap().inputs), "");
+    }
+
+    #[test]
+    fn v3_credits_are_summed_per_workspace_and_month() {
+        let home = std::env::temp_dir().join(format!("kiro-credits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let make = |hash: &str, id: &str, folder: &str, lines: &[&str]| {
+            let dir = home.join(".kiro/sessions").join(hash).join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("session.json"), json!({"workspacePaths": [folder]}).to_string()).unwrap();
+            std::fs::write(dir.join("messages.jsonl"), lines.join("\n")).unwrap();
+        };
+        let turn = |ts: &str, usage: f64| json!({"timestamp": ts, "payload": {"type": "usage_summary", "promptTurnSummaries": [{"usage": usage}, {"usage": 0.5}]}}).to_string();
+        make("h1", "sess_a", "/wt/a1", &[&turn("2026-10-08T12:00:00Z", 1.0), &turn("2026-09-08T12:00:00Z", 4.0)]);
+        make("h2", "sess_b", "/wt/b2", &[&turn("2026-10-09T12:00:00Z", 2.0)]);
+        assert_eq!(v3_credits(&home, Some("/wt/a1"), None), (6.0, 2));
+        assert_eq!(v3_credits(&home, Some("/wt/a1"), Some("2026-10")), (1.5, 1));
+        assert_eq!(v3_credits(&home, None, Some("2026-10")), (4.0, 2));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
