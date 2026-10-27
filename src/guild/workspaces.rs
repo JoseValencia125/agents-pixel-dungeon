@@ -397,6 +397,8 @@ pub fn integrate(project: &Project, quest: &Quest, candidate: &Candidate, task: 
     git(repo, &["worktree", "add", "--detach", &tmp.display().to_string(), &expected])?;
     let result = (|| -> GitResult<String> {
         let mut squash = union_args(&project.id, &project.merge_union);
+        // The merge may build a commit of its own (criss-cross bases), which needs an identity.
+        squash.extend(["-c".into(), "user.name=Guild".into(), "-c".into(), "user.email=guild@agents-pixel-dungeon".into()]);
         squash.extend(["merge".into(), "--squash".into(), candidate.head_sha.clone()]);
         let merge = git(&tmp, &squash.iter().map(String::as_str).collect::<Vec<_>>());
         if let Err(err) = merge {
