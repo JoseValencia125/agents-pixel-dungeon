@@ -490,7 +490,7 @@ mod tests {
         Project { id: "hd".into(), name: "hd".into(), repo_path: "/r/hd".into(), target_ref: "refs/heads/main".into(),
             setup: vec!["sh".into(), "-c".into(), "godot --headless --path . --import >/dev/null 2>&1; test -d .godot".into()],
             verifiers: vec![v(&["sh", "-c", "pc=$(godot --headless --path . -s tools/parse_check.gd 2>&1) || { echo \"$pc\"; exit 1; }; for t in test_stages test_save; do out=$(godot --headless --path . -s tools/$t.gd 2>&1) || { echo \"$out\"; exit 1; }; echo \"$out\" | tail -2; done"]), v(&["sh", "tools/capture.sh"])],
-            playtest: None, play: None, ai_play: None, permitted_programs: vec!["gdlint".into(), "curl".into()], permitted_reads: vec![], permitted_commands: vec![], web: true, merge_union: vec![], threads: None, created_at: String::new() }
+            playtest: None, play: None, ai_play: None, permitted_programs: vec!["gdlint".into(), "curl".into()], permitted_reads: vec![], permitted_commands: vec![], web: true, merge_union: vec![], threads: None, seed: vec![], created_at: String::new() }
     }
 
     #[test]

@@ -29,11 +29,14 @@ pub struct Settings {
     pub attempt_timeout: Duration,
     pub cancel_timeout: Duration,
     pub setup_timeout_seconds: u64,
+    /// Below this many free bytes on the worktrees' disk no work starts
+    /// and verifiers wait (FB-075).
+    pub min_free_bytes: u64,
 }
 
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { concurrency: 2, attempt_timeout: Duration::from_secs(30 * 60), cancel_timeout: Duration::from_secs(15), setup_timeout_seconds: 600 }
+        Settings { concurrency: 2, attempt_timeout: Duration::from_secs(30 * 60), cancel_timeout: Duration::from_secs(15), setup_timeout_seconds: 600, min_free_bytes: if cfg!(test) { 0 } else { 20 << 30 } }
     }
 }
 
@@ -95,6 +98,11 @@ pub struct Service {
     overlaps: Mutex<(Option<Instant>, Vec<Overlap>)>,
     /// When the galleries were last written, and up to which event (FB-074).
     gallery: Mutex<(Option<Instant>, u64)>,
+    /// When finished worktrees were last swept, and whether a sweep runs (FB-075).
+    swept: Mutex<Instant>,
+    sweeping: Arc<AtomicBool>,
+    /// The free bytes while below the minimum.
+    disk_low: Mutex<Option<u64>>,
     pub settings: Settings,
     pub stop: Arc<AtomicBool>,
     log_file: Mutex<Option<std::fs::File>>,
@@ -144,6 +152,9 @@ impl Service {
             running: Mutex::new(HashMap::new()),
             overlaps: Mutex::new((None, vec![])),
             gallery: Mutex::new((None, 0)),
+            swept: Mutex::new(Instant::now()),
+            sweeping: Arc::new(AtomicBool::new(false)),
+            disk_low: Mutex::new(None),
             settings,
             stop: Arc::new(AtomicBool::new(false)),
             log_file: Mutex::new(None),
@@ -422,6 +433,8 @@ impl Service {
         self.experiments_tick()?;
         if self.overlaps.lock().unwrap().0.is_none_or(|at| at.elapsed() > OVERLAP_EVERY) { self.refresh_overlaps(); }
         self.gallery_tick();
+        self.sweep_tick(false);
+        let room = self.disk_has_room();
         // Dispatch.
         let running_quests: Vec<String> = quests.iter().filter(|q| q.state == QuestState::Running).map(|q| q.id.clone()).collect();
         let tasks = self.store.lock().unwrap().tasks()?;
@@ -435,7 +448,7 @@ impl Service {
         for t in tasks.iter().filter(|t| t.candidates > 1 && t.state == TaskState::Running && running_quests.contains(&t.quest_id) && t.attempts_made < t.candidates) {
             slots.push((t, t.candidates - t.attempts_made));
         }
-        if slots.is_empty() { return Ok(()); }
+        if slots.is_empty() || !room { return Ok(()); }
         let available = self.available_harnesses();
         for (task, wanted) in slots { for _ in 0..wanted {
             let active = self.running.lock().unwrap().len();
@@ -1115,6 +1128,7 @@ impl Service {
     /// an attempt's worktree gets too: dependencies, generated data); a
     /// checkout whose setup fails is removed.
     fn prepare_checkout(&self, project: &Project, dir: &Path) -> Res<()> {
+        workspaces::seed(project, dir);
         if project.setup.is_empty() { return Ok(()); }
         match workspaces::run_with_timeout(dir, &project.setup, self.settings.setup_timeout_seconds) {
             Ok((0, _)) => Ok(()),
@@ -2107,6 +2121,8 @@ impl Service {
             self.emit_locked(&store, Event::new("workspace.ready", "guild").about_attempt(&attempt).with(json!({"path": workspace.path, "branch": workspace.branch, "baseSha": base})));
         }
         self.update_attempt(attempt_id, |a| a.workspace_id = Some(workspace.id.clone()))?;
+        let seeded = workspaces::seed(&project, Path::new(&workspace.path));
+        if !seeded.is_empty() { self.emit(Event::new("workspace.seeded", "guild").about_attempt(&attempt).with(json!({"folders": seeded}))); }
         if !project.setup.is_empty() {
             self.emit(Event::new("setup.started", "guild").about_attempt(&attempt).with(json!({"argv": project.setup})));
             match workspaces::setup(&workspace, &project.setup, self.settings.setup_timeout_seconds) {
@@ -2670,6 +2686,85 @@ impl Service {
         let _ = self.write_galleries(None);
     }
 
+    /// Worktrees nobody will work or look in again: their attempt ended and
+    /// either its task is over or it was not a passed candidate (what it
+    /// wrote stays on its branch, for a retry to go on from). A candidate
+    /// waiting for a decision and an experiment's variants keep theirs (FB-075).
+    fn finished_worktrees(&self) -> Res<Vec<(Project, Workspace)>> {
+        let live: Vec<String> = self.running.lock().unwrap().keys().cloned().collect();
+        let store = self.store.lock().unwrap();
+        let (projects, tasks) = (store.projects()?, store.tasks()?);
+        let played: Vec<String> = store.experiments()?.into_iter()
+            .filter(|e| !matches!(e.status, crate::experiment::ExperimentStatus::Accepted | crate::experiment::ExperimentStatus::Rejected | crate::experiment::ExperimentStatus::Failed))
+            .flat_map(|e| e.variants.into_iter().filter_map(|v| v.attempt_id)).collect();
+        let mut out = vec![];
+        for w in store.workspaces()?.into_iter().filter(|w| w.state != WorkspaceState::Removed) {
+            let Some(a) = store.attempt(&w.attempt_id)? else { continue };
+            if !a.state.is_terminal() || live.contains(&a.id) || played.contains(&a.id) { continue; }
+            let task_over = tasks.iter().find(|t| t.id == a.task_id).is_none_or(|t| t.state.is_terminal());
+            if a.state == AttemptState::Passed && !task_over { continue; }
+            if let Some(p) = projects.iter().find(|p| p.id == w.project_id) { out.push((p.clone(), w)); }
+        }
+        Ok(out)
+    }
+
+    /// Remove the finished worktrees, keeping their branches. Returns how
+    /// many went and the bytes it freed on the worktrees' disk.
+    fn sweep_worktrees(&self) -> Res<(usize, u64)> {
+        let dir = crate::paths::worktrees_dir();
+        let before = workspaces::free_bytes(&dir);
+        let mut removed = 0;
+        for (project, mut w) in self.finished_worktrees()? {
+            if let Err(e) = workspaces::remove(&project, &w, false) { self.log(&format!("sweep: {}: {e}", w.path)); continue; }
+            w.state = WorkspaceState::Removed;
+            w.updated_at = now();
+            let store = self.store.lock().unwrap();
+            store.put_workspace(&w)?;
+            self.emit_locked(&store, Event::new("workspace.removed", "guild").with(json!({"attemptId": w.attempt_id, "path": w.path, "branch": w.branch})));
+            removed += 1;
+        }
+        let freed = before.zip(workspaces::free_bytes(&dir)).map(|(b, a)| a.saturating_sub(b)).unwrap_or(0);
+        if removed > 0 { self.log(&format!("sweep: removed {removed} finished worktrees, {} MB freed", freed >> 20)); }
+        Ok((removed, freed))
+    }
+
+    /// Every `SWEEP_EVERY`, or at once when the disk runs low, the finished
+    /// worktrees go, on a thread of their own: removing gigabytes takes a while.
+    fn sweep_tick(self: &Arc<Service>, now_too: bool) {
+        {
+            let mut at = self.swept.lock().unwrap();
+            if !now_too && at.elapsed() < SWEEP_EVERY { return; }
+            *at = Instant::now();
+        }
+        if self.sweeping.swap(true, Ordering::SeqCst) { return; }
+        let service = self.clone();
+        let spawned = std::thread::Builder::new().name("sweep".into()).spawn(move || {
+            if let Err(e) = service.sweep_worktrees() { service.log(&format!("sweep: {e}")); }
+            service.sweeping.store(false, Ordering::SeqCst);
+        });
+        if spawned.is_err() { self.sweeping.store(false, Ordering::SeqCst); }
+    }
+
+    /// Whether the worktrees' disk has room for more work. Going below the
+    /// minimum is said once, with what is left, and sweeps at once; coming
+    /// back is said too (FB-075).
+    fn disk_has_room(self: &Arc<Service>) -> bool {
+        let min = self.settings.min_free_bytes;
+        let free = if min == 0 { None } else { workspaces::free_bytes(&crate::paths::worktrees_dir()) };
+        let low = free.filter(|f| *f < min);
+        let was = std::mem::replace(&mut *self.disk_low.lock().unwrap(), low);
+        match (was, low) {
+            (None, Some(f)) => {
+                self.log(&format!("disk: {} GB free, below {} GB: no work starts until there is room", f >> 30, min >> 30));
+                self.emit(Event::new("guild.disk_low", "guild").with(json!({"freeBytes": f, "minFreeBytes": min})));
+                self.sweep_tick(true);
+            }
+            (Some(_), None) => { self.emit(Event::new("guild.disk_ok", "guild").with(json!({"freeBytes": free, "minFreeBytes": min}))); }
+            _ => {}
+        }
+        low.is_none()
+    }
+
     /// The galleries of one project or all, as (project, page) for those that have images.
     fn write_galleries(&self, project: Option<&str>) -> Res<Vec<(String, PathBuf)>> {
         let snap = self.snapshot()?;
@@ -2910,7 +3005,22 @@ impl Service {
         Ok(())
     }
 
+    /// A verifier on a full disk fails for want of room, not for the
+    /// candidate: it waits until the sweep or the user frees some, up to
+    /// half an hour (FB-075).
+    fn wait_for_room(&self, attempt: &Attempt) {
+        let min = self.settings.min_free_bytes;
+        let dir = crate::paths::worktrees_dir();
+        let started = Instant::now();
+        let mut said = false;
+        while min > 0 && !self.stop.load(Ordering::Relaxed) && started.elapsed() < DISK_WAIT && workspaces::free_bytes(&dir).is_some_and(|f| f < min) {
+            if !said { self.emit(Event::new("attempt.waiting_disk", "guild").about_attempt(attempt).with(json!({"minFreeBytes": min}))); said = true; }
+            std::thread::sleep(BACKGROUND_POLL);
+        }
+    }
+
     fn run_verifiers(&self, attempt_id: &str, attempt: &Attempt, verifiers: &[Verifier], workspace: &Workspace) -> Vec<VerifierResult> {
+        self.wait_for_room(attempt);
         let mut results = vec![];
         for v in verifiers {
             self.emit(Event::new("verifier.started", "verifier").about_attempt(attempt).with(json!({"verifierId": v.id, "argv": v.argv})));
@@ -3045,6 +3155,7 @@ impl Service {
         snap.orchestrator_busy = self.orchestrating.lock().unwrap().is_some();
         snap.concurrency = self.concurrency.load(Ordering::Relaxed);
         snap.overlaps = self.overlaps.lock().unwrap().1.clone();
+        snap.disk_low = *self.disk_low.lock().unwrap();
         // Each running attempt's work so far against its limit, for whoever watches the time.
         {
             let running = self.running.lock().unwrap();
@@ -3196,6 +3307,13 @@ impl Service {
             "task.accept" => self.task_accept(params),
             "task.reject" => self.task_reject(params),
             "task.integrate" => self.task_integrate(p_str(params, "taskId")?),
+            "workspace.gc" => {
+                if self.sweeping.swap(true, Ordering::SeqCst) { return Err(ApiError::conflict("a sweep is running: try again in a moment")); }
+                let swept = self.sweep_worktrees();
+                self.sweeping.store(false, Ordering::SeqCst);
+                let (removed, freed) = swept?;
+                Ok(json!({"removed": removed, "freedBytes": freed, "freeBytes": workspaces::free_bytes(&crate::paths::worktrees_dir()), "minFreeBytes": self.settings.min_free_bytes}))
+            }
             "workspace.remove" => {
                 let id = p_str(params, "attemptId")?;
                 let store = self.store.lock().unwrap();
@@ -3244,6 +3362,7 @@ impl Service {
             web: file.as_ref().and_then(|f| f.permissions.web).unwrap_or(true),
             merge_union: file.as_ref().map(|f| f.merge.union.clone()).unwrap_or_default(),
             threads: file.as_ref().and_then(|f| f.project.threads).filter(|n| *n > 0),
+            seed: file.as_ref().map(|f| f.project.seed.clone()).unwrap_or_default(),
             created_at: existing.map(|p| p.created_at).unwrap_or_else(now),
         };
         store.put_project(&project)?;
@@ -4443,6 +4562,12 @@ const GALLERY_EVERY: Duration = Duration::from_secs(20);
 /// How often the guild looks again at which open tasks share files (FB-068).
 const OVERLAP_EVERY: Duration = Duration::from_secs(30);
 
+/// How often finished worktrees are removed (FB-075).
+const SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+/// How long a verifier waits for room on a full disk before it runs anyway.
+const DISK_WAIT: Duration = Duration::from_secs(30 * 60);
+
 /// The repository's files a task's text names (`tools/run_tests.sh`), as
 /// they are written; only paths that exist count.
 fn named_files(repo: &Path, text: &str) -> Vec<String> {
@@ -5560,6 +5685,55 @@ mod tests {
         let r = service.handle("member.release", &json!({"memberId": "aria"})).unwrap();
         assert_eq!(r["attempts"].as_array().map(Vec::len), Some(1), "{r}");
         assert!(service.snapshot().unwrap().attempts.iter().all(|a| a.state.is_terminal()));
+    }
+
+    #[test]
+    fn finished_worktrees_go_and_their_branches_stay() {
+        let (home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Done"})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t2", "title": "Turned down", "maxAttempts": 3})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "t1 submitted", |s| s.tasks.iter().any(|t| t.id == "t1" && t.state == TaskState::Verifying));
+        service.handle("task.accept", &json!({"taskId": "t1", "integrate": true})).unwrap();
+        wait_for(&service, "t2 submitted", |s| s.tasks.iter().any(|t| t.id == "t2" && t.state == TaskState::Verifying));
+        service.handle("task.reject", &json!({"taskId": "t2", "reason": "again"})).unwrap();
+        let snap = wait_for(&service, "the retry submitted", |s| s.attempts.iter().filter(|a| a.task_id == "t2").count() == 2 && s.tasks.iter().any(|t| t.id == "t2" && t.state == TaskState::Verifying));
+        let of = |task: &str, state: AttemptState| snap.attempts.iter().find(|a| a.task_id == task && a.state == state).unwrap().clone();
+        let (done, turned_down, waiting) = (of("t1", AttemptState::Passed), of("t2", AttemptState::Failed), of("t2", AttemptState::Submitted));
+        // FB-075: 258 worktrees and 76 GB, until the disk ran out.
+        let r = service.handle("workspace.gc", &json!({})).unwrap();
+        assert_eq!(r["removed"], 2, "{r}");
+        let snap = service.snapshot().unwrap();
+        for a in [&done, &turned_down] {
+            assert!(!worktree_of(&snap, a).exists(), "{} kept its worktree", a.id);
+            let w = snap.workspaces.iter().find(|w| Some(&w.id) == a.workspace_id.as_ref()).unwrap();
+            assert_eq!(w.state, WorkspaceState::Removed);
+            assert!(workspaces::ref_exists(&home.repo_path(), &format!("refs/heads/{}", w.branch)), "its branch stays");
+        }
+        assert!(worktree_of(&snap, &waiting).exists(), "a candidate waiting for a decision keeps its worktree");
+        assert_eq!(service.handle("workspace.gc", &json!({})).unwrap()["removed"], 0, "once");
+    }
+
+    #[test]
+    fn no_work_starts_while_the_disk_is_full() {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(5), min_free_bytes: u64::MAX, ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        service.register(Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() })));
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"], "model": "mock-fast"})).unwrap();
+        let quest_id = service.handle("quest.create", &json!({"projectId": "p", "title": "Q"})).unwrap()["id"].as_str().unwrap().to_string();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "A"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        for _ in 0..5 { service.tick(); std::thread::sleep(Duration::from_millis(50)); }
+        let snap = service.snapshot().unwrap();
+        assert!(snap.attempts.is_empty(), "nothing started on a full disk");
+        assert!(snap.disk_low.is_some());
+        assert_eq!(service.store.lock().unwrap().events_of_kind("guild.disk_low", 10).unwrap().len(), 1, "said once");
+        let call = |m: &str, p: Value| service.handle(m, &p).map_err(|e| e.message);
+        assert!(crate::mcp::run_tool("guild_status", &json!({}), &call, &|_| {}).unwrap().contains("⚠ disk"));
     }
 
     #[test]

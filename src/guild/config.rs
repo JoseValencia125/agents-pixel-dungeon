@@ -93,6 +93,9 @@ pub struct ProjectSection {
     pub setup: Vec<String>,
     /// Cores for heavy work, shared among the attempts at once (FB-073).
     pub threads: Option<u32>,
+    /// Ignored folders a worktree clones from the checkout (FB-075).
+    #[serde(default)]
+    pub seed: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

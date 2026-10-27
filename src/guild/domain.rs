@@ -95,6 +95,12 @@ pub struct Project {
     /// run at once (`[project] threads`, FB-073); all of the machine's if unset.
     #[serde(default)]
     pub threads: Option<u32>,
+    /// Folders git ignores (an engine's import cache, assets a script
+    /// fetches) that a new worktree gets from the project's checkout as
+    /// copy-on-write clones before its setup, instead of building its own
+    /// copy (`[project] seed`, FB-075).
+    #[serde(default)]
+    pub seed: Vec<String>,
     pub created_at: String,
 }
 
@@ -656,6 +662,10 @@ pub struct Snapshot {
     /// Open tasks of a quest that change the same files (FB-068).
     #[serde(default)]
     pub overlaps: Vec<Overlap>,
+    /// The bytes left on the worktrees' disk when they are below the
+    /// guild's minimum: no work starts until there is room (FB-075).
+    #[serde(default)]
+    pub disk_low: Option<u64>,
 }
 
 /// Two open tasks of one quest that change (or name) the same files: they
