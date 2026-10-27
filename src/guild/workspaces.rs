@@ -13,6 +13,10 @@ pub type GitResult<T> = Result<T, String>;
 /// lose with "Permission denied" while the other holds the file; nothing was
 /// written to a ref, so the command is retried.
 pub fn git(repo: &Path, args: &[&str]) -> GitResult<String> {
+    // Two `git worktree` commands at once read each other's half-made entries ("failed to read
+    // .git/worktrees/…/commondir"): one at a time.
+    static WORKTREES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = (args.first() == Some(&"worktree")).then(|| WORKTREES.lock().unwrap_or_else(|e| e.into_inner()));
     let mut tries = 0;
     loop {
         let output = crate::platform::command("git").arg("-C").arg(repo).args(args).output().map_err(|e| format!("git: {e}"))?;
