@@ -356,6 +356,7 @@ impl Store {
             concurrency: 0,
             overlaps: vec![],
             disk_low: None,
+            paused_members: vec![],
         })
     }
 }

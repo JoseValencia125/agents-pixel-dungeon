@@ -134,6 +134,78 @@ pub fn processes_in(dirs: &[&Path]) -> Vec<(i32, String)> {
     found
 }
 
+/// The processes an attempt started and left running (FB-070): those whose
+/// environment carries its `GUILD_ATTEMPT` mark, wherever they work, and
+/// those working inside `dirs`; never the harnesses. A process that cd'd
+/// out of the worktree, or was started by a node tool, no longer slips by.
+pub fn attempt_processes(attempt_id: &str, dirs: &[&Path]) -> Vec<(i32, String)> {
+    let mut found = processes_in(dirs);
+    if cfg!(windows) || attempt_id.is_empty() { return found; }
+    let mark = format!("GUILD_ATTEMPT={attempt_id}");
+    let Ok(out) = command("ps").args(["-axo", "pid=,comm="]).output() else { return found };
+    let me = std::process::id() as i32;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let line = line.trim_start();
+        let Some((pid, comm)) = line.split_once(' ') else { continue };
+        let Ok(pid) = pid.parse::<i32>() else { continue };
+        let name = Path::new(comm.trim()).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let harness = ["claude", "kiro-cli", "kiro-cli-chat", "codex", "lsof", "ps"].iter().any(|h| name == *h || name.starts_with("kiro-cli"));
+        if harness || pid == me || pid <= 0 || found.iter().any(|(p, _)| *p == pid) { continue; }
+        if process_environment(pid).iter().any(|e| *e == mark) { found.push((pid, name)); }
+    }
+    found
+}
+
+/// The environment variables of a process of ours ("NAME=value"); empty
+/// where they cannot be read (another user's, or gone).
+#[cfg(target_os = "linux")]
+fn process_environment(pid: i32) -> Vec<String> {
+    std::fs::read(format!("/proc/{pid}/environ")).map(|b| b.split(|c| *c == 0).map(|v| String::from_utf8_lossy(v).to_string()).collect()).unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
+fn process_environment(pid: i32) -> Vec<String> {
+    // KERN_PROCARGS2: argc, the executable's path, padding NULs, argv, then the environment.
+    let mut size: libc::size_t = 0;
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let buf = unsafe {
+        if libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) != 0 || size < 4 { return vec![]; }
+        let mut buf = vec![0u8; size];
+        if libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr() as *mut libc::c_void, &mut size, std::ptr::null_mut(), 0) != 0 { return vec![]; }
+        buf.truncate(size);
+        buf
+    };
+    let argc = i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]).max(0) as usize;
+    let mut parts = buf[4..].split(|c| *c == 0);
+    // The path, then the empty strings that pad it, then argc arguments.
+    let _ = parts.next();
+    let mut rest = parts.skip_while(|p| p.is_empty());
+    for _ in 0..argc { if rest.next().is_none() { return vec![]; } }
+    rest.take_while(|p| !p.is_empty()).map(|v| String::from_utf8_lossy(v).to_string()).collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_environment(_pid: i32) -> Vec<String> { vec![] }
+
+/// Stop what an attempt left running (FB-075): SIGTERM, and SIGKILL for
+/// whatever is still there after `grace`. Returns how many it signalled.
+pub fn reap_attempt_processes(attempt_id: &str, dirs: &[&Path], grace: std::time::Duration) -> usize {
+    #[cfg(unix)]
+    {
+        let found = attempt_processes(attempt_id, dirs);
+        for (pid, _) in &found { unsafe { libc::kill(*pid, libc::SIGTERM); } }
+        if found.is_empty() { return 0; }
+        let deadline = std::time::Instant::now() + grace;
+        while std::time::Instant::now() < deadline && found.iter().any(|(pid, _)| unsafe { libc::kill(*pid, 0) } == 0) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        for (pid, _) in &found { if unsafe { libc::kill(*pid, 0) } == 0 { unsafe { libc::kill(*pid, libc::SIGKILL); } } }
+        found.len()
+    }
+    #[cfg(not(unix))]
+    { let _ = (attempt_id, dirs, grace); 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +224,29 @@ mod tests {
         let _ = child.wait();
         assert!(found.iter().any(|(pid, name)| *pid == child.id() as i32 && name == "sleep"), "{found:?}");
         assert!(processes_in(&[Path::new("/nonexistent/guild")]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the test below starts, to have something to find.
+    #[test]
+    #[ignore]
+    fn a_sleeper_for_the_mark_test() { std::thread::sleep(Duration::from_secs(30)); }
+
+    #[test]
+    #[cfg(unix)]
+    fn what_an_attempt_left_running_is_found_by_its_mark_and_reaped() {
+        let dir = std::env::temp_dir().join(format!("guild-mark-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // It works elsewhere, so only its environment says whose it is. The test binary
+        // sleeps in its own right: macOS hides the environment of its system binaries.
+        let mut child = Command::new(std::env::current_exe().unwrap()).args(["--ignored", "--exact", "platform::tests::a_sleeper_for_the_mark_test"]).current_dir(std::env::temp_dir()).env("GUILD_ATTEMPT", "att-mark-1").stdout(Stdio::null()).spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let found = attempt_processes("att-mark-1", &[dir.as_path()]);
+        assert!(found.iter().any(|(pid, name)| *pid == child.id() as i32 && name.contains("guild")), "{found:?}");
+        assert!(attempt_processes("att-other", &[dir.as_path()]).iter().all(|(pid, _)| *pid != child.id() as i32));
+        assert!(reap_attempt_processes("att-mark-1", &[dir.as_path()], Duration::from_secs(2)) >= 1);
+        assert!(child.wait().is_ok(), "it was stopped");
+        assert!(attempt_processes("att-mark-1", &[dir.as_path()]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

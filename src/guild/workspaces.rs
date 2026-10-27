@@ -264,13 +264,36 @@ pub fn remove(project: &Project, workspace: &Workspace, delete_branch: bool) -> 
     if !canonical.starts_with(&managed_c) { return Err(format!("{} is outside the managed worktrees", workspace.path)); }
     let repo = Path::new(&project.repo_path);
     if path.exists() {
-        git(repo, &["worktree", "remove", "--force", &path.display().to_string()])?;
+        if let Err(e) = git(repo, &["worktree", "remove", "--force", &path.display().to_string()]) {
+            // The repository moved or git cannot: the folder is the guild's own, so it is deleted
+            // anyway, or it would be retried for ever and keep its gigabytes (FB-067).
+            std::fs::remove_dir_all(&path).map_err(|d| format!("{e}; and deleting the folder: {d}"))?;
+        }
     }
     let _ = git(repo, &["worktree", "prune"]);
     if delete_branch {
         let _ = git(repo, &["branch", "-D", &workspace.branch]);
     }
     Ok(())
+}
+
+/// Folders under the worktrees' area that look like an attempt's worktree (a
+/// 26-character id) and that no live workspace owns, untouched for `idle`:
+/// what a crash, a failed removal or a moved repository left behind (FB-067).
+pub fn orphan_worktrees(live: &[PathBuf], idle: std::time::Duration) -> Vec<PathBuf> {
+    let root = crate::paths::worktrees_dir();
+    let live: Vec<PathBuf> = live.iter().flat_map(|p| [p.clone(), p.canonicalize().unwrap_or_else(|_| p.clone())]).collect();
+    let mut out = vec![];
+    for project in std::fs::read_dir(&root).into_iter().flatten().flatten().filter(|e| e.path().is_dir()) {
+        for dir in std::fs::read_dir(project.path()).into_iter().flatten().flatten() {
+            let path = dir.path();
+            let name = dir.file_name().to_string_lossy().to_string();
+            let attempt_like = name.len() == 26 && name.chars().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase());
+            let old = dir.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age >= idle);
+            if attempt_like && path.is_dir() && old && !live.contains(&path) && !live.contains(&path.canonicalize().unwrap_or_else(|_| path.clone())) { out.push(path); }
+        }
+    }
+    out
 }
 
 /// Create (or find) the quest's integration branch at `base`.
