@@ -2286,6 +2286,7 @@ impl Service {
                 follow.push_str(&format!("What you left running is still running: {}. Look at its log: if it is stuck, stop it and say so; if it is getting on, end your turn again saying what you wait for and the guild wakes you when it ends. Do not wait with sleep; your work is committed only when you finish.\n", describe_processes(&running).join(", ")));
             }
             if !added.is_empty() {
+                self.emit(Event::new("note.delivered", "guild").about_attempt(attempt).with(json!({"notes": added.len(), "redirected": redirected})));
                 let added: String = added.iter().map(|n| format!("- {}\n", n.trim())).collect();
                 if redirected { follow.push_str(&format!("The lead stopped you to correct course. Read this before you go on:\n{added}")); }
                 else { follow.push_str(&format!("While you worked, the lead added to the task:\n{added}")); }
@@ -2410,6 +2411,8 @@ impl Service {
             if let Some(at) = interrupted_at {
                 // A turn that does not stop for a note keeps its session: the note waits for its end.
                 if !stopping && at.elapsed() > self.settings.cancel_timeout {
+                    // Said, not silently turned into a later note.
+                    self.emit(Event::new("note.deferred", "guild").about_attempt(attempt).with(json!({"why": "its turn did not stop for the note: it reads it when the turn ends"})));
                     if let Some(r) = self.running.lock().unwrap().get_mut(attempt_id) { r.redirect_requested = false; }
                     interrupted_at = None;
                     continue;
@@ -2662,6 +2665,20 @@ impl Service {
                 self.move_attempt(attempt_id, AttemptState::Failed, Some(reason.clone()))?;
                 let until = chrono::Utc::now() + usage_limit_wait(&reason);
                 let first = self.paused.lock().unwrap().insert(attempt.member_id.clone(), (until, reason.chars().take(200).collect())).is_none();
+                // The limit is the account's, not the member's: every member of that harness waits too, and
+                // they come back a few seconds apart, not all at once (Gas City #3279: a storm of retries).
+                let also: Vec<String> = {
+                    let members = self.store.lock().unwrap().members().unwrap_or_default();
+                    let mut paused = self.paused.lock().unwrap();
+                    let mut others = vec![];
+                    for m in members.into_iter().filter(|m| m.harness == attempt.harness && m.id != attempt.member_id) {
+                        if paused.contains_key(&m.id) { continue; }
+                        let jitter = m.id.bytes().fold(7u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64)) % 60;
+                        paused.insert(m.id.clone(), (until + chrono::Duration::seconds(5 + jitter as i64), format!("shares the usage limit of {}: {}", attempt.member_id, reason.chars().take(120).collect::<String>())));
+                        others.push(m.id);
+                    }
+                    others
+                };
                 let store = self.store.lock().unwrap();
                 self.atomic(&store, || {
                     let mut t = store.task(&task.id)?.ok_or_else(|| ApiError::not_found("task"))?;
@@ -2669,7 +2686,7 @@ impl Service {
                     t.updated_at = now();
                     store.put_task(&t)?;
                     self.move_task_locked(&store, &task.id, TaskState::Ready, None)?;
-                    if first { self.emit_locked(&store, Event::new("member.paused", "guild").about_attempt(&attempt).with(json!({"memberId": attempt.member_id, "until": until.to_rfc3339(), "reason": reason}))); }
+                    if first { self.emit_locked(&store, Event::new("member.paused", "guild").about_attempt(&attempt).with(json!({"memberId": attempt.member_id, "until": until.to_rfc3339(), "reason": reason, "alsoPaused": also}))); }
                     Ok(())
                 })?;
                 Ok(())
@@ -2795,7 +2812,26 @@ impl Service {
         let dir = crate::paths::worktrees_dir();
         let before = workspaces::free_bytes(&dir);
         let mut removed = 0;
+        let mut stash_checked: HashSet<String> = HashSet::new();
         for (project, mut w) in self.finished_worktrees()? {
+            // A member's `git stash` lands in the user's repository: keep it as a branch (once per project per sweep).
+            if stash_checked.insert(project.id.clone()) {
+                for branch in workspaces::rescue_stashes(&project) { self.emit(Event::new("stash.rescued", "guild").with(json!({"projectId": project.id, "branch": branch}))); }
+            }
+            // Never under a process that still works there; and what no commit has is kept on the branch first.
+            let running = crate::platform::attempt_processes(&w.attempt_id, &[Path::new(&w.path)]);
+            if !running.is_empty() {
+                self.emit(Event::new("workspace.kept", "guild").with(json!({"attemptId": w.attempt_id, "path": w.path, "why": "a process still runs in it", "processes": running.iter().map(|(p, n)| format!("{p} {n}")).collect::<Vec<_>>()})));
+                continue;
+            }
+            match workspaces::rescue_uncommitted(&w) {
+                Ok(true) => { self.emit(Event::new("workspace.rescued", "guild").with(json!({"attemptId": w.attempt_id, "branch": w.branch, "why": "it held changes no commit had: kept on its branch"}))); }
+                Ok(false) => {}
+                Err(e) => {
+                    self.emit(Event::new("workspace.kept", "guild").with(json!({"attemptId": w.attempt_id, "path": w.path, "why": format!("its changes could not be kept: {e}")})));
+                    continue;
+                }
+            }
             if let Err(e) = workspaces::remove(&project, &w, false) { self.log(&format!("sweep: {}: {e}", w.path)); continue; }
             w.state = WorkspaceState::Removed;
             w.updated_at = now();
@@ -3135,6 +3171,9 @@ impl Service {
             let env = vec![("GUILD_EVIDENCE".to_string(), evidence_dir.display().to_string()), ("GUILD_THREADS".to_string(), threads.to_string())];
             let run = |timeout: u64| match workspaces::run_with_timeout_env(Path::new(&workspace.path), &v.argv, timeout, &env) {
                 Ok((0, out)) => ("passed", Some(0), out),
+                // EX_CONFIG: the check cannot run on this machine. That says nothing of the candidate:
+                // it is neither a pass nor a failure, and someone reads it before accepting.
+                Ok((78, out)) => ("cannot-run", Some(78), out),
                 Ok((code, out)) => ("failed", Some(code), out),
                 Err(e) => ("error", None, e),
             };
@@ -3146,6 +3185,16 @@ impl Service {
                 self.wait_for_quiet(attempt_id);
                 outcome = run(v.timeout_seconds.saturating_mul(2));
             }
+            // EX_TEMPFAIL: the check could not run now (a busy port, a lock, the network): not a verdict.
+            // It runs again, up to twice, when the machine is quieter (Gas City's protocol).
+            let mut tempfails = 0;
+            while outcome.1 == Some(TEMPFAIL) && tempfails < 2 {
+                tempfails += 1;
+                self.emit(Event::new("verifier.retrying", "verifier").about_attempt(attempt).with(json!({"verifierId": v.id, "why": "exit 75: it could not run now, which says nothing of the candidate", "try": tempfails})));
+                self.wait_for_quiet(attempt_id);
+                outcome = run(v.timeout_seconds);
+            }
+            if outcome.1 == Some(TEMPFAIL) { outcome = ("error", Some(TEMPFAIL), format!("it could not run (exit 75, temporary failure) on three tries:\n{}", outcome.2)); }
             let (status, code, output) = outcome;
             let artifact = self.write_artifact(Some(attempt_id), &format!("verifier-{}", v.id), output.as_bytes()).ok();
             let tail: String = output.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
@@ -4187,13 +4236,18 @@ impl Service {
         // A member at work is stopped and handed the note now, not when it
         // finishes (FB-051); `later: true` waits for its turn to end.
         let mut redirected = false;
-        if !params.get("later").and_then(Value::as_bool).unwrap_or(false) {
+        // `mode: "queue"` is `later`: it never interrupts (Gas Town's `nudge --mode`).
+        let queue = params.get("later").and_then(Value::as_bool).unwrap_or(false) || p_opt(params, "mode").as_deref() == Some("queue");
+        if !queue {
             let working: Vec<String> = store.attempts_of_task(task_id)?.into_iter().filter(|a| a.kind == AttemptKind::Work && a.state == AttemptState::Running).map(|a| a.id).collect();
             let mut running = self.running.lock().unwrap();
             for id in working { if let Some(r) = running.get_mut(&id) { r.redirect_requested = true; redirected = true; } }
         }
+        // Said, never guessed: when will the member read it.
+        let at_work = store.attempts_of_task(task_id)?.into_iter().any(|a| a.kind == AttemptKind::Work && matches!(a.state, AttemptState::Provisioning | AttemptState::Running | AttemptState::WaitingInput));
         let mut out = serde_json::to_value(task).unwrap();
         out["redirected"] = json!(redirected);
+        out["delivery"] = json!(if redirected { "now" } else if at_work { "when its turn ends" } else { "when the task starts" });
         Ok(out)
     }
 
@@ -4897,6 +4951,9 @@ impl Service {
     }
 }
 
+/// A verifier's exit code for "I could not run now": it is tried again, not judged (sysexits EX_TEMPFAIL).
+const TEMPFAIL: i32 = 75;
+
 /// How often the sentinel looks at the whole guild.
 const SENTINEL_EVERY: Duration = Duration::from_secs(10);
 
@@ -4975,6 +5032,18 @@ fn describe_processes(list: &[(i32, String)]) -> Vec<String> { list.iter().take(
 /// How long a new task waits before it is dispatched, for the lead to set its role,
 /// member or timeout first (FB-069).
 const CREATE_GRACE: Duration = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(10) };
+
+/// Why an attempt failed, from a closed vocabulary: what is not the work's fault
+/// (`usage_limit`, `timeout`, `harness_lost`, `cancelled`) apart from what is (`work`).
+/// Shows how many attempts the guild burned on causes outside the task (Gas City's `failure_reason`).
+pub fn failure_class(failure: &str) -> &'static str {
+    let f = failure.to_lowercase();
+    if is_usage_limit(failure) { "usage_limit" }
+    else if f.contains("timed out") { "timeout" }
+    else if f.contains("transport_lost") || f.contains("the harness ended") || f.contains("lost") && f.contains("restart") { "harness_lost" }
+    else if f.contains("cancel") { "cancelled" }
+    else { "work" }
+}
 
 /// Whether a failure is the harness running out of what its plan gives (FB-071).
 fn is_usage_limit(reason: &str) -> bool {
@@ -6115,6 +6184,24 @@ mod tests {
         }
         assert!(worktree_of(&snap, &waiting).exists(), "a candidate waiting for a decision keeps its worktree");
         assert_eq!(service.handle("workspace.gc", &json!({})).unwrap()["removed"], 0, "once");
+    }
+
+    #[test]
+    fn what_a_worktree_holds_that_no_commit_has_is_kept_on_its_branch_before_it_goes() {
+        // The reaper of Gas City keeps a worktree with changes; we keep the changes, so the disk still frees.
+        let (home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Done"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "submitted", |s| s.tasks.iter().any(|t| t.id == "t1" && t.state == TaskState::Verifying));
+        service.handle("task.accept", &json!({"taskId": "t1", "integrate": true})).unwrap();
+        let snap = wait_for(&service, "completed", |s| s.tasks[0].state == TaskState::Completed);
+        let a = snap.attempts[0].clone();
+        std::fs::write(worktree_of(&snap, &a).join("late.txt"), "written after the commit\n").unwrap();
+        assert_eq!(service.handle("workspace.gc", &json!({})).unwrap()["removed"], 1);
+        let w = service.snapshot().unwrap().workspaces.into_iter().find(|w| Some(&w.id) == a.workspace_id.as_ref()).unwrap();
+        assert!(!worktree_of(&snap, &a).exists());
+        assert_eq!(workspaces::git(&home.repo_path(), &["show", &format!("refs/heads/{}:late.txt", w.branch)]).unwrap(), "written after the commit");
+        assert!(event_kinds(&service).contains(&"workspace.rescued".to_string()));
     }
 
     #[test]
@@ -7366,7 +7453,9 @@ mod tests {
         // FB-051: Alba kept reinventing shaders through three notes she read only at the end.
         let r = service.handle("task.note", &json!({"taskId": "t1", "text": "port shaders/neon.gdshader from 91de469, do not write new ones"})).unwrap();
         assert_eq!(r["redirected"], true);
+        assert_eq!(r["delivery"], "now");
         let snap = wait_for(&service, "submitted", |s| s.attempts[0].state == AttemptState::Submitted);
+        assert!(event_kinds(&service).contains(&"note.delivered".to_string()), "the delivery is on record");
         assert_eq!(snap.attempts.len(), 1, "the same attempt and session go on");
         assert_eq!(snap.attempts[0].turns, 2);
         let last = mock.prompts().last().cloned().unwrap();
@@ -7582,6 +7671,30 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_is_told_by_its_cause_apart_from_the_work() {
+        assert_eq!(failure_class("UsageLimitReachedError: try again in 2 hours"), "usage_limit");
+        assert_eq!(failure_class("timed out"), "timeout");
+        assert_eq!(failure_class("TRANSPORT_LOST: the harness ended without a result"), "harness_lost");
+        assert_eq!(failure_class("cancelled by the user"), "cancelled");
+        assert_eq!(failure_class("parse error in parser.gd"), "work");
+    }
+
+    #[test]
+    fn a_usage_limit_is_the_accounts_so_every_member_of_the_harness_waits_a_little_apart() {
+        let (_home, service, quest_id) = setup(MockBehaviour::Fail("UsageLimitReachedError: try again in 3 hours".into()));
+        service.handle("member.add", &json!({"id": "bela", "harness": "mock", "roles": ["implementer"], "model": "mock-fast"})).unwrap();
+        service.handle("member.add", &json!({"id": "cato", "harness": "mock", "roles": ["reviewer"], "model": "mock-fast"})).unwrap();
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Work", "maxAttempts": 2})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "all paused", |s| s.paused_members.len() == 3);
+        let untils: Vec<&str> = snap.paused_members.iter().map(|p| p.until.as_str()).collect();
+        assert_eq!(untils.iter().collect::<std::collections::HashSet<_>>().len(), 3, "each comes back at its own moment: {untils:?}");
+        let events = service.store.lock().unwrap().events_of_kind("member.paused", 10).unwrap();
+        assert_eq!(events.len(), 1, "one notice for the account");
+        assert_eq!(events[0].payload["alsoPaused"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
     fn a_verifier_cut_by_time_runs_again_with_more_time() {
         // FB-072: godot-tests timed out at 600 s with five members working, and passed in 11 min alone.
         let home = TempHome::new();
@@ -7604,6 +7717,58 @@ mod tests {
         let v = &snap.attempts[0].verifier_results[0];
         assert_eq!(v.status, "passed", "{}", v.tail);
         assert!(service.store.lock().unwrap().events_of_kind("verifier.retrying", 10).unwrap().len() == 1);
+    }
+
+    /// A guild whose project has one required verifier running `script`, and a task that is done when it ends.
+    fn with_verifier_script(script: &str) -> (TempHome, Arc<Service>) {
+        let home = TempHome::new();
+        let repo = home.repo();
+        let path = home.0.join("check.py");
+        std::fs::write(&path, script.replace("MARKER", &home.0.join("ran").display().to_string())).unwrap();
+        std::fs::create_dir_all(repo.join(".guild")).unwrap();
+        std::fs::write(repo.join(".guild/guild.toml"), format!("[[verifiers]]\nid = \"check\"\nargv = [\"{PYTHON}\", '{}']\nrequired = true\ntimeout_seconds = 20\n", path.display())).unwrap();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(10), cancel_timeout: Duration::from_millis(500), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        service.register(Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() })));
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"], "model": "mock-fast"})).unwrap();
+        let quest = service.handle("quest.create", &json!({"projectId": "p", "title": "Checked"})).unwrap();
+        service.handle("task.create", &json!({"questId": quest["id"], "id": "t1", "title": "Checked"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest["id"]})).unwrap();
+        (home, service)
+    }
+
+    #[test]
+    fn a_verifier_that_could_not_run_now_runs_again_without_judging_the_candidate() {
+        // Gas City's exit 75: a busy port or a lock is no verdict. It fails the first time and passes the second.
+        let (_home, service) = with_verifier_script("import os, sys\nm = r'MARKER'\nif os.path.exists(m): sys.exit(0)\nopen(m, 'w').write('x')\nsys.exit(75)\n");
+        let snap = wait_for(&service, "verified", |s| s.attempts.first().is_some_and(|a| !a.verifier_results.is_empty()));
+        let v = &snap.attempts[0].verifier_results[0];
+        assert_eq!((v.status.as_str(), v.exit_code), ("passed", Some(0)), "{}", v.tail);
+        assert_eq!(service.store.lock().unwrap().events_of_kind("verifier.retrying", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_verifier_that_always_says_it_could_not_run_is_an_error_after_three_tries() {
+        let (_home, service) = with_verifier_script("import sys\nsys.exit(75)\n");
+        let snap = wait_for(&service, "verified", |s| s.attempts.first().is_some_and(|a| !a.verifier_results.is_empty()));
+        let v = &snap.attempts[0].verifier_results[0];
+        assert_eq!(v.status, "error");
+        assert!(v.tail.contains("three tries"), "{}", v.tail);
+        assert_eq!(service.store.lock().unwrap().events_of_kind("verifier.retrying", 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_check_that_cannot_run_here_is_neither_a_pass_nor_a_failure() {
+        // Gas City #8377: a missing module on this machine spent the attempts of good work. Exit 78 asks for a reading.
+        let (_home, service) = with_verifier_script("import sys\nprint('godot is not installed on this machine')\nsys.exit(78)\n");
+        let snap = wait_for(&service, "verified", |s| s.attempts.first().is_some_and(|a| !a.verifier_results.is_empty()));
+        let v = &snap.attempts[0].verifier_results[0];
+        assert_eq!((v.status.as_str(), v.exit_code), ("cannot-run", Some(78)));
+        assert!(v.tail.contains("godot is not installed"));
+        assert_eq!(snap.tasks[0].attempts_made, 1, "the attempt is not spent: it waits for someone to read it");
+        assert_eq!(snap.attempts[0].state, AttemptState::Submitted);
     }
 
     #[test]
