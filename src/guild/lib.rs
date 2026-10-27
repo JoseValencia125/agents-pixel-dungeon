@@ -21,6 +21,7 @@ pub mod paths;
 pub mod platform;
 pub mod policy;
 pub mod scheduler;
+pub mod sentinel;
 pub mod service;
 pub mod store;
 pub mod workspaces;

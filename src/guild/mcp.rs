@@ -85,7 +85,9 @@ fn tools() -> Value {
                 "timeoutMinutes": {"type": "integer", "description": "How long an attempt may work on it (default the guild's, 30)"},
                 "evidence": {"type": "array", "items": {"type": "string"}, "description": "Images the member must leave in its worktree (paths relative to it, * in the name): kept with the candidate even if git ignores them, shown to you and the user"},
                 "spike": {"type": "boolean", "description": "A short trial (30 min by default) whose captures and report are the result: accepting it never integrates it"}}}}}}},
-        {"name": "guild_wait", "description": "Block until a task of the quest (without questId, of any quest under way) needs you (candidate ready, permission asked, failed, blocked) or the quest ends, or until the timeout. Returns the quest's status.",
+        {"name": "guild_ack", "description": "Say you have a wait the guild flagged (guild_status lists them under `waiting`): no more notices or alerts for it, it stays listed until it ends. id: the wait's id or its task's.",
+         "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}},
+        {"name": "guild_wait", "description": "Block until a task of the quest (without questId, of any quest under way) needs you (candidate ready, permission asked, failed, blocked, or something that has waited too long and nobody moves) or the quest ends, or until the timeout. Returns the quest's status.",
          "inputSchema": {"type": "object", "properties": {"questId": {"type": "string", "description": "Without it, every quest under way"}, "timeoutSeconds": {"type": "integer", "description": "Default 300, at most 540"}}}},
         {"name": "guild_task", "description": "One task in full: instructions, notes, attempts, failures, verifier results, candidate size, pending permission (whole command, file and whether it is inside the worktree) and the end of the member's transcript. full: true gives the member's whole last reply and every verifier's whole output.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id, "full": {"type": "boolean"}}}},
@@ -181,6 +183,33 @@ pub fn task_line(snap: &Snapshot, t: &Task) -> String {
     s
 }
 
+/// How long ago, in the units a person reads: "12 min", "3 h", "2 days".
+pub fn ago(since: &str) -> String {
+    let Ok(at) = chrono::DateTime::parse_from_rfc3339(since) else { return "?".into() };
+    let secs = (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds().max(0);
+    match secs { 0..=119 => format!("{secs} s"), 120..=7199 => format!("{} min", secs / 60), 7200..=172_799 => format!("{} h", secs / 3600), _ => format!("{} days", secs / 86_400) }
+}
+
+/// What waits and nobody moves (the sentinel's stalls), oldest first; the ones paused on purpose
+/// in one line each at the end. `quest` limits it to one quest.
+pub fn stall_lines(snap: &Snapshot, quest: Option<&str>) -> String {
+    let mut stalls: Vec<&crate::sentinel::Stall> = snap.stalls.iter().filter(|s| quest.is_none_or(|q| s.quest_id == q)).collect();
+    if stalls.is_empty() { return String::new(); }
+    stalls.sort_by(|a, b| a.since.cmp(&b.since));
+    let mut out = String::new();
+    let live: Vec<_> = stalls.iter().filter(|s| !s.dormant).collect();
+    if !live.is_empty() {
+        out.push_str(&format!("waiting ({}):\n", live.len()));
+        for s in live {
+            let what = if s.task_id.is_empty() { s.quest_id.clone() } else { s.task_id.clone() };
+            out.push_str(&format!("- {what} · {} for {} · {} — {}{}{}\n", s.kind.as_str().replace('_', " "), ago(&s.since), s.owner, s.reason.trim(),
+                if s.acked { " (someone has it)" } else { "" }, if s.alerted && !s.acked { " ⚠ the user was told" } else { "" }));
+        }
+    }
+    for s in stalls.iter().filter(|s| s.dormant) { out.push_str(&format!("  dormant, its quest is paused: {} {} — {}\n", s.quest_id, ago(&s.since), s.reason.trim())); }
+    out
+}
+
 fn quest_report(snap: &Snapshot, q: &Quest) -> String {
     let tasks: Vec<&Task> = snap.tasks.iter().filter(|t| t.quest_id == q.id).collect();
     let done = tasks.iter().filter(|t| t.state == TaskState::Completed).count();
@@ -235,6 +264,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
             if let Some(free) = snap.disk_low {
                 out.push_str(&format!("⚠ disk: {:.1} GB free — no work starts until there is room. Finished worktrees are removed by themselves (`guild gc` now); tell the user if it stays low.\n", free as f64 / (1u64 << 30) as f64));
             }
+            out.push_str(&stall_lines(&snap, s("questId").as_deref()));
             for p in &snap.projects {
                 out.push_str(&format!("project {} · {} · {}\n", p.id, p.name, p.repo_path));
                 let gallery = crate::gallery::gallery_path(&p.id);
@@ -313,9 +343,11 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 let quests: Vec<&Quest> = snap.quests.iter().filter(|q| watched.contains(&q.id)).collect();
                 let ended = quests.iter().all(|q| matches!(q.state, QuestState::Completed | QuestState::Cancelled));
                 let waiting = snap.tasks.iter().any(|t| watched.contains(&t.quest_id) && needs(&snap, t).is_some());
-                if ended || waiting || started.elapsed() >= timeout {
-                    let why = if ended { if quests.len() == 1 { "the quest ended" } else { "the quests ended" } } else if waiting { "something needs you" } else { "timeout, still working" };
-                    let report: String = quests.iter().map(|q| quest_report(&snap, q)).collect();
+                // A wait that lasts: the sentinel has already tried and sent a notice, and nobody has it.
+                let stalled = snap.stalls.iter().any(|s| watched.contains(&s.quest_id) && s.notices > 0 && !s.acked && !s.dormant);
+                if ended || waiting || stalled || started.elapsed() >= timeout {
+                    let why = if ended { if quests.len() == 1 { "the quest ended" } else { "the quests ended" } } else if waiting { "something needs you" } else if stalled { "something has waited too long: guild_decide, or guild_ack if you have it" } else { "timeout, still working" };
+                    let report: String = stall_lines(&snap, None) + &quests.iter().map(|q| quest_report(&snap, q)).collect::<String>();
                     return Ok(format!("{why}\n{report}"));
                 }
                 sleep(Duration::from_secs(3));
@@ -404,6 +436,10 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 other => return Err(format!("unknown decision {other}")),
             };
             Ok(format!("done: {r}"))
+        }
+        "guild_ack" => {
+            let r = call("stall.ack", json!({"id": need("id")?, "by": "delegate"}))?;
+            Ok(format!("acknowledged: {}", r["acked"]))
         }
         "guild_permission" => {
             let snap = snapshot(call)?;
