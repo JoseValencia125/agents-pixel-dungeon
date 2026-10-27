@@ -198,6 +198,8 @@ pub fn kiro(home: &Path, plan: u32, now: chrono::DateTime<chrono::Local>) -> Opt
         .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
         .map(|session| kiro_month_credits(&session, &month))
         .sum();
+    // The guild's members run the v3 engine, whose sessions live elsewhere.
+    let spent = spent + guild::harness::kiro_acp::v3_credits(home, None, Some(&month)).0;
     let start_next = next_month_start(now);
     let meters = if plan > 0 { vec![Meter { window: "mes", used: (spent / plan as f64 * 100.0) as f32, resets: start_next }] } else { vec![] };
     Some(HarnessUsage { harness: "kiro", meters, credits: Some((spent, (plan > 0).then_some(plan))) })

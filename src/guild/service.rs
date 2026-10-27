@@ -311,12 +311,15 @@ impl Service {
             });
             let decision = store.decisions_of_task(&a.task_id)?.into_iter().rev().find(|d| d.winner_attempt_id.is_some());
             let label_score = decision.as_ref().and_then(|d| d.candidates.iter().find(|c| c.attempt_id == a.id)).and_then(|c| c.score);
+            // Kiro's spend, from the sessions it kept in this attempt's worktree.
+            let credits = (a.harness.as_str() == "kiro").then(|| a.workspace_id.as_ref().and_then(|w| store.workspace(w).ok().flatten()))
+                .flatten().map(|w| crate::harness::kiro_acp::v3_credits(&dirs::home_dir().unwrap_or_default(), Some(&w.path), None));
             let record = AttemptRecord {
                 attempt_id: a.id.clone(), task_id: a.task_id.clone(), quest_id: a.quest_id.clone(), project_id: a.project_id.clone(),
                 task_title: task.as_ref().map(|t| t.title.clone()).unwrap_or_default(), role: task.as_ref().map(|t| t.role.clone()).unwrap_or_default(),
                 strategy: task.as_ref().map(|t| t.strategy.kind).unwrap_or_default(), candidates: task.as_ref().map(|t| t.candidates).unwrap_or(1), selection: task.as_ref().map(|t| t.strategy.selection()).unwrap_or_default(),
                 kind: a.kind, member_id: a.member_id.clone(), harness: a.harness.clone(), model: a.model_effective.clone().or(a.model_requested.clone()), result: to,
-                attempt_number: task.as_ref().map(|t| t.attempts_made).unwrap_or(0), duration_ms, turns: a.turns, resumed: a.resumed, usage: None,
+                attempt_number: task.as_ref().map(|t| t.attempts_made).unwrap_or(0), duration_ms, turns: a.turns, resumed: a.resumed, usage: credits.map(|(c, t)| json!({"credits": c, "turns": t})),
                 files_changed: a.candidate.as_ref().map(|c| c.files_changed), insertions: a.candidate.as_ref().map(|c| c.insertions), deletions: a.candidate.as_ref().map(|c| c.deletions),
                 verifiers_passed: a.verifier_results.iter().filter(|v| v.status == "passed").count() as u32, verifiers_failed: a.verifier_results.iter().filter(|v| v.status != "passed").count() as u32,
                 judge_score: label_score, winner: decision.as_ref().map(|d| d.winner_attempt_id.as_deref() == Some(a.id.as_str())).filter(|_| a.kind == AttemptKind::Work),
@@ -337,6 +340,7 @@ impl Service {
                 "verifiersPassed": a.verifier_results.iter().filter(|v| v.status == "passed").count(),
                 "verifiersFailed": a.verifier_results.iter().filter(|v| v.status != "passed").count(),
                 "failure": a.failure,
+                "credits": credits.map(|c| c.0),
             })));
         }
         Ok(a)

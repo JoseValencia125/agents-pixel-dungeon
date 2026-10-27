@@ -799,13 +799,24 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
             hover.on_hover_text(agent.label());
             ui.label(mono(&agent.name, 12.0).strong().color(Color32::WHITE));
             if let Some(model) = &state.model { model_chip(ui, model); }
+            // Guild mode sits on the left, away from the buttons pressed all the time.
+            if !standalone && !state.guild_lead {
+                let pink = Color32::from_rgb(181, 80, 136);
+                let clicked = if wide {
+                    ui.add(egui::Button::new(mono(&tr("⚔ Modo guild"), 11.0).color(pink)).fill(alpha(pink, 0.08)).stroke(Stroke::new(1.0_f32, alpha(pink, 0.35))).corner_radius(CornerRadius::same(4)))
+                        .on_hover_text(tr("Que este agente sea el orquestador de la guild: arma el equipo, reparte el trabajo y lleva el diseño")).clicked()
+                } else {
+                    flat_button(ui, mono("⚔", 12.0).color(Color32::from_rgb(214, 120, 180))).on_hover_text(tr("Modo guild: que este agente sea el orquestador de la guild")).clicked()
+                };
+                if clicked && !sending { action.guild = true; }
+            }
             // Only a reached limit says more than the dot: when it resets.
             let mut header = agent.project.clone();
             if let Some(left) = agent.limit_left(crate::herdr::unix_now()).filter(|_| agent.status == "limited") {
                 header += &format!(" · {}", trf("se reinicia en {}", &[&crate::scene::countdown(left)]));
             }
             // The buttons on the right keep their room; the header ends in "…".
-            let reserve = if wide { 250.0 } else { 120.0 } + if state.pull.is_some() { 60.0 } else { 0.0 };
+            let reserve = if wide { 150.0 } else { 90.0 } + if state.pull.is_some() { 60.0 } else { 0.0 };
             let room = (ui.available_width() - reserve).max(0.0);
             ui.scope(|ui| {
                 ui.set_max_width(room);
@@ -834,9 +845,6 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                     if button(ui, ">_ Terminal", Color32::from_rgb(254, 174, 52)).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
                         action.terminal = true;
                     }
-                    if !standalone && !state.guild_lead && button(ui, &tr("⚔ Modo guild"), Color32::from_rgb(181, 80, 136)).on_hover_text(tr("Que este agente sea el orquestador de la guild: arma el equipo, reparte el trabajo y lleva el diseño")).clicked() && !sending {
-                        action.guild = true;
-                    }
                     return;
                 }
                 if flat_button(ui, mono("x", 13.0).color(Color32::WHITE)).on_hover_text(tr("Cerrar")).clicked() { action.close = true; }
@@ -845,9 +853,6 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                 }
                 if flat_button(ui, mono(">_", 11.0).strong().color(Color32::from_gray(200))).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
                     action.terminal = true;
-                }
-                if !standalone && !state.guild_lead && flat_button(ui, mono("⚔", 12.0).color(Color32::from_rgb(214, 120, 180))).on_hover_text(tr("Modo guild: que este agente sea el orquestador de la guild")).clicked() && !sending {
-                    action.guild = true;
                 }
                 // The console's own text size.
                 if flat_button(ui, mono("A+", 11.0).color(Color32::from_gray(200))).on_hover_text(format!("{} (⌘⇧+)", tr("Consola más grande"))).clicked() { action.console_step = 1; }
