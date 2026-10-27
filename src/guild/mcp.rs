@@ -94,7 +94,7 @@ fn tools() -> Value {
         {"name": "guild_diff", "description": "The diff of a task's latest candidate.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id}}},
         {"name": "guild_decide", "description": "Decide on a task: accept (integrates the candidate into the quest's branch; a spike is completed without integrating), reject (with a reason; the member retries if attempts remain), retry (a candidate still waiting is rejected with the reason; a task at work starts again on its member's current harness and model, from what it wrote, without costing an attempt), or cancel (in one step; replacedBy: the tasks that waited for it wait for that task instead). accept with attemptId and override: true takes a verified attempt that was failed (by the orchestrator, a judge or a reject).",
-         "inputSchema": {"type": "object", "required": ["taskId", "decision"], "properties": {"taskId": task_id, "decision": {"type": "string", "enum": ["accept", "reject", "retry", "cancel"]}, "reason": {"type": "string"}, "attemptId": {"type": "string"}, "override": {"type": "boolean"}, "replacedBy": {"type": "string", "description": "With cancel: a task id of the same quest"}}}},
+         "inputSchema": {"type": "object", "required": ["taskId", "decision"], "properties": {"taskId": task_id, "decision": {"type": "string", "enum": ["accept", "reject", "retry", "cancel"]}, "reason": {"type": "string"}, "attemptId": {"type": "string"}, "override": {"type": "boolean"}, "replacedBy": {"type": "string", "description": "With cancel: a task id of the same quest"}, "timeoutMinutes": {"type": "integer", "description": "With retry: a new time limit for the task, in minutes"}, "instructions": {"type": "string", "description": "With retry: new instructions for the task"}}}},
         {"name": "guild_permission", "description": "Answer a member's pending permission request with one of its option ids (from guild_task).",
          "inputSchema": {"type": "object", "required": ["taskId", "optionId"], "properties": {"taskId": task_id, "optionId": {"type": "string"}}}},
     ])
@@ -104,8 +104,15 @@ fn snapshot(call: Call) -> Result<Snapshot, String> {
     serde_json::from_value(call("guild.snapshot", json!({}))?).map_err(|e| e.to_string())
 }
 
+/// The attempt a task's line is about: the one at work or waiting for an
+/// answer if there is one, else the latest (FB-073: a member kept waiting
+/// showed in its own line and not in its task's).
 fn latest_attempt<'a>(snap: &'a Snapshot, task_id: &str) -> Option<&'a Attempt> {
-    snap.attempts.iter().filter(|a| a.task_id == task_id).max_by(|a, b| a.created_at.cmp(&b.created_at))
+    let of_task = || snap.attempts.iter().filter(|a| a.task_id == task_id);
+    of_task().filter(|a| matches!(a.state, AttemptState::WaitingInput))
+        .chain(of_task().filter(|a| matches!(a.state, AttemptState::Provisioning | AttemptState::Running)))
+        .next()
+        .or_else(|| of_task().max_by(|a, b| a.created_at.cmp(&b.created_at)))
 }
 
 /// What a task wants from the orchestrator, if anything.
@@ -124,15 +131,37 @@ fn needs(snap: &Snapshot, t: &Task) -> Option<&'static str> {
     }
 }
 
+/// Why a Ready task has not started: its member does not exist, is off,
+/// is busy, or its harness is unavailable; or nobody has its role (FB-068).
+fn why_waiting(snap: &Snapshot, t: &Task) -> Option<String> {
+    if t.state != TaskState::Ready { return None; }
+    let busy = |m: &Member| snap.attempts.iter().any(|a| a.member_id == m.id && a.state.is_active());
+    let usable = |m: &Member| m.enabled && m.roles.contains(&t.role);
+    if let Some(id) = &t.member_id {
+        let Some(m) = snap.members.iter().find(|m| &m.id == id) else { return Some(format!("its member {id} does not exist (`task set --member`)")) };
+        if !m.enabled { return Some(format!("its member {} is disabled", m.name)); }
+        if !m.roles.contains(&t.role) { return Some(format!("its member {} does not have the role {}", m.name, t.role)); }
+        if snap.harnesses.iter().any(|h| h.kind == m.harness && !h.available) { return Some(format!("{}'s harness {} is unavailable", m.name, m.harness)); }
+        if snap.paused_members.iter().any(|p| p.member_id == m.id) { return Some(format!("its member {} is paused: its harness hit a usage limit", m.name)); }
+        return busy(m).then(|| format!("its member {} is busy with another task", m.name));
+    }
+    let with_role: Vec<&Member> = snap.members.iter().filter(|m| usable(m)).collect();
+    if with_role.is_empty() { return Some(format!("no enabled member has the role {}", t.role)); }
+    with_role.iter().all(|m| busy(m) || snap.paused_members.iter().any(|p| p.member_id == m.id)).then(|| format!("every member with the role {} is busy or paused", t.role))
+}
+
 pub fn task_line(snap: &Snapshot, t: &Task) -> String {
     let a = latest_attempt(snap, &t.id);
     let who = a.and_then(|a| snap.members.iter().find(|m| m.id == a.member_id)).map(|m| format!(" · {} ({})", m.name, m.harness)).unwrap_or_default();
-    let mut s = format!("- {} [{}] {:?}{who}: {}", t.id, t.role, t.state, t.title);
+    // A member waiting for an answer says so in the task's own line (FB-073).
+    let waiting = a.filter(|a| a.state == AttemptState::WaitingInput).map(|a| format!(" (waiting-input, attempt {})", a.id)).unwrap_or_default();
+    let mut s = format!("- {} [{}] {:?}{waiting}{who}: {}", t.id, t.role, t.state, t.title);
     if let Some(a) = a {
         if !a.summary.is_empty() { s.push_str(&format!(" — {}", a.summary.chars().take(160).collect::<String>())); }
         if let Some(f) = &a.failure { s.push_str(&format!(" — failure: {f}")); }
     }
     if let Some(r) = &t.block_reason { s.push_str(&format!(" — {r}")); }
+    if let Some(w) = why_waiting(snap, t) { s.push_str(&format!(" — waiting: {w}")); }
     if let Some(n) = needs(snap, t) { s.push_str(&format!("  ⟵ NEEDS YOU: {n}")); }
     // How long a member has been kept waiting, so the oldest is answered first.
     if let Some(p) = a.and_then(|a| a.pending_permission.as_ref()) {
@@ -213,7 +242,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
             let busy: Vec<&str> = snap.attempts.iter().filter(|a| a.state.is_active()).map(|a| a.member_id.as_str()).collect();
             out.push_str("members:\n");
             for m in snap.members.iter().filter(|m| m.enabled) {
-                out.push_str(&format!("- {} [{}] ({} · {}) roles {} · {}\n", m.name, m.id, m.harness, m.model_id.as_deref().unwrap_or("default model"), m.roles.join(", "), if busy.contains(&m.id.as_str()) { "busy" } else { "free" }));
+                out.push_str(&format!("- {} [{}] ({} · {}) roles {} · {}\n", m.name, m.id, m.harness, m.model_id.as_deref().unwrap_or("default model"), m.roles.join(", "), if let Some(p) = snap.paused_members.iter().find(|p| p.member_id == m.id) { format!("paused until {} (its harness hit a usage limit; no attempt was spent)", p.until) } else if busy.contains(&m.id.as_str()) { "busy".into() } else { "free".into() }));
             }
             if snap.members.iter().all(|m| !m.enabled) { out.push_str("- none: add members in the guild window or with `guild member add`\n"); }
             // Who turned a member on or off, so a change is never a mystery.
@@ -367,7 +396,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
             let r = match need("decision")?.as_str() {
                 "accept" => call("task.accept", json!({"taskId": task_id, "integrate": true, "reason": reason, "attemptId": s("attemptId"), "override": args.get("override").and_then(Value::as_bool).unwrap_or(false)}))?,
                 "reject" => call("task.reject", json!({"taskId": task_id, "reason": reason}))?,
-                "retry" => call("task.retry", json!({"taskId": task_id, "reason": reason}))?,
+                "retry" => call("task.retry", json!({"taskId": task_id, "reason": reason, "timeoutMinutes": args.get("timeoutMinutes").and_then(Value::as_u64), "instructions": s("instructions")}))?,
                 "cancel" => call("task.cancel", json!({"taskId": task_id, "replacedBy": s("replacedBy")}))?,
                 other => return Err(format!("unknown decision {other}")),
             };

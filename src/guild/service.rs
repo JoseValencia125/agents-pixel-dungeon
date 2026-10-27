@@ -103,6 +103,8 @@ pub struct Service {
     sweeping: Arc<AtomicBool>,
     /// The free bytes while below the minimum.
     disk_low: Mutex<Option<u64>>,
+    /// Members that reached their harness's usage limit, until when and why (FB-071).
+    paused: Mutex<HashMap<String, (chrono::DateTime<chrono::Utc>, String)>>,
     pub settings: Settings,
     pub stop: Arc<AtomicBool>,
     log_file: Mutex<Option<std::fs::File>>,
@@ -155,6 +157,7 @@ impl Service {
             swept: Mutex::new(Instant::now()),
             sweeping: Arc::new(AtomicBool::new(false)),
             disk_low: Mutex::new(None),
+            paused: Mutex::new(HashMap::new()),
             settings,
             stop: Arc::new(AtomicBool::new(false)),
             log_file: Mutex::new(None),
@@ -452,6 +455,8 @@ impl Service {
         for t in tasks.iter().filter(|t| t.candidates > 1 && t.state == TaskState::Running && running_quests.contains(&t.quest_id) && t.attempts_made < t.candidates) {
             slots.push((t, t.candidates - t.attempts_made));
         }
+        // A task made a moment ago waits to be adjusted (`task set`) before a member takes it (FB-069).
+        slots.retain(|(t, _)| chrono::DateTime::parse_from_rfc3339(&t.created_at).ok().is_none_or(|at| (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).to_std().is_ok_and(|age| age >= CREATE_GRACE)));
         if slots.is_empty() || !room { return Ok(()); }
         let available = self.available_harnesses();
         for (task, wanted) in slots { for _ in 0..wanted {
@@ -462,6 +467,7 @@ impl Service {
                 let members = store.members()?;
                 // Runners of one race never share a member; a retry may reuse one.
                 let mut busy: Vec<String> = store.active_attempts()?.into_iter().map(|a| a.member_id).collect();
+                busy.extend(self.paused_members().into_iter().map(|p| p.member_id));
                 if task.candidates > 1 { busy.extend(store.attempts_of_task(&task.id)?.into_iter().map(|a| a.member_id)); }
                 let Some(member) = scheduler::pick_member(task, &members, &busy, &available).cloned() else {
                     let why = if members.iter().any(|m| m.roles.contains(&task.role)) { "no free member" } else { "no member has the role" };
@@ -2142,7 +2148,7 @@ impl Service {
         let role_for_prompt = match attempt.kind { AttemptKind::Judge => "judge".to_string(), AttemptKind::Analysis => "design-analyst".to_string(), AttemptKind::Work => task.role.clone() };
         let role_prompt = if member.role_prompt.trim().is_empty() || attempt.kind != AttemptKind::Work { config::default_role_prompt(&role_for_prompt) } else { member.role_prompt.clone() };
         let _ = std::fs::create_dir_all(crate::paths::scratch_dir(attempt_id));
-        let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_requested.clone(), mode: member.mode.clone(), role_prompt: role_prompt.clone(), env: vec![("GUILD_THREADS".into(), self.threads_for(&project).to_string())] };
+        let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_requested.clone(), mode: member.mode.clone(), role_prompt: role_prompt.clone(), env: vec![("GUILD_THREADS".into(), self.threads_for(&project).to_string()), ("GUILD_ATTEMPT".into(), attempt_id.to_string())] };
         let session = adapter.create_session(&options).map_err(|e| ApiError::new("harness", e.to_string()))?;
         let design = self.store.lock().unwrap().design(&project.id)?;
         let prompt = match attempt.kind {
@@ -2173,7 +2179,7 @@ impl Service {
         let adapter = self.adapter(member.harness.clone())?;
         let role_prompt = if member.role_prompt.trim().is_empty() { config::default_role_prompt(&task.role) } else { member.role_prompt.clone() };
         let threads = self.store.lock().unwrap().project(&attempt.project_id)?.map(|p| self.threads_for(&p)).unwrap_or(1);
-        let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_effective.clone().or(attempt.model_requested.clone()), mode: member.mode.clone(), role_prompt, env: vec![("GUILD_THREADS".into(), threads.to_string())] };
+        let options = SessionOptions { cwd: PathBuf::from(&workspace.path), model_id: attempt.model_effective.clone().or(attempt.model_requested.clone()), mode: member.mode.clone(), role_prompt, env: vec![("GUILD_THREADS".into(), threads.to_string()), ("GUILD_ATTEMPT".into(), attempt_id.to_string())] };
         let session = adapter.resume_session(&options, native_id).map_err(|e| ApiError::new("harness", e.to_string()))?;
         self.update_attempt(attempt_id, |a| a.resumed += 1)?;
         self.emit(Event::new("session.resumed", "harness").about_attempt(&attempt).with(json!({"nativeId": native_id, "harness": member.harness.clone()})));
@@ -2234,7 +2240,7 @@ impl Service {
             let redirected = matches!(&outcome, TurnOutcome::Completed { stop_reason } if stop_reason == "redirected");
             let done = matches!(&outcome, TurnOutcome::Completed { stop_reason } if stop_reason != "interrupted");
             if attempt.kind != AttemptKind::Work || !done || self.cancel_requested(attempt_id) { break; }
-            let in_folders = || folders.as_ref().map(|wt| crate::platform::processes_in(&[wt.as_path(), scratch.as_path()])).unwrap_or_default();
+            let in_folders = || crate::platform::attempt_processes(attempt_id, &folders.iter().map(PathBuf::as_path).chain([scratch.as_path()]).collect::<Vec<_>>());
             // What it left running (a render, a build): the guild waits for it and
             // wakes the member when it ends, instead of the member sleeping blind (FB-072).
             let mut running = in_folders();
@@ -2282,7 +2288,19 @@ impl Service {
         }
         let stopped = adapter.stop(&session).unwrap_or(false);
         self.emit(Event::new("session.closed", "harness").about_attempt(attempt).with(json!({"confirmed": stopped})));
+        // What it still has running is no one's now: a hung engine must not outlive its attempt (FB-075).
+        self.reap_processes(attempt, folders.as_deref(), &scratch);
         self.finish_attempt_of(attempt_id, attempt.generation, outcome)
+    }
+
+    /// Stop what an attempt left running in its worktree, its scratch folder or
+    /// anywhere else its mark reaches (FB-075), and say so.
+    fn reap_processes(&self, attempt: &Attempt, worktree: Option<&Path>, scratch: &Path) {
+        let dirs: Vec<&Path> = worktree.into_iter().chain([scratch]).collect();
+        let before = crate::platform::attempt_processes(&attempt.id, &dirs);
+        if before.is_empty() { return; }
+        let n = crate::platform::reap_attempt_processes(&attempt.id, &dirs, REAP_GRACE);
+        self.emit(Event::new("attempt.processes_stopped", "guild").about_attempt(attempt).with(json!({"processes": describe_processes(&before), "count": n})));
     }
 
     /// A result from a driver that was superseded (the attempt was resumed
@@ -2470,6 +2488,11 @@ impl Service {
                     Some(cmd) if granted.commands.contains(&cmd) && judged != crate::policy::Verdict::Refuse => crate::policy::Verdict::Allow,
                     _ => judged,
                 };
+                // A member may stop what it started itself, and only that (FB-075).
+                let verdict = match crate::policy::command_of(&title, &detail) {
+                    Some(cmd) if verdict != crate::policy::Verdict::Allow && self.kills_only_own(attempt_id, &worktree, &cmd) => crate::policy::Verdict::Allow,
+                    _ => verdict,
+                };
                 if let Some(option) = crate::policy::option_for(&verdict, &title, &options) {
                     let by = if verdict == crate::policy::Verdict::Allow { "policy" } else { "policy-refused" };
                     if let Err(e) = self.permission_respond(&json!({"attemptId": attempt_id, "requestId": request_id, "optionId": option, "by": by})) {
@@ -2482,6 +2505,28 @@ impl Service {
             }
             HarnessEvent::Raw(_) => {}
         }
+    }
+
+    /// Members waiting for their harness's usage limit to lift; the ones whose time came are let back.
+    fn paused_members(&self) -> Vec<PausedMember> {
+        let mut paused = self.paused.lock().unwrap();
+        let now = chrono::Utc::now();
+        paused.retain(|_, (until, _)| *until > now);
+        paused.iter().map(|(id, (until, reason))| PausedMember { member_id: id.clone(), until: until.to_rfc3339(), reason: reason.clone() }).collect()
+    }
+
+    /// Whether `cmd` is a `kill` of processes the attempt itself left running
+    /// (`kill 123`, `kill -9 123 456`), nothing else.
+    fn kills_only_own(&self, attempt_id: &str, worktree: &str, cmd: &str) -> bool {
+        if cmd.contains(|c| ";&|`$<>(){}\n".contains(c)) { return false; }
+        let mut words = cmd.split_whitespace();
+        if words.next() != Some("kill") { return false; }
+        let pids: Vec<i32> = words.filter(|w| !w.starts_with('-')).filter_map(|w| w.parse().ok()).collect();
+        if pids.is_empty() || cmd.split_whitespace().skip(1).filter(|w| !w.starts_with('-')).count() != pids.len() { return false; }
+        let scratch = crate::paths::scratch_dir(attempt_id);
+        let tree = Path::new(worktree);
+        let own = crate::platform::attempt_processes(attempt_id, &[tree, scratch.as_path()]);
+        pids.iter().all(|p| own.iter().any(|(pid, _)| pid == p))
     }
 
     /// Record how the turn ended: commit the candidate and run the
@@ -2596,6 +2641,25 @@ impl Service {
                     else { self.ask_orchestrator(attempt_id, crate::orchestrator::DecisionKind::Candidate); }
                 }
                 self.settle_task(&task.id)
+            }
+            TurnOutcome::Failed { reason } if task.candidates <= 1 && is_usage_limit(&reason) => {
+                // The harness has no more to give for a while: that is not the task's failure, so the
+                // attempt is given back and the member waits until the limit lifts (FB-071).
+                self.keep_partial(&attempt, &task, workspace.as_ref());
+                self.move_attempt(attempt_id, AttemptState::Failed, Some(reason.clone()))?;
+                let until = chrono::Utc::now() + usage_limit_wait(&reason);
+                let first = self.paused.lock().unwrap().insert(attempt.member_id.clone(), (until, reason.chars().take(200).collect())).is_none();
+                let store = self.store.lock().unwrap();
+                self.atomic(&store, || {
+                    let mut t = store.task(&task.id)?.ok_or_else(|| ApiError::not_found("task"))?;
+                    t.attempts_made = t.attempts_made.saturating_sub(1);
+                    t.updated_at = now();
+                    store.put_task(&t)?;
+                    self.move_task_locked(&store, &task.id, TaskState::Ready, None)?;
+                    if first { self.emit_locked(&store, Event::new("member.paused", "guild").about_attempt(&attempt).with(json!({"memberId": attempt.member_id, "until": until.to_rfc3339(), "reason": reason}))); }
+                    Ok(())
+                })?;
+                Ok(())
             }
             TurnOutcome::Failed { reason } => {
                 self.keep_partial(&attempt, &task, workspace.as_ref());
@@ -2726,6 +2790,14 @@ impl Service {
             store.put_workspace(&w)?;
             self.emit_locked(&store, Event::new("workspace.removed", "guild").with(json!({"attemptId": w.attempt_id, "path": w.path, "branch": w.branch})));
             removed += 1;
+        }
+        // Folders no workspace owns any more (a crash, a removal that failed) are the same waste (FB-067).
+        let live: Vec<PathBuf> = self.store.lock().unwrap().workspaces()?.into_iter().filter(|w| w.state != WorkspaceState::Removed).map(|w| PathBuf::from(w.path)).collect();
+        for orphan in workspaces::orphan_worktrees(&live, ORPHAN_IDLE) {
+            match std::fs::remove_dir_all(&orphan) {
+                Ok(()) => { removed += 1; self.log(&format!("sweep: removed the orphan worktree {}", orphan.display())); }
+                Err(e) => self.log(&format!("sweep: {}: {e}", orphan.display())),
+            }
         }
         let freed = before.zip(workspaces::free_bytes(&dir)).map(|(b, a)| a.saturating_sub(b)).unwrap_or(0);
         if removed > 0 { self.log(&format!("sweep: removed {removed} finished worktrees, {} MB freed", freed >> 20)); }
@@ -3035,11 +3107,20 @@ impl Service {
             let _ = std::fs::create_dir_all(&evidence_dir);
             let threads = self.store.lock().unwrap().project(&attempt.project_id).ok().flatten().map(|p| self.threads_for(&p)).unwrap_or(1);
             let env = vec![("GUILD_EVIDENCE".to_string(), evidence_dir.display().to_string()), ("GUILD_THREADS".to_string(), threads.to_string())];
-            let (status, code, output) = match workspaces::run_with_timeout_env(Path::new(&workspace.path), &v.argv, v.timeout_seconds, &env) {
+            let run = |timeout: u64| match workspaces::run_with_timeout_env(Path::new(&workspace.path), &v.argv, timeout, &env) {
                 Ok((0, out)) => ("passed", Some(0), out),
                 Ok((code, out)) => ("failed", Some(code), out),
                 Err(e) => ("error", None, e),
             };
+            let mut outcome = run(v.timeout_seconds);
+            // A cut by time on a machine that is busy with the members says little about the
+            // candidate: once the machine is quieter it runs again, with twice the time (FB-072).
+            if outcome.0 == "error" && outcome.2.contains("timed out after") {
+                self.emit(Event::new("verifier.retrying", "verifier").about_attempt(attempt).with(json!({"verifierId": v.id, "afterSeconds": v.timeout_seconds, "why": "timed out; it runs again when the machine is quieter, with twice the time"})));
+                self.wait_for_quiet(attempt_id);
+                outcome = run(v.timeout_seconds.saturating_mul(2));
+            }
+            let (status, code, output) = outcome;
             let artifact = self.write_artifact(Some(attempt_id), &format!("verifier-{}", v.id), output.as_bytes()).ok();
             let tail: String = output.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
             let evidence = self.keep_evidence(attempt_id, &evidence_dir);
@@ -3048,6 +3129,15 @@ impl Service {
             results.push(result);
         }
         results
+    }
+
+    /// Wait, up to `QUIET_WAIT`, until no other attempt is at work: what a verifier
+    /// measures should not depend on the renders beside it (FB-072).
+    fn wait_for_quiet(&self, attempt_id: &str) {
+        let started = Instant::now();
+        while !self.stop.load(Ordering::Relaxed) && started.elapsed() < QUIET_WAIT && self.running.lock().unwrap().keys().any(|k| k != attempt_id) {
+            std::thread::sleep(BACKGROUND_POLL);
+        }
     }
 
     /// The images a verifier left in its evidence folder, registered as
@@ -3160,6 +3250,7 @@ impl Service {
         snap.concurrency = self.concurrency.load(Ordering::Relaxed);
         snap.overlaps = self.overlaps.lock().unwrap().1.clone();
         snap.disk_low = *self.disk_low.lock().unwrap();
+        snap.paused_members = self.paused_members();
         // Each running attempt's work so far against its limit, for whoever watches the time.
         {
             let running = self.running.lock().unwrap();
@@ -3851,6 +3942,22 @@ impl Service {
         Ok(serde_json::to_value(quest).unwrap())
     }
 
+    /// The id of the member a task is pinned to: an id, or the name the lead
+    /// sees, resolved; an unknown one, or one without the task's role, is
+    /// refused, instead of leaving the task Ready for ever (FB-068).
+    fn resolve_member(store: &Store, who: &str, role: &str) -> Result<String, ApiError> {
+        let members = store.members()?;
+        let found = members.iter().find(|m| m.id == who).or_else(|| members.iter().find(|m| m.name.eq_ignore_ascii_case(who)));
+        let Some(m) = found else {
+            let known: Vec<String> = members.iter().map(|m| format!("{} ({})", m.id, m.name)).collect();
+            return Err(ApiError::invalid(format!("no member {who:?}; the members are: {}", known.join(", "))));
+        };
+        if !m.roles.iter().any(|r| r == role) {
+            return Err(ApiError::invalid(format!("{} ({}) does not have the role {role:?}; it has: {}", m.id, m.name, m.roles.join(", "))));
+        }
+        Ok(m.id.clone())
+    }
+
     fn task_create(&self, params: &Value) -> ApiResult {
         let quest_id = p_str(params, "questId")?;
         let store = self.store.lock().unwrap();
@@ -3891,6 +3998,8 @@ impl Service {
             created_at: now(),
             updated_at: now(),
         };
+        let mut task = task;
+        if let Some(who) = task.member_id.clone() { task.member_id = Some(Self::resolve_member(&store, &who, &task.role)?); }
         // A dependency may be in another quest of the project (FB-071).
         let mut all = tasks_of_project(&store, &quest.project_id)?;
         all.retain(|t| t.id != task.id);
@@ -3919,8 +4028,10 @@ impl Service {
         let mut task = store.task(task_id)?.ok_or_else(|| ApiError::not_found(format!("task {task_id}")))?;
         // Waiting on a dependency that failed or was cancelled counts as not started: it can be pointed elsewhere (FB-053).
         let waiting_on_parent = task.state == TaskState::Blocked && task.block_reason.as_deref().is_some_and(|r| r.starts_with("dependency"));
-        if !(matches!(task.state, TaskState::Draft | TaskState::Pending | TaskState::Ready) || waiting_on_parent) || task.attempts_made > 0 {
-            return Err(ApiError::conflict(format!("task {task_id} is {:?}: only a task not yet started can change", task.state)));
+        // A failed task can be corrected before its retry: its timeout, its instructions (FB-074).
+        let failed = task.state == TaskState::Failed;
+        if !(matches!(task.state, TaskState::Draft | TaskState::Pending | TaskState::Ready) || waiting_on_parent || failed) || (task.attempts_made > 0 && !failed) {
+            return Err(ApiError::conflict(format!("task {task_id} is {:?}: only a task not yet started, or a failed one, can change", task.state)));
         }
         let quest = store.quest(&task.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
         if let Some(t) = p_opt(params, "title") { task.title = t; }
@@ -3944,6 +4055,7 @@ impl Service {
             // Ready meant its old dependencies were done; the scheduler judges the new ones.
             if task.state == TaskState::Ready { task.state = TaskState::Pending; }
         }
+        if let Some(who) = task.member_id.clone() { task.member_id = Some(Self::resolve_member(&store, &who, &task.role)?); }
         task.version += 1;
         task.updated_at = now();
         self.atomic(&store, || {
@@ -4227,6 +4339,9 @@ impl Service {
             if !matches!(task.state, TaskState::Failed | TaskState::Blocked | TaskState::Cancelled | TaskState::Verifying | TaskState::Accepted) {
                 return Err(ApiError::conflict(format!("task is {:?}", task.state)));
             }
+            // The retry may come with a longer limit, or what to change (FB-074).
+            if let Some(m) = params.get("timeoutMinutes").and_then(Value::as_u64) { task.timeout_minutes = (m > 0).then_some(m as u32); }
+            if let Some(t) = p_opt(params, "instructions") { task.instructions = t; }
             self.atomic(&store, || {
                 if task.attempts_made >= task.max_attempts { task.max_attempts = task.attempts_made + 1; }
                 task.version += 1;
@@ -4566,6 +4681,10 @@ const GALLERY_EVERY: Duration = Duration::from_secs(20);
 /// How often the guild looks again at which open tasks share files (FB-068).
 const OVERLAP_EVERY: Duration = Duration::from_secs(30);
 
+/// A folder no workspace owns must be this long untouched to count as an orphan:
+/// a worktree is made before its record is (FB-067).
+const ORPHAN_IDLE: Duration = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(30 * 60) };
+
 /// How often finished worktrees are removed (FB-075).
 const SWEEP_EVERY: Duration = Duration::from_secs(60);
 
@@ -4594,6 +4713,9 @@ fn changed_files(ws: &Workspace) -> Vec<String> {
 }
 
 /// How often the guild looks whether what a member left running has ended (FB-072).
+/// How long a process an attempt left running has to end on SIGTERM before SIGKILL (FB-075).
+const REAP_GRACE: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(5) };
+
 const BACKGROUND_POLL: Duration = if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(5) };
 
 /// How long the guild first waits for what a member left running before
@@ -4602,6 +4724,34 @@ const FIRST_BACKGROUND_WAIT: Duration = Duration::from_secs(10 * 60);
 
 /// Processes as the member reads them.
 fn describe_processes(list: &[(i32, String)]) -> Vec<String> { list.iter().take(8).map(|(pid, name)| format!("{name} (pid {pid})")).collect() }
+
+/// How long a new task waits before it is dispatched, for the lead to set its role,
+/// member or timeout first (FB-069).
+const CREATE_GRACE: Duration = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(10) };
+
+/// Whether a failure is the harness running out of what its plan gives (FB-071).
+fn is_usage_limit(reason: &str) -> bool {
+    let r = reason.to_lowercase();
+    ["usagelimitreached", "usage limit", "usage_limit", "rate limit", "rate_limit", "quota", "out of credits", "insufficient credits", "credit limit", "limit reached", "too many requests"].iter().any(|k| r.contains(k))
+}
+
+/// How long to leave a member alone after a usage limit: what the error says
+/// ("in 2 hours", "in 45 minutes"), else half an hour.
+fn usage_limit_wait(reason: &str) -> chrono::Duration {
+    let words: Vec<String> = reason.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect();
+    for (i, w) in words.iter().enumerate() {
+        let Ok(n) = w.parse::<i64>() else { continue };
+        if i == 0 || words[i - 1] != "in" { continue; }
+        let Some(unit) = words.get(i + 1) else { continue };
+        if unit.starts_with("hour") || unit == "hr" || unit == "hrs" || unit == "h" { return chrono::Duration::hours(n.clamp(1, 24 * 7)); }
+        if unit.starts_with("min") || unit == "m" { return chrono::Duration::minutes(n.clamp(1, 24 * 60)); }
+        if unit.starts_with("day") { return chrono::Duration::days(n.clamp(1, 31)); }
+    }
+    chrono::Duration::minutes(30)
+}
+
+/// How long a verifier cut by time waits for the machine to quiet down before it runs again (FB-072).
+const QUIET_WAIT: Duration = if cfg!(test) { Duration::from_millis(200) } else { Duration::from_secs(15 * 60) };
 
 /// How long a spike may run unless it says otherwise (FB-058).
 const SPIKE_MINUTES: u32 = 30;
@@ -5564,6 +5714,8 @@ mod tests {
         let call = |m: &str, p: Value| service.handle(m, &p).map_err(|e| e.message);
         let status = crate::mcp::run_tool("guild_status", &json!({}), &call, &|_| {}).unwrap();
         assert!(status.contains("NEEDS YOU: permission") && status.contains("(waiting 0m0"), "{status}");
+        // FB-073: the task's own line says its member waits, with the attempt.
+        assert!(status.contains("(waiting-input, attempt "), "{status}");
         let perm = snap.attempts[0].pending_permission.clone().unwrap();
         // Its own scratch folder, for what it would have left in /tmp; gone when the attempt ends.
         let scratch = crate::paths::scratch_dir(&a.id);
@@ -5796,7 +5948,9 @@ mod tests {
         wait_for(&service, "no overlap", |s| s.overlaps.is_empty());
     }
 
+    // Finding what runs in a folder needs lsof or /proc: not on Windows.
     #[test]
+    #[cfg(unix)]
     fn what_a_member_left_running_is_waited_for_by_the_guild() {
         let (_home, service, quest_id, mock) = setup_with_mock(MockBehaviour::AskPermission { file: "render.txt".into(), content: "rendered\n".into() });
         service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Render the blocks"})).unwrap();
@@ -6962,7 +7116,7 @@ mod tests {
         assert!(service.handle("quest.update", &json!({"questId": quest_id, "readPaths": ["relative/caps"]})).is_err());
         let q = service.handle("quest.update", &json!({"questId": quest_id, "readPaths": ["~/harness-directive-capturas/"]})).unwrap();
         let folder = q["read_paths"][0].as_str().unwrap().to_string();
-        assert!(folder.starts_with('/') && folder.ends_with("/harness-directive-capturas"), "{folder}");
+        assert!(Path::new(&folder).is_absolute() && Path::new(&folder).ends_with("harness-directive-capturas"), "{folder}");
         service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Match the look"})).unwrap();
         service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
         wait_for(&service, "submitted", |s| s.tasks[0].state == TaskState::Verifying);
@@ -7019,4 +7173,109 @@ mod tests {
         assert_eq!(snap.feedback[0].status, "applied");
         assert_eq!(service.handle("feedback.create", &json!({"kind": "fails", "cause": "harness", "title": "z", "evidence": "w"})).unwrap()["id"], "FB-003");
     }
+    #[test]
+    fn a_member_is_resolved_by_name_and_an_unknown_one_or_one_without_the_role_is_refused() {
+        // FB-068: a name the lead sees is an id here; a task never waits for a member that is not there.
+        let (_home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("member.add", &json!({"id": "art-e", "name": "Fede", "harness": "mock", "roles": ["artist"], "model": "mock-fast"})).unwrap();
+        let t = service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Draw", "role": "artist", "memberId": "fede"})).unwrap();
+        assert_eq!(t["member_id"], "art-e");
+        let err = service.handle("task.create", &json!({"questId": quest_id, "id": "t2", "title": "Draw", "role": "artist", "memberId": "Gala"})).unwrap_err();
+        assert!(err.message.contains("no member") && err.message.contains("art-e"), "{}", err.message);
+        let err = service.handle("task.create", &json!({"questId": quest_id, "id": "t3", "title": "Code", "memberId": "art-e"})).unwrap_err();
+        assert!(err.message.contains("does not have the role"), "{}", err.message);
+        let err = service.handle("task.update", &json!({"taskId": "t1", "memberId": "nadie"})).unwrap_err();
+        assert!(err.message.contains("no member"), "{}", err.message);
+        let status = crate::mcp::run_tool("guild_status", &json!({}), &|m, p| service.handle(m, &p).map_err(|e| e.message), &|_| {}).unwrap();
+        assert!(!status.contains("does not exist"), "{status}");
+    }
+
+    #[test]
+    fn a_failed_task_takes_a_new_timeout_before_its_retry() {
+        // FB-074: it was cut three times by time and could not be given more.
+        let (_home, service, quest_id) = setup(MockBehaviour::Fail("boom".into()));
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Slow", "maxAttempts": 1, "timeoutMinutes": 5})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "failed", |s| s.tasks[0].state == TaskState::Failed);
+        let t = service.handle("task.update", &json!({"taskId": "t1", "timeoutMinutes": 180})).unwrap();
+        assert_eq!(t["timeout_minutes"], 180);
+        let t = service.handle("task.retry", &json!({"taskId": "t1", "timeoutMinutes": 240, "instructions": "go on"})).unwrap();
+        assert_eq!((t["timeout_minutes"].as_u64(), t["instructions"].as_str()), (Some(240), Some("go on")));
+    }
+
+    #[test]
+    fn a_usage_limit_costs_no_attempt_and_pauses_the_member() {
+        // FB-071: Kiro and Codex ran out and every task lost two attempts without any work.
+        assert!(is_usage_limit("RUNTIME_FAILED: UsageLimitReachedError: try again in 2 hours") && is_usage_limit("You have hit your usage limit"));
+        assert!(!is_usage_limit("boom") && !is_usage_limit("timed out"));
+        assert_eq!(usage_limit_wait("try again in 2 hours"), chrono::Duration::hours(2));
+        assert_eq!(usage_limit_wait("resets in 45 minutes"), chrono::Duration::minutes(45));
+        assert_eq!(usage_limit_wait("limit reached"), chrono::Duration::minutes(30));
+        let (_home, service, quest_id) = setup(MockBehaviour::Fail("UsageLimitReachedError: try again in 3 hours".into()));
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Work", "maxAttempts": 2})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "paused", |s| !s.paused_members.is_empty());
+        assert_eq!(snap.paused_members[0].member_id, "aria");
+        for _ in 0..10 { service.tick(); std::thread::sleep(Duration::from_millis(30)); }
+        let snap = service.snapshot().unwrap();
+        assert_eq!(snap.attempts.len(), 1, "nothing else starts on a paused member");
+        assert_eq!(snap.tasks[0].attempts_made, 0, "the attempt is given back");
+        assert_eq!(snap.tasks[0].state, TaskState::Ready);
+        let status = crate::mcp::run_tool("guild_status", &json!({}), &|m, p| service.handle(m, &p).map_err(|e| e.message), &|_| {}).unwrap();
+        assert!(status.contains("paused until") && status.contains("waiting: every member with the role implementer is busy or paused"), "{status}");
+    }
+
+    #[test]
+    fn a_verifier_cut_by_time_runs_again_with_more_time() {
+        // FB-072: godot-tests timed out at 600 s with five members working, and passed in 11 min alone.
+        let home = TempHome::new();
+        let repo = home.repo();
+        let marker = home.0.join("first-run");
+        let script = home.0.join("slow.py");
+        std::fs::write(&script, format!("import os, sys, time\nm = r'{}'\nif os.path.exists(m): sys.exit(0)\nopen(m, 'w').write('x')\ntime.sleep(30)\n", marker.display())).unwrap();
+        std::fs::create_dir_all(repo.join(".guild")).unwrap();
+        std::fs::write(repo.join(".guild/guild.toml"), format!("[[verifiers]]\nid = \"slow\"\nargv = [\"{PYTHON}\", '{}']\nrequired = true\ntimeout_seconds = 1\n", script.display())).unwrap();
+        let mut service = Service::new(Store::open_in_memory().unwrap(), Settings { attempt_timeout: Duration::from_secs(10), cancel_timeout: Duration::from_millis(500), ..Settings::default() });
+        Arc::get_mut(&mut service).unwrap().quiet = true;
+        service.register(Arc::new(MockHarness::new(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() })));
+        service.probe_harnesses();
+        service.handle("project.add", &json!({"repoPath": repo.display().to_string(), "id": "p"})).unwrap();
+        service.handle("member.add", &json!({"id": "aria", "harness": "mock", "roles": ["implementer"], "model": "mock-fast"})).unwrap();
+        let quest = service.handle("quest.create", &json!({"projectId": "p", "title": "Slow"})).unwrap();
+        service.handle("task.create", &json!({"questId": quest["id"], "id": "t1", "title": "Slow"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest["id"]})).unwrap();
+        let snap = wait_for(&service, "verified", |s| s.attempts.first().is_some_and(|a| !a.verifier_results.is_empty()));
+        let v = &snap.attempts[0].verifier_results[0];
+        assert_eq!(v.status, "passed", "{}", v.tail);
+        assert!(service.store.lock().unwrap().events_of_kind("verifier.retrying", 10).unwrap().len() == 1);
+    }
+
+    #[test]
+    fn folders_no_workspace_owns_are_swept_and_a_worktree_of_a_vanished_repository_goes() {
+        // FB-067: worktrees kept coming back as folders the guild no longer knew, or could not remove.
+        let (_home, service, quest_id) = setup(MockBehaviour::Succeed { file: "a.txt".into(), content: "a\n".into() });
+        service.handle("task.create", &json!({"questId": quest_id, "id": "t1", "title": "Done"})).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "submitted", |s| s.tasks.iter().any(|t| t.state == TaskState::Verifying));
+        let orphan = crate::paths::worktrees_dir().join("p").join("01m5xxxxxxxxxxxxxxxxxxxxxx");
+        std::fs::create_dir_all(orphan.join("assets")).unwrap();
+        std::fs::write(orphan.join("assets/big.bin"), vec![0u8; 1024]).unwrap();
+        let kept = crate::paths::worktrees_dir().join("p").join("integrate-keepme");
+        std::fs::create_dir_all(&kept).unwrap();
+        let r = service.handle("workspace.gc", &json!({})).unwrap();
+        assert!(r["removed"].as_u64().unwrap() >= 1, "{r}");
+        assert!(!orphan.exists(), "the orphan folder is gone");
+        assert!(kept.exists(), "a folder that is not an attempt's is left alone");
+        let waiting = snap.attempts.iter().find(|a| a.state == AttemptState::Submitted).and_then(|a| a.workspace_id.clone()).and_then(|id| snap.workspaces.iter().find(|w| w.id == id)).unwrap();
+        assert!(Path::new(&waiting.path).exists(), "a candidate waiting for a decision keeps its worktree");
+        // The repository moved: git cannot remove the worktree, and the folder goes anyway.
+        let project = service.store.lock().unwrap().project("p").unwrap().unwrap();
+        let mut gone = project.clone();
+        gone.repo_path = "/nonexistent/repo".into();
+        let ws = Workspace { path: crate::paths::worktrees_dir().join("p").join("01m5yyyyyyyyyyyyyyyyyyyyyy").display().to_string(), ..waiting.clone() };
+        std::fs::create_dir_all(&ws.path).unwrap();
+        workspaces::remove(&gone, &ws, false).unwrap();
+        assert!(!Path::new(&ws.path).exists());
+    }
+
 }

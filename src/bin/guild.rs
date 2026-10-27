@@ -117,7 +117,7 @@ USAGE
                                      --override accepts a verified attempt that was failed (by the orchestrator, a judge or a reject)
   guild reject <task> [--reason TEXT]
   guild integrate <task>
-  guild retry <task> [--reason TEXT]  a candidate still waiting is rejected with the reason; a task at work starts again (see restart)
+  guild retry <task> [--reason TEXT] [--timeout MIN] [--instructions TEXT]  a candidate still waiting is rejected with the reason; a task at work starts again (see restart)
   guild cancel-task <task> [--replaced-by TASK]  ends it in one step; its dependants wait for TASK instead  |  guild cancel <attempt>
   guild restart <attempt>            start a running attempt again on its member's current harness and model, from what it wrote
   guild interrupt <attempt>          end the turn now; what the worktree has becomes the candidate
@@ -621,6 +621,8 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             });
             let r = call(&ensure_running()?, "task.create", params)?;
             println!("task {} · {} ({})", r["id"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""), r["state"].as_str().unwrap_or(""));
+            // Not dispatched for a few seconds: time to set the role, member or timeout (FB-069).
+            if a.flag("timeout").is_none() { println!("  no --timeout: it has 30 minutes. `task set {} --timeout MIN` within 10 s, before a member takes it (a Godot import and a render need 60 or more)", r["id"].as_str().unwrap_or("<task>")); }
             Ok(())
         }
         "start" | "pause" | "resume" | "cancel-quest" => {
@@ -645,7 +647,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "retry" => {
-            let r = call(&ensure_running()?, "task.retry", json!({"taskId": a.pos(0, "task")?, "reason": a.flag("reason")}))?;
+            let r = call(&ensure_running()?, "task.retry", json!({"taskId": a.pos(0, "task")?, "reason": a.flag("reason"), "timeoutMinutes": a.flag("timeout").and_then(|s| s.parse::<u64>().ok()), "instructions": a.flag("instructions")}))?;
             if let Some(id) = r["restarting"].as_str() { println!("attempt {id} starts again on its member's current harness and model"); return Ok(()); }
             println!("task {} · attempt {} of {}", r["state"].as_str().unwrap_or(""), r["attempts_made"], r["max_attempts"]);
             Ok(())
@@ -970,7 +972,9 @@ fn status(client: &Client) -> Result<(), String> {
         let done = tasks.iter().filter(|t| t.state == TaskState::Completed).count();
         println!("quest {} · {:?} · {}/{} tasks · {}", q.id, q.state, done, tasks.len(), q.title);
         for t in tasks {
-            let attempt = snap.attempts.iter().filter(|a| a.task_id == t.id).max_by(|a, b| a.created_at.cmp(&b.created_at));
+            // The attempt at work or waiting for an answer, else the latest (FB-073).
+            let of_task = || snap.attempts.iter().filter(|a| a.task_id == t.id);
+            let attempt = of_task().find(|a| a.state == AttemptState::WaitingInput).or_else(|| of_task().find(|a| matches!(a.state, AttemptState::Provisioning | AttemptState::Running))).or_else(|| of_task().max_by(|a, b| a.created_at.cmp(&b.created_at)));
             let detail = match attempt {
                 Some(a) => {
                     let mut d = format!("attempt {} {:?}", short(&a.id), a.state);
@@ -983,7 +987,7 @@ fn status(client: &Client) -> Result<(), String> {
                 None => String::new(),
             };
             let deps = if t.depends_on.is_empty() { String::new() } else { format!(" (after {})", t.depends_on.join(", ")) };
-            println!("  task {:<10} {:<12} {}{}{}", t.id, format!("{:?}", t.state).to_lowercase(), t.title, deps, if detail.is_empty() { String::new() } else { format!(" — {detail}") });
+            println!("  task {:<10} {:<12} {}{}{}", t.id, if attempt.is_some_and(|a| a.state == AttemptState::WaitingInput) { "waiting-input".to_string() } else { format!("{:?}", t.state).to_lowercase() }, t.title, deps, if detail.is_empty() { String::new() } else { format!(" — {detail}") });
             if let Some(r) = &t.block_reason { println!("       {r}"); }
         }
     }

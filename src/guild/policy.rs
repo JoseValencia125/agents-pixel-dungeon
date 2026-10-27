@@ -155,7 +155,7 @@ fn visual(path: &str) -> bool { std::path::Path::new(path).starts_with(crate::pa
 pub fn expand_home(path: &str) -> String {
     let p = path.trim();
     match p.strip_prefix("~/").or(if p == "~" { Some("") } else { None }) {
-        Some(rest) => dirs::home_dir().map(|h| h.join(rest).display().to_string().trim_end_matches('/').to_string()).unwrap_or_else(|| p.to_string()),
+        Some(rest) => dirs::home_dir().map(|h| h.join(rest).display().to_string().trim_end_matches(|c| c == '/' || (cfg!(windows) && c == '\\')).to_string()).unwrap_or_else(|| p.to_string()),
         None => p.trim_end_matches('/').to_string(),
     }
 }
@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(read("Bash: x", r#"{"command": "rm /Users/me/harness-directive-capturas/actual/x.png"}"#), Verdict::Refuse);
         assert_eq!(read_path(r#"{"path":"/Users/me/caps/a.png"}"#).as_deref(), Some("/Users/me/caps/a.png"));
         assert!(is_read("Read File") && is_read("Read: /x") && !is_read("Write File"));
-        assert!(expand_home("~/caps/").ends_with("/caps") && expand_home("~/caps").starts_with('/'));
+        assert!(std::path::Path::new(&expand_home("~/caps/")).ends_with("caps") && std::path::Path::new(&expand_home("~/caps")).is_absolute());
     }
 
     #[test]

@@ -666,6 +666,17 @@ pub struct Snapshot {
     /// guild's minimum: no work starts until there is room (FB-075).
     #[serde(default)]
     pub disk_low: Option<u64>,
+    /// Members that hit their harness's usage limit: nothing is given to them
+    /// until the time shown (UTC, RFC 3339) (FB-071).
+    #[serde(default)]
+    pub paused_members: Vec<PausedMember>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PausedMember {
+    pub member_id: String,
+    pub until: String,
+    pub reason: String,
 }
 
 /// Two open tasks of one quest that change (or name) the same files: they

@@ -1220,6 +1220,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         orchestrator_busy: false,
         overlaps: vec![],
         disk_low: None,
+        paused_members: vec![],
         concurrency: 3,
     }
 }
