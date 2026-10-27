@@ -116,6 +116,7 @@ pub fn processes_in(dirs: &[&Path]) -> Vec<(i32, String)> {
     if cfg!(windows) { return vec![]; }
     let Ok(out) = command("lsof").args(["-n", "-P", "-a", "-d", "cwd", "-F", "pcn"]).output() else { return vec![] };
     let me = std::process::id() as i32;
+    let skip = harness_pids();
     // lsof gives resolved paths (/private/var/… for /var/…).
     let dirs: Vec<PathBuf> = dirs.iter().flat_map(|d| [d.to_path_buf(), d.canonicalize().unwrap_or_else(|_| d.to_path_buf())]).collect();
     let (mut found, mut pid, mut name) = (vec![], 0, String::new());
@@ -125,8 +126,7 @@ pub fn processes_in(dirs: &[&Path]) -> Vec<(i32, String)> {
             ("c", rest) => name = rest.to_string(),
             ("n", rest) => {
                 let inside = dirs.iter().any(|d| Path::new(rest).starts_with(d));
-                let harness = ["claude", "kiro-cli", "kiro-cli-chat", "codex", "node", "lsof"].iter().any(|h| name == *h || name.starts_with("kiro-cli"));
-                if inside && !harness && pid != me && pid > 0 { found.push((pid, name.clone())); }
+                if inside && !is_harness_name(&name) && !skip.contains(&pid) && pid != me && pid > 0 { found.push((pid, name.clone())); }
             }
             _ => {}
         }
@@ -142,18 +142,42 @@ pub fn attempt_processes(attempt_id: &str, dirs: &[&Path]) -> Vec<(i32, String)>
     let mut found = processes_in(dirs);
     if cfg!(windows) || attempt_id.is_empty() { return found; }
     let mark = format!("GUILD_ATTEMPT={attempt_id}");
-    let Ok(out) = command("ps").args(["-axo", "pid=,comm="]).output() else { return found };
     let me = std::process::id() as i32;
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let line = line.trim_start();
-        let Some((pid, comm)) = line.split_once(' ') else { continue };
-        let Ok(pid) = pid.parse::<i32>() else { continue };
-        let name = Path::new(comm.trim()).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let harness = ["claude", "kiro-cli", "kiro-cli-chat", "codex", "lsof", "ps"].iter().any(|h| name == *h || name.starts_with("kiro-cli"));
-        if harness || pid == me || pid <= 0 || found.iter().any(|(p, _)| *p == pid) { continue; }
+    let skip = harness_pids();
+    for (pid, _, name) in process_table() {
+        if is_harness_name(&name) || skip.contains(&pid) || pid == me || pid <= 0 || found.iter().any(|(p, _)| *p == pid) { continue; }
         if process_environment(pid).iter().any(|e| *e == mark) { found.push((pid, name)); }
     }
     found
+}
+
+/// (pid, parent pid, command name) of every process; empty where `ps` is not.
+fn process_table() -> Vec<(i32, i32, String)> {
+    let Ok(out) = command("ps").args(["-axo", "pid=,ppid=,comm="]).output() else { return vec![] };
+    String::from_utf8_lossy(&out.stdout).lines().filter_map(|line| {
+        let mut parts = line.split_whitespace();
+        let (pid, ppid) = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?);
+        let comm = line.trim_start().splitn(3, char::is_whitespace).nth(2).unwrap_or("").trim();
+        let name = Path::new(comm).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        Some((pid, ppid, name))
+    }).collect()
+}
+
+/// A harness, or a tool that is one's own (never what a member left behind):
+/// by name, Claude Code too under its versioned binary (`2.1.312`).
+fn is_harness_name(name: &str) -> bool {
+    let versioned = name.contains('.') && name.chars().all(|c| c.is_ascii_digit() || c == '.');
+    versioned || name.starts_with("kiro-cli") || ["claude", "codex", "node", "lsof", "ps"].contains(&name)
+}
+
+/// The harnesses' processes and the servers each runs for itself (MCP, LSP):
+/// what a harness-named process started directly, other than a shell: the
+/// member's own commands run in a shell, its servers do not (FB-076).
+fn harness_pids() -> std::collections::HashSet<i32> {
+    let table = process_table();
+    let harness: std::collections::HashSet<i32> = table.iter().filter(|(_, _, n)| is_harness_name(n)).map(|(p, _, _)| *p).collect();
+    let shells = ["sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh"];
+    table.iter().filter(|(p, parent, n)| harness.contains(p) || (harness.contains(parent) && !shells.contains(&n.as_str()))).map(|(p, _, _)| *p).collect()
 }
 
 /// The environment variables of a process of ours ("NAME=value"); empty
@@ -248,6 +272,13 @@ mod tests {
         assert!(child.wait().is_ok(), "it was stopped");
         assert!(attempt_processes("att-mark-1", &[dir.as_path()]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_harness_is_known_by_name_also_under_its_versioned_binary() {
+        // FB-076: lsof names Claude Code by its versioned binary, and it counted as what the member left running.
+        for harness in ["claude", "2.1.312", "node", "codex", "kiro-cli-chat", "lsof"] { assert!(is_harness_name(harness), "{harness}"); }
+        for other in ["blender", "godot", "python3", "sleep", "Godot", "run_tests.sh"] { assert!(!is_harness_name(other), "{other}"); }
     }
 
     #[test]
