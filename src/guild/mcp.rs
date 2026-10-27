@@ -94,7 +94,7 @@ fn tools() -> Value {
         {"name": "guild_diff", "description": "The diff of a task's latest candidate.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id}}},
         {"name": "guild_decide", "description": "Decide on a task: accept (integrates the candidate into the quest's branch; a spike is completed without integrating), reject (with a reason; the member retries if attempts remain), retry (a candidate still waiting is rejected with the reason; a task at work starts again on its member's current harness and model, from what it wrote, without costing an attempt), or cancel (in one step; replacedBy: the tasks that waited for it wait for that task instead). accept with attemptId and override: true takes a verified attempt that was failed (by the orchestrator, a judge or a reject).",
-         "inputSchema": {"type": "object", "required": ["taskId", "decision"], "properties": {"taskId": task_id, "decision": {"type": "string", "enum": ["accept", "reject", "retry", "cancel"]}, "reason": {"type": "string"}, "attemptId": {"type": "string"}, "override": {"type": "boolean"}, "replacedBy": {"type": "string", "description": "With cancel: a task id of the same quest"}, "timeoutMinutes": {"type": "integer", "description": "With retry: a new time limit for the task, in minutes"}, "instructions": {"type": "string", "description": "With retry: new instructions for the task"}}}},
+         "inputSchema": {"type": "object", "required": ["taskId", "decision"], "properties": {"taskId": task_id, "decision": {"type": "string", "enum": ["accept", "reject", "retry", "cancel", "integrate"]}, "reason": {"type": "string"}, "attemptId": {"type": "string"}, "override": {"type": "boolean"}, "replacedBy": {"type": "string", "description": "With cancel: a task id of the same quest"}, "timeoutMinutes": {"type": "integer", "description": "With retry: a new time limit for the task, in minutes"}, "instructions": {"type": "string", "description": "With retry: new instructions for the task"}}}},
         {"name": "guild_permission", "description": "Answer a member's pending permission request with one of its option ids (from guild_task).",
          "inputSchema": {"type": "object", "required": ["taskId", "optionId"], "properties": {"taskId": task_id, "optionId": {"type": "string"}}}},
     ])
@@ -121,6 +121,8 @@ fn needs(snap: &Snapshot, t: &Task) -> Option<&'static str> {
     // The guild's orchestrator is on it: nothing for anyone else yet.
     if a.is_some_and(|a| a.deciding) { return None; }
     match (t.state, a.map(|a| a.state)) {
+        // Git or the disk failed integrating it: the guild tries again, and `integrate` does it now (FB-077).
+        (TaskState::Accepted, _) if t.block_reason.as_deref().is_some_and(|r| r.starts_with("merge failed")) => Some("integration failed: the guild tries again, or guild_decide integrate does it now"),
         (TaskState::Completed | TaskState::Cancelled | TaskState::Accepted | TaskState::Integrating, _) => None,
         (_, Some(AttemptState::WaitingInput)) => Some("permission"),
         // Submitted once its verifiers ran (they run in Verifying), Passed when they passed.
@@ -397,6 +399,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 "accept" => call("task.accept", json!({"taskId": task_id, "integrate": true, "reason": reason, "attemptId": s("attemptId"), "override": args.get("override").and_then(Value::as_bool).unwrap_or(false)}))?,
                 "reject" => call("task.reject", json!({"taskId": task_id, "reason": reason}))?,
                 "retry" => call("task.retry", json!({"taskId": task_id, "reason": reason, "timeoutMinutes": args.get("timeoutMinutes").and_then(Value::as_u64), "instructions": s("instructions")}))?,
+                "integrate" => call("task.integrate", json!({"taskId": task_id}))?,
                 "cancel" => call("task.cancel", json!({"taskId": task_id, "replacedBy": s("replacedBy")}))?,
                 other => return Err(format!("unknown decision {other}")),
             };
