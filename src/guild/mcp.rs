@@ -91,7 +91,7 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"questId": {"type": "string", "description": "Without it, every quest under way"}, "timeoutSeconds": {"type": "integer", "description": "Default 300, at most 540"}}}},
         {"name": "guild_task", "description": "One task in full: instructions, notes, attempts, failures, verifier results, candidate size, pending permission (whole command, file and whether it is inside the worktree) and the end of the member's transcript. full: true gives the member's whole last reply and every verifier's whole output.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id, "full": {"type": "boolean"}}}},
-        {"name": "guild_note", "description": "Add to a task that already started: a member at work is stopped and handed the note at once, in the same session, to correct course (later: true waits until its turn ends); a retry and the orchestrator read it with the instructions. With questId instead of taskId, a note for the whole quest: every open task reads it (members at work at once, the rest when they start, and tasks created later) until withdrawn (withdraw: its number, from 1).",
+        {"name": "guild_note", "description": "Add to a task that already started: a member at work is stopped and handed the note at once, in the same session, to correct course (later: true waits until its turn ends; the answer says which it was, and events note.delivered / note.deferred show when it arrived); a retry and the orchestrator read it with the instructions. With questId instead of taskId, a note for the whole quest: every open task reads it (members at work at once, the rest when they start, and tasks created later) until withdrawn (withdraw: its number, from 1).",
          "inputSchema": {"type": "object", "required": ["text"], "properties": {"taskId": task_id, "questId": {"type": "string"}, "text": {"type": "string"}, "later": {"type": "boolean"}, "withdraw": {"type": "integer"}}}},
         {"name": "guild_diff", "description": "The diff of a task's latest candidate.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id}}},
@@ -183,6 +183,19 @@ pub fn task_line(snap: &Snapshot, t: &Task) -> String {
     s
 }
 
+/// Attempts of the last day lost to a cause outside the task (a usage limit, a time limit, a lost harness), in one line.
+fn external_failures(snap: &Snapshot) -> String {
+    let day = chrono::Utc::now() - chrono::Duration::hours(24);
+    let mut counts: std::collections::BTreeMap<&str, u32> = Default::default();
+    for a in snap.attempts.iter().filter(|a| matches!(a.state, AttemptState::Failed | AttemptState::TimedOut | AttemptState::Lost)) {
+        let recent = a.finished_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()).is_some_and(|t| t.with_timezone(&chrono::Utc) > day);
+        let class = if a.state == AttemptState::TimedOut { "timeout" } else { crate::service::failure_class(a.failure.as_deref().unwrap_or("")) };
+        if recent && class != "work" { *counts.entry(class).or_default() += 1; }
+    }
+    if counts.is_empty() { return String::new(); }
+    format!("attempts lost to causes outside the task, last 24 h: {}\n", counts.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", "))
+}
+
 /// How long ago, in the units a person reads: "12 min", "3 h", "2 days".
 pub fn ago(since: &str) -> String {
     let Ok(at) = chrono::DateTime::parse_from_rfc3339(since) else { return "?".into() };
@@ -265,6 +278,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 out.push_str(&format!("⚠ disk: {:.1} GB free — no work starts until there is room. Finished worktrees are removed by themselves (`guild gc` now); tell the user if it stays low.\n", free as f64 / (1u64 << 30) as f64));
             }
             out.push_str(&stall_lines(&snap, s("questId").as_deref()));
+            out.push_str(&external_failures(&snap));
             for p in &snap.projects {
                 out.push_str(&format!("project {} · {} · {}\n", p.id, p.name, p.repo_path));
                 let gallery = crate::gallery::gallery_path(&p.id);
@@ -367,7 +381,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 let member = snap.members.iter().find(|m| m.id == a.member_id).map(|m| m.name.as_str()).unwrap_or("?");
                 out.push_str(&format!("attempt {} by {member}: {:?}", a.id, a.state));
                 if let Some(c) = &a.candidate { out.push_str(&format!(" · candidate {} files +{} -{}", c.files_changed, c.insertions, c.deletions)); }
-                if let Some(f) = &a.failure { out.push_str(&format!(" · failure: {f}")); }
+                if let Some(f) = &a.failure { out.push_str(&format!(" · failure [{}]: {f}", crate::service::failure_class(f))); }
                 out.push('\n');
                 // Step captures it leaves while it works (FB-059).
                 if a.state.is_active() {
@@ -421,7 +435,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
         }
         "guild_note" => {
             let r = call("task.note", json!({"taskId": need("taskId")?, "text": need("text")?, "by": "delegate", "later": args.get("later").and_then(Value::as_bool).unwrap_or(false)}))?;
-            let when = if r["redirected"] == true { "the member was stopped and reads it now" } else { "the member reads it when its turn ends" };
+            let when = match r["delivery"].as_str() { Some("now") => "the member was stopped and reads it now", Some("when the task starts") => "nobody is at work on it: the member reads it when the task starts", _ => "the member reads it when its turn ends" };
             Ok(format!("noted ({} notes on the task): {when}", r["notes"].as_array().map(Vec::len).unwrap_or(0)))
         }
         "guild_decide" => {

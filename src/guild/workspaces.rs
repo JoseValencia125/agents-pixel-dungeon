@@ -268,6 +268,35 @@ fn parse_shortstat(s: &str) -> (u32, u32, u32) {
     out
 }
 
+/// Keep what a worktree holds that no commit has (tracked, or untracked and not ignored): it is
+/// committed onto the attempt's branch, which stays when the worktree goes. True when there was something.
+pub fn rescue_uncommitted(workspace: &Workspace) -> GitResult<bool> {
+    let path = Path::new(&workspace.path);
+    if !path.exists() || git(path, &["status", "--porcelain"])?.trim().is_empty() { return Ok(false); }
+    git(path, &["add", "-A"])?;
+    git(path, &["-c", "user.name=Guild", "-c", "user.email=guild@agents-pixel-dungeon", "commit", "-q", "-m", "guild: what the worktree held when it was removed"])?;
+    Ok(true)
+}
+
+/// A member that ran `git stash` in its worktree stashed in the user's repository, which shares it:
+/// every stash made on one of the guild's branches is kept as a branch of its own and taken out of
+/// the stash, so nothing is lost and the user's `git stash list` is the user's again. The branches made.
+pub fn rescue_stashes(project: &Project) -> Vec<String> {
+    let repo = Path::new(&project.repo_path);
+    let Ok(list) = git(repo, &["stash", "list", "--format=%H%x09%gs"]) else { return vec![] };
+    let mut made = vec![];
+    // From the oldest: dropping one does not move the indexes of those below it.
+    let entries: Vec<(usize, &str, &str)> = list.lines().enumerate().filter_map(|(i, l)| l.split_once('\t').map(|(sha, subject)| (i, sha, subject))).collect();
+    for (index, sha, subject) in entries.into_iter().rev() {
+        let on_guild_branch = subject.split_once(": ").map(|(head, _)| head).is_some_and(|head| head.rsplit(' ').next().is_some_and(|b| b.starts_with("guild/")));
+        if !on_guild_branch { continue; }
+        let branch = format!("guild/rescued/stash-{}", &sha[..12.min(sha.len())]);
+        if !ref_exists(repo, &format!("refs/heads/{branch}")) && git(repo, &["branch", &branch, sha]).is_err() { continue; }
+        if git(repo, &["stash", "drop", &format!("stash@{{{index}}}")]).is_ok() { made.push(branch); }
+    }
+    made
+}
+
 /// Remove an attempt's worktree and branch. Refuses paths outside the
 /// managed area.
 pub fn remove(project: &Project, workspace: &Workspace, delete_branch: bool) -> GitResult<()> {
@@ -665,6 +694,25 @@ mod tests {
         FAIL_INTEGRATIONS.lock().unwrap().push((quest.integration_ref.clone(), 2));
         integrate(&project, &quest, &cands[0], &a_task("t0")).expect("two failures, the third try lands");
         assert!(is_clash("conflict integrating x: y") && !is_clash("git worktree add failed"));
+    }
+
+    #[test]
+    fn a_stash_made_in_a_guild_worktree_is_kept_as_a_branch_and_leaves_the_users_stash() {
+        let _guard = crate::paths::test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (_dir, project, quest, _cands, repo) = quest_with_candidates(0);
+        let base = quest.base_sha.clone().unwrap();
+        let ws = provision(&project, "q-parallel", "t1", "a-stash", &base).unwrap();
+        std::fs::write(Path::new(&ws.path).join("README.md"), "changed in the member's worktree\n").unwrap();
+        git(Path::new(&ws.path), &["-c", "user.name=m", "-c", "user.email=m@m", "stash"]).unwrap();
+        // And one the user made in their own checkout, which stays theirs.
+        std::fs::write(repo.join("README.md"), "the user's own work\n").unwrap();
+        git(&repo, &["-c", "user.name=u", "-c", "user.email=u@u", "stash"]).unwrap();
+        assert_eq!(git(&repo, &["stash", "list"]).unwrap().lines().count(), 2);
+        let made = rescue_stashes(&project);
+        assert_eq!(made.len(), 1, "{made:?}");
+        assert_eq!(git(&repo, &["show", &format!("refs/heads/{}:README.md", made[0])]).unwrap(), "changed in the member's worktree");
+        let left = git(&repo, &["stash", "list"]).unwrap();
+        assert_eq!(left.lines().count(), 1, "only the user's: {left}");
     }
 
     #[test]
