@@ -85,16 +85,18 @@ fn tools() -> Value {
                 "timeoutMinutes": {"type": "integer", "description": "How long an attempt may work on it (default the guild's, 30)"},
                 "evidence": {"type": "array", "items": {"type": "string"}, "description": "Images the member must leave in its worktree (paths relative to it, * in the name): kept with the candidate even if git ignores them, shown to you and the user"},
                 "spike": {"type": "boolean", "description": "A short trial (30 min by default) whose captures and report are the result: accepting it never integrates it"}}}}}}},
-        {"name": "guild_wait", "description": "Block until a task of the quest (without questId, of any quest under way) needs you (candidate ready, permission asked, failed, blocked) or the quest ends, or until the timeout. Returns the quest's status.",
+        {"name": "guild_ack", "description": "Say you have a wait the guild flagged (guild_status lists them under `waiting`): no more notices or alerts for it, it stays listed until it ends. id: the wait's id or its task's.",
+         "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}},
+        {"name": "guild_wait", "description": "Block until a task of the quest (without questId, of any quest under way) needs you (candidate ready, permission asked, failed, blocked, or something that has waited too long and nobody moves) or the quest ends, or until the timeout. Returns the quest's status.",
          "inputSchema": {"type": "object", "properties": {"questId": {"type": "string", "description": "Without it, every quest under way"}, "timeoutSeconds": {"type": "integer", "description": "Default 300, at most 540"}}}},
         {"name": "guild_task", "description": "One task in full: instructions, notes, attempts, failures, verifier results, candidate size, pending permission (whole command, file and whether it is inside the worktree) and the end of the member's transcript. full: true gives the member's whole last reply and every verifier's whole output.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id, "full": {"type": "boolean"}}}},
-        {"name": "guild_note", "description": "Add to a task that already started: a member at work is stopped and handed the note at once, in the same session, to correct course (later: true waits until its turn ends); a retry and the orchestrator read it with the instructions. With questId instead of taskId, a note for the whole quest: every open task reads it (members at work at once, the rest when they start, and tasks created later) until withdrawn (withdraw: its number, from 1).",
+        {"name": "guild_note", "description": "Add to a task that already started: a member at work is stopped and handed the note at once, in the same session, to correct course (later: true waits until its turn ends; the answer says which it was, and events note.delivered / note.deferred show when it arrived); a retry and the orchestrator read it with the instructions. With questId instead of taskId, a note for the whole quest: every open task reads it (members at work at once, the rest when they start, and tasks created later) until withdrawn (withdraw: its number, from 1).",
          "inputSchema": {"type": "object", "required": ["text"], "properties": {"taskId": task_id, "questId": {"type": "string"}, "text": {"type": "string"}, "later": {"type": "boolean"}, "withdraw": {"type": "integer"}}}},
         {"name": "guild_diff", "description": "The diff of a task's latest candidate.",
          "inputSchema": {"type": "object", "required": ["taskId"], "properties": {"taskId": task_id}}},
         {"name": "guild_decide", "description": "Decide on a task: accept (integrates the candidate into the quest's branch; a spike is completed without integrating), reject (with a reason; the member retries if attempts remain), retry (a candidate still waiting is rejected with the reason; a task at work starts again on its member's current harness and model, from what it wrote, without costing an attempt), or cancel (in one step; replacedBy: the tasks that waited for it wait for that task instead). accept with attemptId and override: true takes a verified attempt that was failed (by the orchestrator, a judge or a reject).",
-         "inputSchema": {"type": "object", "required": ["taskId", "decision"], "properties": {"taskId": task_id, "decision": {"type": "string", "enum": ["accept", "reject", "retry", "cancel"]}, "reason": {"type": "string"}, "attemptId": {"type": "string"}, "override": {"type": "boolean"}, "replacedBy": {"type": "string", "description": "With cancel: a task id of the same quest"}, "timeoutMinutes": {"type": "integer", "description": "With retry: a new time limit for the task, in minutes"}, "instructions": {"type": "string", "description": "With retry: new instructions for the task"}}}},
+         "inputSchema": {"type": "object", "required": ["taskId", "decision"], "properties": {"taskId": task_id, "decision": {"type": "string", "enum": ["accept", "reject", "retry", "cancel", "integrate"]}, "reason": {"type": "string"}, "attemptId": {"type": "string"}, "override": {"type": "boolean"}, "replacedBy": {"type": "string", "description": "With cancel: a task id of the same quest"}, "timeoutMinutes": {"type": "integer", "description": "With retry: a new time limit for the task, in minutes"}, "instructions": {"type": "string", "description": "With retry: new instructions for the task"}}}},
         {"name": "guild_permission", "description": "Answer a member's pending permission request with one of its option ids (from guild_task).",
          "inputSchema": {"type": "object", "required": ["taskId", "optionId"], "properties": {"taskId": task_id, "optionId": {"type": "string"}}}},
     ])
@@ -121,6 +123,8 @@ fn needs(snap: &Snapshot, t: &Task) -> Option<&'static str> {
     // The guild's orchestrator is on it: nothing for anyone else yet.
     if a.is_some_and(|a| a.deciding) { return None; }
     match (t.state, a.map(|a| a.state)) {
+        // Git or the disk failed integrating it: the guild tries again, and `integrate` does it now (FB-077).
+        (TaskState::Accepted, _) if t.block_reason.as_deref().is_some_and(|r| r.starts_with("merge failed")) => Some("integration failed: the guild tries again, or guild_decide integrate does it now"),
         (TaskState::Completed | TaskState::Cancelled | TaskState::Accepted | TaskState::Integrating, _) => None,
         (_, Some(AttemptState::WaitingInput)) => Some("permission"),
         // Submitted once its verifiers ran (they run in Verifying), Passed when they passed.
@@ -179,6 +183,46 @@ pub fn task_line(snap: &Snapshot, t: &Task) -> String {
     s
 }
 
+/// Attempts of the last day lost to a cause outside the task (a usage limit, a time limit, a lost harness), in one line.
+fn external_failures(snap: &Snapshot) -> String {
+    let day = chrono::Utc::now() - chrono::Duration::hours(24);
+    let mut counts: std::collections::BTreeMap<&str, u32> = Default::default();
+    for a in snap.attempts.iter().filter(|a| matches!(a.state, AttemptState::Failed | AttemptState::TimedOut | AttemptState::Lost)) {
+        let recent = a.finished_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()).is_some_and(|t| t.with_timezone(&chrono::Utc) > day);
+        let class = if a.state == AttemptState::TimedOut { "timeout" } else { crate::service::failure_class(a.failure.as_deref().unwrap_or("")) };
+        if recent && class != "work" { *counts.entry(class).or_default() += 1; }
+    }
+    if counts.is_empty() { return String::new(); }
+    format!("attempts lost to causes outside the task, last 24 h: {}\n", counts.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", "))
+}
+
+/// How long ago, in the units a person reads: "12 min", "3 h", "2 days".
+pub fn ago(since: &str) -> String {
+    let Ok(at) = chrono::DateTime::parse_from_rfc3339(since) else { return "?".into() };
+    let secs = (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds().max(0);
+    match secs { 0..=119 => format!("{secs} s"), 120..=7199 => format!("{} min", secs / 60), 7200..=172_799 => format!("{} h", secs / 3600), _ => format!("{} days", secs / 86_400) }
+}
+
+/// What waits and nobody moves (the sentinel's stalls), oldest first; the ones paused on purpose
+/// in one line each at the end. `quest` limits it to one quest.
+pub fn stall_lines(snap: &Snapshot, quest: Option<&str>) -> String {
+    let mut stalls: Vec<&crate::sentinel::Stall> = snap.stalls.iter().filter(|s| quest.is_none_or(|q| s.quest_id == q)).collect();
+    if stalls.is_empty() { return String::new(); }
+    stalls.sort_by(|a, b| a.since.cmp(&b.since));
+    let mut out = String::new();
+    let live: Vec<_> = stalls.iter().filter(|s| !s.dormant).collect();
+    if !live.is_empty() {
+        out.push_str(&format!("waiting ({}):\n", live.len()));
+        for s in live {
+            let what = if s.task_id.is_empty() { s.quest_id.clone() } else { s.task_id.clone() };
+            out.push_str(&format!("- {what} · {} for {} · {} — {}{}{}\n", s.kind.as_str().replace('_', " "), ago(&s.since), s.owner, s.reason.trim(),
+                if s.acked { " (someone has it)" } else { "" }, if s.alerted && !s.acked { " ⚠ the user was told" } else { "" }));
+        }
+    }
+    for s in stalls.iter().filter(|s| s.dormant) { out.push_str(&format!("  dormant, its quest is paused: {} {} — {}\n", s.quest_id, ago(&s.since), s.reason.trim())); }
+    out
+}
+
 fn quest_report(snap: &Snapshot, q: &Quest) -> String {
     let tasks: Vec<&Task> = snap.tasks.iter().filter(|t| t.quest_id == q.id).collect();
     let done = tasks.iter().filter(|t| t.state == TaskState::Completed).count();
@@ -233,6 +277,8 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
             if let Some(free) = snap.disk_low {
                 out.push_str(&format!("⚠ disk: {:.1} GB free — no work starts until there is room. Finished worktrees are removed by themselves (`guild gc` now); tell the user if it stays low.\n", free as f64 / (1u64 << 30) as f64));
             }
+            out.push_str(&stall_lines(&snap, s("questId").as_deref()));
+            out.push_str(&external_failures(&snap));
             for p in &snap.projects {
                 out.push_str(&format!("project {} · {} · {}\n", p.id, p.name, p.repo_path));
                 let gallery = crate::gallery::gallery_path(&p.id);
@@ -311,9 +357,11 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 let quests: Vec<&Quest> = snap.quests.iter().filter(|q| watched.contains(&q.id)).collect();
                 let ended = quests.iter().all(|q| matches!(q.state, QuestState::Completed | QuestState::Cancelled));
                 let waiting = snap.tasks.iter().any(|t| watched.contains(&t.quest_id) && needs(&snap, t).is_some());
-                if ended || waiting || started.elapsed() >= timeout {
-                    let why = if ended { if quests.len() == 1 { "the quest ended" } else { "the quests ended" } } else if waiting { "something needs you" } else { "timeout, still working" };
-                    let report: String = quests.iter().map(|q| quest_report(&snap, q)).collect();
+                // A wait that lasts: the sentinel has already tried and sent a notice, and nobody has it.
+                let stalled = snap.stalls.iter().any(|s| watched.contains(&s.quest_id) && s.notices > 0 && !s.acked && !s.dormant);
+                if ended || waiting || stalled || started.elapsed() >= timeout {
+                    let why = if ended { if quests.len() == 1 { "the quest ended" } else { "the quests ended" } } else if waiting { "something needs you" } else if stalled { "something has waited too long: guild_decide, or guild_ack if you have it" } else { "timeout, still working" };
+                    let report: String = stall_lines(&snap, None) + &quests.iter().map(|q| quest_report(&snap, q)).collect::<String>();
                     return Ok(format!("{why}\n{report}"));
                 }
                 sleep(Duration::from_secs(3));
@@ -333,7 +381,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 let member = snap.members.iter().find(|m| m.id == a.member_id).map(|m| m.name.as_str()).unwrap_or("?");
                 out.push_str(&format!("attempt {} by {member}: {:?}", a.id, a.state));
                 if let Some(c) = &a.candidate { out.push_str(&format!(" · candidate {} files +{} -{}", c.files_changed, c.insertions, c.deletions)); }
-                if let Some(f) = &a.failure { out.push_str(&format!(" · failure: {f}")); }
+                if let Some(f) = &a.failure { out.push_str(&format!(" · failure [{}]: {f}", crate::service::failure_class(f))); }
                 out.push('\n');
                 // Step captures it leaves while it works (FB-059).
                 if a.state.is_active() {
@@ -387,7 +435,7 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
         }
         "guild_note" => {
             let r = call("task.note", json!({"taskId": need("taskId")?, "text": need("text")?, "by": "delegate", "later": args.get("later").and_then(Value::as_bool).unwrap_or(false)}))?;
-            let when = if r["redirected"] == true { "the member was stopped and reads it now" } else { "the member reads it when its turn ends" };
+            let when = match r["delivery"].as_str() { Some("now") => "the member was stopped and reads it now", Some("when the task starts") => "nobody is at work on it: the member reads it when the task starts", _ => "the member reads it when its turn ends" };
             Ok(format!("noted ({} notes on the task): {when}", r["notes"].as_array().map(Vec::len).unwrap_or(0)))
         }
         "guild_decide" => {
@@ -397,10 +445,15 @@ pub fn run_tool(name: &str, args: &Value, call: Call, sleep: &dyn Fn(Duration)) 
                 "accept" => call("task.accept", json!({"taskId": task_id, "integrate": true, "reason": reason, "attemptId": s("attemptId"), "override": args.get("override").and_then(Value::as_bool).unwrap_or(false)}))?,
                 "reject" => call("task.reject", json!({"taskId": task_id, "reason": reason}))?,
                 "retry" => call("task.retry", json!({"taskId": task_id, "reason": reason, "timeoutMinutes": args.get("timeoutMinutes").and_then(Value::as_u64), "instructions": s("instructions")}))?,
+                "integrate" => call("task.integrate", json!({"taskId": task_id}))?,
                 "cancel" => call("task.cancel", json!({"taskId": task_id, "replacedBy": s("replacedBy")}))?,
                 other => return Err(format!("unknown decision {other}")),
             };
             Ok(format!("done: {r}"))
+        }
+        "guild_ack" => {
+            let r = call("stall.ack", json!({"id": need("id")?, "by": "delegate"}))?;
+            Ok(format!("acknowledged: {}", r["acked"]))
         }
         "guild_permission" => {
             let snap = snapshot(call)?;

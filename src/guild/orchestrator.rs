@@ -115,13 +115,15 @@ pub enum DecisionKind {
     Candidate,
     /// A task whose attempts ran out.
     Failure,
+    /// A wait nobody moves (a task blocked, a dependency that never released, verifiers that hang): the sentinel asks what to do.
+    Stall,
 }
 
 impl DecisionKind {
-    pub fn as_str(self) -> &'static str { match self { DecisionKind::Permission => "permission", DecisionKind::Candidate => "candidate", DecisionKind::Failure => "failure" } }
+    pub fn as_str(self) -> &'static str { match self { DecisionKind::Permission => "permission", DecisionKind::Candidate => "candidate", DecisionKind::Failure => "failure", DecisionKind::Stall => "stall" } }
     /// The answers it may give; `escalate` leaves it to the delegate or the user.
     pub fn choices(self) -> &'static [&'static str] {
-        match self { DecisionKind::Permission => &["allow", "refuse", "escalate"], DecisionKind::Candidate => &["accept", "reject", "escalate"], DecisionKind::Failure => &["retry", "escalate"] }
+        match self { DecisionKind::Permission => &["allow", "refuse", "escalate"], DecisionKind::Candidate => &["accept", "reject", "escalate"], DecisionKind::Failure => &["retry", "escalate"], DecisionKind::Stall => &["retry", "nudge", "integrate", "cancel", "escalate"] }
     }
 }
 
@@ -134,7 +136,7 @@ pub struct Ruling {
 }
 
 /// What the guild's orchestrator may decide alone; anything else goes up.
-pub const ORCHESTRATOR_BOUNDS: &str = "Permissions: allow on your own whatever a member needs for its task that is not extremely dangerous — reading files anywhere but secrets (~/.ssh, keychains, .env files, tokens), running the project's and the machine's tools (the engine, Blender, image tools, scripts) with what they write kept in its worktree, its scratch folder or a folder its task names, looking around the system (which, ps, versions), git inside its own worktree (add, commit, show, log, ls-tree, fetch), searching the web for documentation, downloading an asset into its scratch folder. Escalate only what is extremely dangerous or cannot be undone: pushing or publishing anything, deleting or overwriting the user's files outside the worktree, credentials and secrets, sudo and system settings, installing software for the whole system, sending the user's data out, spending money. A member waiting on you is not working: answer permissions first and fast (FB-063). Accept a candidate when every required verifier passed and the diff and the member's report show each acceptance criterion met. Reject only for a defect you can point to — a failed required verifier, a line in the diff that breaks a criterion or the design — with a reason the member can act on (what, where). Evidence you cannot see (a test the verifiers do not run, a number the report does not give) is a reason to escalate, never to reject; so is a change that departs from the design, or criteria you cannot judge. Retry a failed task only with instructions that change what the member does; escalate when the task itself looks wrong. When unsure, escalate: a wrong yes costs more than a short wait. Before escalating for missing evidence, look for it in the member's whole reply, which you are given: escalate only what is in neither the reply nor the diff. A member never merges or rebases branches (the guild brings a clash back to it, marked): refuse those.";
+pub const ORCHESTRATOR_BOUNDS: &str = "Permissions: allow on your own whatever a member needs for its task that is not extremely dangerous — reading files anywhere but secrets (~/.ssh, keychains, .env files, tokens), running the project's and the machine's tools (the engine, Blender, image tools, scripts) with what they write kept in its worktree, its scratch folder or a folder its task names, looking around the system (which, ps, versions), git inside its own worktree (add, commit, show, log, ls-tree, fetch), searching the web for documentation, downloading an asset into its scratch folder. Escalate only what is extremely dangerous or cannot be undone: pushing or publishing anything, deleting or overwriting the user's files outside the worktree, credentials and secrets, sudo and system settings, installing software for the whole system, sending the user's data out, spending money. A member waiting on you is not working: answer permissions first and fast (FB-063). Accept a candidate when every required verifier passed and the diff and the member's report show each acceptance criterion met. Reject only for a defect you can point to — a failed required verifier, a line in the diff that breaks a criterion or the design — with a reason the member can act on (what, where). Evidence you cannot see (a test the verifiers do not run, a number the report does not give) is a reason to escalate, never to reject; so is a change that departs from the design, or criteria you cannot judge. Retry a failed task only with instructions that change what the member does; escalate when the task itself looks wrong. When unsure, escalate: a wrong yes costs more than a short wait. Before escalating for missing evidence, look for it in the member's whole reply, which you are given: escalate only what is in neither the reply nor the diff. A verifier that says `cannot-run` (exit 78) could not check anything on this machine: that is neither a pass nor a defect of the candidate, so judge by the diff and the report, and escalate what only that verifier could show. A member never merges or rebases branches (the guild brings a clash back to it, marked): refuse those.";
 
 /// The prompt that wakes the orchestrator for one decision. `context` is
 /// what the decision is about: the permission asked, the candidate's diff
@@ -318,6 +320,7 @@ mod tests {
         assert!(parse_ruling("```json\n{\"decision\": \"accept\"}\n```", DecisionKind::Permission).is_none(), "accept is not a permission's answer");
         assert!(parse_ruling("I would allow it.", DecisionKind::Permission).is_none(), "no block, no ruling");
         assert_eq!(DecisionKind::Failure.choices(), &["retry", "escalate"], "a failure is never accepted");
+        assert!(DecisionKind::Stall.choices().contains(&"nudge") && !DecisionKind::Stall.choices().contains(&"accept"), "nor is a stall");
     }
 
     #[test]

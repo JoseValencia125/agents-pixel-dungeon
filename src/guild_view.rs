@@ -599,6 +599,22 @@ pub fn state_label(state: AttemptState) -> String {
 const INK: Color32 = Color32::from_rgb(222, 214, 232);
 const DIM: Color32 = Color32::from_rgb(150, 143, 165);
 
+/// What a wait of the sentinel is, in words.
+fn stall_label(kind: guild::sentinel::StallKind) -> String {
+    use guild::sentinel::StallKind::*;
+    tr(match kind {
+        IntegrationStuck => "integración atascada",
+        FailedUnattended => "falló y nadie lo atiende",
+        CandidateWaiting => "candidato sin decidir",
+        InputWaiting => "espera una respuesta",
+        SilentRunning => "en silencio",
+        VerifyingHung => "verificación colgada",
+        DependencyStalled => "dependencia detenida",
+        OrchestratorUndecided => "el orquestador no pudo decidir",
+        PausedWithWork => "misión en pausa con trabajo",
+    })
+}
+
 fn mono(text: &str, size: f32) -> RichText { RichText::new(text).font(egui::FontId::monospace(crate::ui::fs(size))) }
 
 fn button(ui: &mut Ui, text: &str, color: Color32) -> bool {
@@ -644,6 +660,21 @@ pub fn hall_panel(ui: &mut Ui, view: &mut GuildView, now: f64, wide: bool) -> Pa
         for (m, a) in asking {
             let row = ui.add(egui::Label::new(mono(&format!("▸ {}", a.activity), 10.5).color(INK)).truncate().sense(egui::Sense::click()));
             if row.on_hover_text(tr("Ver su trabajo")).clicked() { view.hall_member = Some(m.id.clone()); }
+        }
+    }
+    // What waits too long and nobody moves: the sentinel's notices that nobody has taken.
+    let waiting: Vec<&guild::sentinel::Stall> = snap.stalls.iter().filter(|s| !s.dormant && !s.acked && s.notices > 0).collect();
+    if !waiting.is_empty() {
+        ui.label(mono(&tr("Esperando"), 10.5).strong().color(Color32::from_rgb(254, 174, 52)));
+        for s in waiting {
+            let what = if s.task_id.is_empty() { s.quest_id.clone() } else { s.task_id.clone() };
+            ui.horizontal(|ui| {
+                let line = format!("⏳ {what} · {} {}", stall_label(s.kind), trf("hace {}", &[&guild::mcp::ago(&s.since)]));
+                ui.add(egui::Label::new(mono(&line, 10.5).color(if s.alerted { Color32::from_rgb(228, 59, 68) } else { INK })).truncate()).on_hover_text(&s.reason);
+                if ui.add(egui::Button::new(mono(&tr("Lo tengo"), 10.0).color(INK)).frame(false)).on_hover_text(tr("Avisar a la guild que ya lo viste: deja de insistir")).clicked() {
+                    view.command("stall.ack", json!({"id": s.id, "by": "user"}));
+                }
+            });
         }
     }
     // The crew, below: one chip each, its state's colour; a click shows its work.
@@ -1221,6 +1252,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         overlaps: vec![],
         disk_low: None,
         paused_members: vec![],
+        stalls: vec![],
         concurrency: 3,
     }
 }

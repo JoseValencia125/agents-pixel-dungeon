@@ -268,6 +268,35 @@ fn parse_shortstat(s: &str) -> (u32, u32, u32) {
     out
 }
 
+/// Keep what a worktree holds that no commit has (tracked, or untracked and not ignored): it is
+/// committed onto the attempt's branch, which stays when the worktree goes. True when there was something.
+pub fn rescue_uncommitted(workspace: &Workspace) -> GitResult<bool> {
+    let path = Path::new(&workspace.path);
+    if !path.exists() || git(path, &["status", "--porcelain"])?.trim().is_empty() { return Ok(false); }
+    git(path, &["add", "-A"])?;
+    git(path, &["-c", "user.name=Guild", "-c", "user.email=guild@agents-pixel-dungeon", "commit", "-q", "-m", "guild: what the worktree held when it was removed"])?;
+    Ok(true)
+}
+
+/// A member that ran `git stash` in its worktree stashed in the user's repository, which shares it:
+/// every stash made on one of the guild's branches is kept as a branch of its own and taken out of
+/// the stash, so nothing is lost and the user's `git stash list` is the user's again. The branches made.
+pub fn rescue_stashes(project: &Project) -> Vec<String> {
+    let repo = Path::new(&project.repo_path);
+    let Ok(list) = git(repo, &["stash", "list", "--format=%H%x09%gs"]) else { return vec![] };
+    let mut made = vec![];
+    // From the oldest: dropping one does not move the indexes of those below it.
+    let entries: Vec<(usize, &str, &str)> = list.lines().enumerate().filter_map(|(i, l)| l.split_once('\t').map(|(sha, subject)| (i, sha, subject))).collect();
+    for (index, sha, subject) in entries.into_iter().rev() {
+        let on_guild_branch = subject.split_once(": ").map(|(head, _)| head).is_some_and(|head| head.rsplit(' ').next().is_some_and(|b| b.starts_with("guild/")));
+        if !on_guild_branch { continue; }
+        let branch = format!("guild/rescued/stash-{}", &sha[..12.min(sha.len())]);
+        if !ref_exists(repo, &format!("refs/heads/{branch}")) && git(repo, &["branch", &branch, sha]).is_err() { continue; }
+        if git(repo, &["stash", "drop", &format!("stash@{{{index}}}")]).is_ok() { made.push(branch); }
+    }
+    made
+}
+
 /// Remove an attempt's worktree and branch. Refuses paths outside the
 /// managed area.
 pub fn remove(project: &Project, workspace: &Workspace, delete_branch: bool) -> GitResult<()> {
@@ -364,6 +393,8 @@ pub fn publish(project: &Project, ref_name: &str, base: &str, message: &str, wri
 /// attempts start from it. Returns (old head, new head, files changed);
 /// a conflict aborts and names its files.
 pub fn sync_quest(project: &Project, quest: &Quest, from: &str) -> GitResult<(String, String, Vec<String>)> {
+    let lock = branch_lock(&quest.integration_ref);
+    let _one_at_a_time = lock.lock().unwrap_or_else(|e| e.into_inner());
     let repo = Path::new(&project.repo_path);
     let expected = ensure_integration_branch(project, quest)?;
     let source = rev_parse(repo, from)?;
@@ -423,10 +454,62 @@ pub fn read_ref<T>(project: &Project, rev: &str, read: impl FnOnce(&Path) -> T) 
     Some(out)
 }
 
+/// One integration at a time per branch: two tasks of a quest that finish
+/// together queue up instead of working in each other's checkout (FB-077).
+fn branch_lock(name: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    type Locks = std::sync::Mutex<Vec<(String, std::sync::Arc<std::sync::Mutex<()>>)>>;
+    static LOCKS: Locks = std::sync::Mutex::new(Vec::new());
+    let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, lock)) = locks.iter().find(|(n, _)| n == name) { return lock.clone(); }
+    let lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+    locks.push((name.to_string(), lock.clone()));
+    lock
+}
+
+/// An integration that failed because the work clashes with what landed meanwhile,
+/// not because git or the disk failed.
+pub fn is_clash(error: &str) -> bool { error.starts_with("conflict integrating") }
+
+/// Integrations that fail on purpose, by branch (tests only).
+#[cfg(test)]
+pub static FAIL_INTEGRATIONS: std::sync::Mutex<Vec<(String, u32)>> = std::sync::Mutex::new(Vec::new());
+
+/// Squash the candidate onto the quest's branch. One at a time per branch; a
+/// failure of git or the disk is tried again (a clash is not: the work has to change).
+/// What an earlier try already landed is found by its mark and returned as it is.
 pub fn integrate(project: &Project, quest: &Quest, candidate: &Candidate, task: &Task) -> GitResult<String> {
+    let lock = branch_lock(&quest.integration_ref);
+    let _one_at_a_time = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut tries = 0;
+    loop {
+        match integrate_once(project, quest, candidate, task) {
+            Err(e) if !is_clash(&e) && tries < 2 => {
+                tries += 1;
+                if !cfg!(test) { std::thread::sleep(std::time::Duration::from_millis(500 * tries)); }
+            }
+            other => return other,
+        }
+    }
+}
+
+fn integrate_once(project: &Project, quest: &Quest, candidate: &Candidate, task: &Task) -> GitResult<String> {
+    #[cfg(test)]
+    {
+        let mut fails = FAIL_INTEGRATIONS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, n)) = fails.iter_mut().find(|(r, n)| *r == quest.integration_ref && *n > 0) {
+            *n -= 1;
+            return Err("git worktree add failed: injected".into());
+        }
+    }
     let repo = Path::new(&project.repo_path);
     let expected = ensure_integration_branch(project, quest)?;
-    let tmp = crate::paths::worktrees_dir().join(&project.id).join(format!("integrate-{}", short(&quest.id)));
+    let mark = format!("Task {} · attempt candidate {}", task.id, &candidate.head_sha[..12.min(candidate.head_sha.len())]);
+    // The service may have died after the branch moved and before it said so.
+    let range = quest.base_sha.as_ref().map(|b| format!("{b}..{}", quest.integration_ref)).unwrap_or_else(|| quest.integration_ref.clone());
+    if let Ok(landed) = git(repo, &["log", "-1", "--format=%H", "--fixed-strings", &format!("--grep={mark}"), &range]) {
+        if !landed.is_empty() { return Ok(landed); }
+    }
+    let tmp = crate::paths::worktrees_dir().join(&project.id).join(format!("integrate-{}-{}", short(&quest.id), short(&task.id)));
     if tmp.exists() {
         let _ = git(repo, &["worktree", "remove", "--force", &tmp.display().to_string()]);
     }
@@ -446,10 +529,12 @@ pub fn integrate(project: &Project, quest: &Quest, candidate: &Candidate, task: 
         if staged.is_ok() {
             return Ok(expected.clone());
         }
-        let message = format!("guild: {}\n\nTask {} · attempt candidate {}", task.title, task.id, &candidate.head_sha[..12.min(candidate.head_sha.len())]);
+        let message = format!("guild: {}\n\n{mark}", task.title);
         git(&tmp, &["-c", "user.name=Guild", "-c", "user.email=guild@agents-pixel-dungeon", "commit", "-q", "-m", &message])?;
         let new_sha = rev_parse(&tmp, "HEAD")?;
         git(repo, &["update-ref", &quest.integration_ref, &new_sha, &expected])?;
+        // Landed means the branch says so, not that the command said ok.
+        if rev_parse(repo, &quest.integration_ref)? != new_sha { return Err(format!("{} did not take the integration", quest.integration_ref)); }
         Ok(new_sha)
     })();
     let _ = git(repo, &["worktree", "remove", "--force", &tmp.display().to_string()]);
@@ -554,6 +639,80 @@ mod tests {
         project.merge_union = vec!["tests.txt".into()];
         let merged = integrate(&project, &quest, &cands[1].0, &task("a2")).unwrap();
         assert_eq!(git(repo, &["show", &format!("{merged}:tests.txt")]).unwrap(), "core\npark\nschool");
+    }
+
+    /// A quest with `n` candidates that each add a file of their own (FB-077).
+    fn quest_with_candidates(n: usize) -> (tempdir::TempDir, Project, Quest, Vec<Candidate>, std::path::PathBuf) {
+        let (dir, project) = temp_repo();
+        std::env::set_var("HPD_GUILD_HOME", dir.path().join("home").display().to_string());
+        let repo = PathBuf::from(&project.repo_path);
+        let base = rev_parse(&repo, "HEAD").unwrap();
+        let quest = Quest { id: "q-parallel".into(), project_id: "p".into(), title: "q".into(), description: String::new(), state: QuestState::Running, integration_ref: "refs/heads/guild/quest/qparalle".into(), base_sha: Some(base.clone()), read_paths: vec![], notes: vec![], plan_version: 1, created_at: now(), updated_at: now() };
+        let mut cands = vec![];
+        for i in 0..n {
+            let id = format!("a{i}");
+            let ws = provision(&project, "q-parallel", &id, &id, &base).unwrap();
+            std::fs::write(Path::new(&ws.path).join(format!("file{i}.txt")), format!("{i}\n")).unwrap();
+            cands.push(commit_candidate(&ws, "c").unwrap().unwrap());
+        }
+        (dir, project, quest, cands, repo)
+    }
+
+    fn a_task(id: &str) -> Task {
+        Task { id: id.into(), quest_id: "q-parallel".into(), title: id.into(), instructions: String::new(), acceptance: vec![], depends_on: vec![], role: "implementer".into(), member_id: None, model_id: None, priority: 0, state: TaskState::Accepted, block_reason: None, attempts_made: 1, max_attempts: 2, strategy: ExecutionStrategy::default(), candidates: 1, auto_integrate: false, timeout_minutes: None, winner_attempt_id: None, notes: vec![], granted: Default::default(), evidence: vec![], spike: false, version: 1, created_at: now(), updated_at: now() }
+    }
+
+    #[test]
+    fn two_tasks_of_a_quest_integrating_together_both_land() {
+        // FB-077: the second one removed the checkout the first was working in.
+        let _guard = crate::paths::test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (_dir, project, quest, cands, repo) = quest_with_candidates(4);
+        let handles: Vec<_> = cands.into_iter().enumerate().map(|(i, c)| {
+            let (project, quest) = (project.clone(), quest.clone());
+            std::thread::spawn(move || integrate(&project, &quest, &c, &a_task(&format!("t{i}"))))
+        }).collect();
+        for h in handles { h.join().unwrap().unwrap(); }
+        let tree = git(&repo, &["ls-tree", "--name-only", &quest.integration_ref]).unwrap();
+        for i in 0..4 { assert!(tree.contains(&format!("file{i}.txt")), "{tree}"); }
+    }
+
+    #[test]
+    fn integrating_what_already_landed_finds_it_instead_of_doing_it_twice() {
+        // The service can die after the branch moved and before it said so.
+        let _guard = crate::paths::test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (_dir, project, quest, cands, repo) = quest_with_candidates(1);
+        let first = integrate(&project, &quest, &cands[0], &a_task("t0")).unwrap();
+        let again = integrate(&project, &quest, &cands[0], &a_task("t0")).unwrap();
+        assert_eq!(first, again);
+        assert_eq!(git(&repo, &["rev-list", "--count", &format!("{}..{}", quest.base_sha.clone().unwrap(), quest.integration_ref)]).unwrap(), "1", "one commit, not two");
+    }
+
+    #[test]
+    fn a_failure_of_git_is_tried_again_and_a_clash_is_not() {
+        let _guard = crate::paths::test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (_dir, project, quest, cands, _repo) = quest_with_candidates(1);
+        FAIL_INTEGRATIONS.lock().unwrap().push((quest.integration_ref.clone(), 2));
+        integrate(&project, &quest, &cands[0], &a_task("t0")).expect("two failures, the third try lands");
+        assert!(is_clash("conflict integrating x: y") && !is_clash("git worktree add failed"));
+    }
+
+    #[test]
+    fn a_stash_made_in_a_guild_worktree_is_kept_as_a_branch_and_leaves_the_users_stash() {
+        let _guard = crate::paths::test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (_dir, project, quest, _cands, repo) = quest_with_candidates(0);
+        let base = quest.base_sha.clone().unwrap();
+        let ws = provision(&project, "q-parallel", "t1", "a-stash", &base).unwrap();
+        std::fs::write(Path::new(&ws.path).join("README.md"), "changed in the member's worktree\n").unwrap();
+        git(Path::new(&ws.path), &["-c", "user.name=m", "-c", "user.email=m@m", "stash"]).unwrap();
+        // And one the user made in their own checkout, which stays theirs.
+        std::fs::write(repo.join("README.md"), "the user's own work\n").unwrap();
+        git(&repo, &["-c", "user.name=u", "-c", "user.email=u@u", "stash"]).unwrap();
+        assert_eq!(git(&repo, &["stash", "list"]).unwrap().lines().count(), 2);
+        let made = rescue_stashes(&project);
+        assert_eq!(made.len(), 1, "{made:?}");
+        assert_eq!(git(&repo, &["show", &format!("refs/heads/{}:README.md", made[0])]).unwrap(), "changed in the member's worktree");
+        let left = git(&repo, &["stash", "list"]).unwrap();
+        assert_eq!(left.lines().count(), 1, "only the user's: {left}");
     }
 
     #[test]

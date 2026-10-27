@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS playtests (id TEXT PRIMARY KEY, experiment_id TEXT, j
 CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS findings (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS feedback (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, status TEXT NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS stalls (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS tasks_quest ON tasks(quest_id, state);
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id, state);
 CREATE INDEX IF NOT EXISTS events_attempt ON events(attempt_id);
@@ -154,6 +155,13 @@ impl Store {
     pub fn finding(&self, project_id: &str, id: &str) -> StoreResult<Option<crate::aiplay::Finding>> { self.get("findings", &format!("{project_id}:{id}")) }
     pub fn findings(&self) -> StoreResult<Vec<crate::aiplay::Finding>> { self.list("SELECT json FROM findings ORDER BY id", &[]) }
     pub fn findings_of(&self, project_id: &str) -> StoreResult<Vec<crate::aiplay::Finding>> { self.list("SELECT json FROM findings WHERE project_id = ?1 ORDER BY id", &[project_id]) }
+    pub fn put_stall(&self, s: &crate::sentinel::Stall) -> StoreResult<()> { self.put("stalls", &s.id, &[("project_id", s.project_id.clone())], s) }
+    pub fn stalls(&self) -> StoreResult<Vec<crate::sentinel::Stall>> { self.list("SELECT json FROM stalls ORDER BY id", &[]) }
+    pub fn stall(&self, id: &str) -> StoreResult<Option<crate::sentinel::Stall>> { self.get("stalls", id) }
+    pub fn delete_stall(&self, id: &str) -> StoreResult<()> {
+        self.conn.execute("DELETE FROM stalls WHERE id = ?1", params![id]).map_err(e)?;
+        Ok(())
+    }
     pub fn put_feedback(&self, f: &crate::feedback::Feedback) -> StoreResult<()> { self.put("feedback", &f.id, &[("project_id", f.project_id.clone().unwrap_or_default()), ("status", f.status.clone())], f) }
     pub fn feedback(&self, id: &str) -> StoreResult<Option<crate::feedback::Feedback>> { self.get("feedback", id) }
     pub fn feedback_all(&self) -> StoreResult<Vec<crate::feedback::Feedback>> { self.list("SELECT json FROM feedback ORDER BY id", &[]) }
@@ -357,6 +365,7 @@ impl Store {
             overlaps: vec![],
             disk_low: None,
             paused_members: vec![],
+            stalls: self.stalls()?,
         })
     }
 }
