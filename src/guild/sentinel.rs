@@ -44,6 +44,8 @@ pub enum StallKind {
     OrchestratorUndecided,
     /// A paused quest with work inside that is neither done nor going anywhere.
     PausedWithWork,
+    /// A member that keeps working but whose worktree has not changed for a long time.
+    NoProgress,
 }
 
 impl StallKind {
@@ -58,12 +60,13 @@ impl StallKind {
             StallKind::DependencyStalled => "dependency_stalled",
             StallKind::OrchestratorUndecided => "orchestrator_undecided",
             StallKind::PausedWithWork => "paused_with_work",
+            StallKind::NoProgress => "no_progress",
         }
     }
 
-    pub const ALL: [StallKind; 9] = [
+    pub const ALL: [StallKind; 10] = [
         StallKind::IntegrationStuck, StallKind::FailedUnattended, StallKind::CandidateWaiting, StallKind::InputWaiting, StallKind::SilentRunning,
-        StallKind::VerifyingHung, StallKind::DependencyStalled, StallKind::OrchestratorUndecided, StallKind::PausedWithWork,
+        StallKind::VerifyingHung, StallKind::DependencyStalled, StallKind::OrchestratorUndecided, StallKind::PausedWithWork, StallKind::NoProgress,
     ];
 
     /// Who should move it first.
@@ -71,7 +74,7 @@ impl StallKind {
         match self {
             StallKind::IntegrationStuck => "guild",
             StallKind::FailedUnattended | StallKind::CandidateWaiting | StallKind::InputWaiting | StallKind::DependencyStalled | StallKind::VerifyingHung => "orchestrator",
-            StallKind::SilentRunning => "guild",
+            StallKind::SilentRunning | StallKind::NoProgress => "guild",
             StallKind::OrchestratorUndecided => "delegate",
             StallKind::PausedWithWork => "user",
         }
@@ -120,6 +123,8 @@ pub struct Signals {
     pub quiet_for: Option<Duration>,
     /// It left something running (a build, a game).
     pub runs_something: bool,
+    /// Since its worktree last changed (the health check measures it).
+    pub idle_for: Option<Duration>,
 }
 
 /// How long a wait is tolerated before it is a stall, and how the notices space out.
@@ -140,7 +145,7 @@ impl Default for Policy {
             grace: HashMap::from([
                 (StallKind::IntegrationStuck, m(2)), (StallKind::FailedUnattended, m(2)), (StallKind::CandidateWaiting, m(5)), (StallKind::InputWaiting, m(5)),
                 (StallKind::SilentRunning, m(10)), (StallKind::VerifyingHung, m(20)), (StallKind::DependencyStalled, m(10)), (StallKind::OrchestratorUndecided, m(5)),
-                (StallKind::PausedWithWork, Duration::ZERO),
+                (StallKind::PausedWithWork, Duration::ZERO), (StallKind::NoProgress, m(20)),
             ]),
             notice_base: m(3),
             notice_cap: m(60),
@@ -273,6 +278,12 @@ pub fn observe(w: &World) -> Vec<Seen> {
                 }
                 AttemptState::Running => {
                     let s = signal(&a.id);
+                    // It works but nothing lands in its worktree: not while it runs something, nor when
+                    // it is silent too (that is the other wait's).
+                    if let Some(idle) = s.idle_for {
+                        let busy = s.runs_something || member_paused || s.quiet_for.is_none_or(|q| q >= Duration::from_secs(300));
+                        seen.push(mk(StallKind::NoProgress, a.id.clone(), format!("its worktree has not changed for {} min", idle.as_secs() / 60), w.now - Span::from_std(idle).unwrap_or_else(|_| Span::zero()), busy));
+                    }
                     let Some(quiet) = s.quiet_for else { continue };
                     let limit = if a.limit_seconds > 0 { a.limit_seconds } else { 1800 };
                     // It waits for something it started: not silent, and the guild wakes it when that ends.
@@ -473,10 +484,10 @@ mod tests {
             observe(&World { now, projects: &[], quests: &quests, tasks: &tasks, attempts: &attempts, paused_members: paused, signals: &signals }).into_iter().filter(|s| s.kind == StallKind::SilentRunning).collect()
         };
         let quiet = Duration::from_secs(25 * 60);
-        let silent = run(HashMap::from([("a1".into(), Signals { quiet_for: Some(quiet), runs_something: false })]), &[]);
+        let silent = run(HashMap::from([("a1".into(), Signals { quiet_for: Some(quiet), runs_something: false, ..Default::default() })]), &[]);
         assert_eq!(silent.len(), 1);
         assert!(!silent[0].held && (now - silent[0].since).num_minutes() == 25, "its wait began when it went quiet");
-        let building = run(HashMap::from([("a1".into(), Signals { quiet_for: Some(quiet), runs_something: true })]), &[]);
+        let building = run(HashMap::from([("a1".into(), Signals { quiet_for: Some(quiet), runs_something: true, ..Default::default() })]), &[]);
         assert!(building[0].held, "a build it waits for is not silence");
         assert!(run(HashMap::new(), &[]).is_empty(), "no signal, no verdict");
     }
@@ -497,4 +508,33 @@ mod tests {
             println!("{:<22} {:<26} {:>6} h {} {}{}", s.kind.as_str(), s.subject.chars().rev().take(24).collect::<String>().chars().rev().collect::<String>(), (now - s.since).num_hours(), if s.dormant { "dormant" } else { "       " }, if stall.is_some() { "STALL " } else { "grace " }, s.reason.chars().take(70).collect::<String>());
         }
     }
+
+    #[test]
+    fn a_member_that_works_without_changing_its_worktree_is_a_wait_of_its_own() {
+        let now = Utc::now();
+        let quests = [quest("q", QuestState::Running, now)];
+        let tasks = [task("t", "q", TaskState::Running, None, now)];
+        let a: Attempt = serde_json::from_value(serde_json::json!({
+            "id": "a1", "task_id": "t", "task_version": 1, "quest_id": "q", "project_id": "p", "member_id": "m", "harness": "claude", "kind": "work", "state": "running",
+            "generation": 1, "summary": "", "turns": 1, "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339(), "limit_seconds": 1800
+        })).unwrap();
+        let attempts = [a];
+        let run = |signals: Signals| -> Vec<Seen> {
+            let signals = HashMap::from([("a1".to_string(), signals)]);
+            observe(&World { now, projects: &[], quests: &quests, tasks: &tasks, attempts: &attempts, paused_members: &[], signals: &signals }).into_iter().filter(|s| s.kind == StallKind::NoProgress).collect()
+        };
+        let idle = Some(Duration::from_secs(25 * 60));
+        let active = Some(Duration::from_secs(20));
+        let seen = run(Signals { quiet_for: active, runs_something: false, idle_for: idle });
+        assert_eq!(seen.len(), 1);
+        assert!(!seen[0].held && (now - seen[0].since).num_minutes() == 25, "it began when the worktree last changed");
+        assert!(run(Signals { quiet_for: active, runs_something: true, idle_for: idle })[0].held, "a build in progress is not a stall");
+        assert!(run(Signals { quiet_for: Some(Duration::from_secs(25 * 60)), runs_something: false, idle_for: idle })[0].held, "a silent member is the other wait's");
+        assert!(run(Signals { quiet_for: active, runs_something: false, idle_for: None }).is_empty(), "nothing is said before the health check has measured it");
+        let policy = Policy::default();
+        assert!(decide(None, &seen_at(StallKind::NoProgress, now - Span::minutes(10)), &policy, now).0.is_none(), "20 minutes of grace");
+        assert!(decide(None, &seen_at(StallKind::NoProgress, now - Span::minutes(25)), &policy, now).0.is_some());
+    }
+
+    fn seen_at(kind: StallKind, since: DateTime<Utc>) -> Seen { seen(kind, since) }
 }

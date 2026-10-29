@@ -111,6 +111,10 @@ pub struct Service {
     integration_tries: Mutex<HashMap<String, (u32, Instant)>>,
     /// When the sentinel last looked, and how long it lets each kind of wait last.
     sentinel_at: Mutex<Option<Instant>>,
+    /// The sentinel was found stale by the health check and has not recovered yet.
+    sentinel_stale: AtomicBool,
+    /// Each running attempt's worktree as the health check last saw it: what it looked like and since when.
+    idle: Mutex<HashMap<String, (u64, Instant)>>,
     stall_policy: Mutex<crate::sentinel::Policy>,
     pub settings: Settings,
     pub stop: Arc<AtomicBool>,
@@ -167,6 +171,8 @@ impl Service {
             paused: Mutex::new(HashMap::new()),
             integration_tries: Mutex::new(HashMap::new()),
             sentinel_at: Mutex::new(None),
+            sentinel_stale: AtomicBool::new(false),
+            idle: Mutex::new(HashMap::new()),
             stall_policy: Mutex::new(crate::sentinel::Policy::default()),
             settings,
             stop: Arc::new(AtomicBool::new(false)),
@@ -4724,7 +4730,8 @@ impl Service {
                 let dirs: Vec<&Path> = tree.iter().map(PathBuf::as_path).chain([scratch.as_path()]).collect();
                 runs_something = !crate::platform::attempt_processes(&a.id, &dirs).is_empty();
             }
-            out.insert(a.id.clone(), crate::sentinel::Signals { quiet_for: Some(quiet), runs_something });
+            let idle_for = self.idle.lock().unwrap().get(&a.id).map(|(_, since)| since.elapsed());
+            out.insert(a.id.clone(), crate::sentinel::Signals { quiet_for: Some(quiet), runs_something, idle_for });
         }
         out
     }
@@ -4816,8 +4823,48 @@ impl Service {
             DependencyStalled | VerifyingHung => {
                 if let Some(a) = latest { self.ask_orchestrator(&a.id, DecisionKind::Stall); }
             }
+            // It works but nothing lands: the same question as to a silent one, about what it has to show.
+            NoProgress => {
+                said("asking the member what it has to show");
+                let text = format!("The guild sees you working but nothing in your worktree has changed ({}). Say what you are doing and what blocks you, or write what you have so far.", st.reason);
+                if let Err(e) = self.task_note(&json!({"taskId": st.task_id, "text": text, "by": "guild"})) { said(&e.message); }
+            }
             OrchestratorUndecided | PausedWithWork => {}
         }
+    }
+
+    /// The health check, every two minutes on a thread of its own (so it still runs when the tick
+    /// loop does not): it looks at the watchers themselves and measures what the sentinel cannot.
+    /// Everything here is a local read; no model is asked anything.
+    ///  - The sentinel has not looked for a while although a quest runs: say so, and look now.
+    ///  - Each running attempt's worktree: what changed since the last check (the sentinel turns
+    ///    "nothing for 20 min" into a wait).
+    pub fn health_pass(self: &Arc<Service>) {
+        let (quests, attempts) = {
+            let store = self.store.lock().unwrap();
+            (store.quests().unwrap_or_default(), store.attempts().unwrap_or_default())
+        };
+        let running = quests.iter().any(|q| q.state == QuestState::Running);
+        let quiet_for = self.sentinel_at.lock().unwrap().map(|t| t.elapsed());
+        let stale = sentinel_is_stale(running, quiet_for);
+        if stale != self.sentinel_stale.swap(stale, Ordering::Relaxed) {
+            if stale {
+                let secs = quiet_for.map(|d| d.as_secs()).unwrap_or(0);
+                self.log(&format!("health: the sentinel has not looked for {secs} s: looking now"));
+                self.emit(Event::new("health.sentinel_stale", "guild").with(json!({"seconds": secs})));
+            } else {
+                self.emit(Event::new("health.sentinel_ok", "guild"));
+            }
+        }
+        if stale { self.sentinel_tick(); }
+        let mut seen: HashMap<String, (u64, Instant)> = HashMap::new();
+        for a in attempts.iter().filter(|a| a.state == AttemptState::Running) {
+            let Some(ws) = a.workspace_id.as_ref().and_then(|id| self.store.lock().unwrap().workspace(id).ok().flatten()) else { continue };
+            let fingerprint = worktree_fingerprint(&ws);
+            let since = match self.idle.lock().unwrap().get(&a.id) { Some((before, since)) if *before == fingerprint => *since, _ => Instant::now() };
+            seen.insert(a.id.clone(), (fingerprint, since));
+        }
+        *self.idle.lock().unwrap() = seen;
     }
 
     /// "I have it": no more notices or alerts for this wait; it stays listed until it ends.
@@ -4956,6 +5003,30 @@ const TEMPFAIL: i32 = 75;
 
 /// How often the sentinel looks at the whole guild.
 const SENTINEL_EVERY: Duration = Duration::from_secs(10);
+
+/// How often the health check runs, and how long the sentinel may go without looking before it counts as stale.
+const HEALTH_EVERY: Duration = Duration::from_secs(120);
+const SENTINEL_STALE: Duration = Duration::from_secs(60);
+
+/// The sentinel is stale when a quest runs and it has not looked for longer than it should.
+fn sentinel_is_stale(quest_running: bool, quiet_for: Option<Duration>) -> bool {
+    quest_running && quiet_for.is_some_and(|q| q > SENTINEL_STALE)
+}
+
+/// A worktree as a number: its head, what it changes against it and the size and time of the files it has
+/// added. The same number twice means nothing happened in between.
+fn worktree_fingerprint(ws: &Workspace) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let dir = Path::new(&ws.path);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    workspaces::git(dir, &["rev-parse", "HEAD"]).unwrap_or_default().hash(&mut h);
+    workspaces::git(dir, &["diff", "--numstat", "HEAD"]).unwrap_or_default().hash(&mut h);
+    for file in workspaces::git(dir, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines() {
+        let meta = std::fs::metadata(dir.join(file)).ok();
+        (file, meta.as_ref().map(|m| m.len()), meta.and_then(|m| m.modified().ok())).hash(&mut h);
+    }
+    h.finish()
+}
 
 /// An event about a wait the sentinel recorded.
 fn stall_event(kind: &str, s: &crate::sentinel::Stall) -> Event {
@@ -5398,6 +5469,18 @@ pub fn run(service: Arc<Service>, socket: &Path) -> std::io::Result<()> {
             while !stop.load(Ordering::Relaxed) {
                 ticker.tick();
                 std::thread::sleep(Duration::from_secs(1));
+            }
+        })
+        .ok();
+    let health = service.clone();
+    let stop = service.stop.clone();
+    std::thread::Builder::new()
+        .name("guild-health".into())
+        .spawn(move || {
+            let mut last = Instant::now();
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(1));
+                if last.elapsed() >= HEALTH_EVERY { last = Instant::now(); health.health_pass(); }
             }
         })
         .ok();
@@ -7799,4 +7882,29 @@ mod tests {
         assert!(!Path::new(&ws.path).exists());
     }
 
+    #[test]
+    fn the_sentinel_is_stale_only_when_a_quest_runs_and_it_has_not_looked() {
+        assert!(!sentinel_is_stale(true, Some(Duration::from_secs(15))), "it looks every 10 s");
+        assert!(sentinel_is_stale(true, Some(Duration::from_secs(90))));
+        assert!(!sentinel_is_stale(false, Some(Duration::from_secs(900))), "nothing runs: nothing to watch");
+        assert!(!sentinel_is_stale(true, None), "it has not started yet");
+    }
+
+    #[test]
+    fn a_worktree_fingerprint_changes_with_what_the_member_writes() {
+        let dir = std::env::temp_dir().join(format!("guild-fp-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| workspaces::git(&dir, args).unwrap();
+        git(&["init", "-q"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]);
+        let ws = Workspace { id: "w".into(), project_id: "p".into(), attempt_id: "a".into(), path: dir.to_string_lossy().to_string(), branch: "b".into(), base_sha: git(&["rev-parse", "HEAD"]).trim().into(), state: WorkspaceState::Active, created_at: now(), updated_at: now() };
+        let before = worktree_fingerprint(&ws);
+        assert_eq!(before, worktree_fingerprint(&ws), "nothing happened: the same number");
+        std::fs::write(dir.join("a.txt"), "one").unwrap();
+        let added = worktree_fingerprint(&ws);
+        assert_ne!(before, added, "a new file");
+        std::fs::write(dir.join("a.txt"), "one two three").unwrap();
+        assert_ne!(added, worktree_fingerprint(&ws), "the same file, grown");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

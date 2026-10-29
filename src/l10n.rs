@@ -577,6 +577,7 @@ pub static TABLE: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock:
         ("falló y nadie lo atiende", ["failed and nobody has it", "échec que personne ne traite", "fallita e nessuno se ne occupa", "falhou e ninguém cuida"]),
         ("candidato sin decidir", ["candidate undecided", "candidat sans décision", "candidato senza decisione", "candidato sem decisão"]),
         ("espera una respuesta", ["waits for an answer", "attend une réponse", "attende una risposta", "espera uma resposta"]),
+        ("trabaja sin cambiar nada", ["works without changing anything", "travaille sans rien changer", "lavora senza cambiare nulla", "trabalha sem mudar nada"]),
         ("en silencio", ["silent", "silencieux", "in silenzio", "em silêncio"]),
         ("verificación colgada", ["verification hung", "vérification bloquée", "verifica bloccata", "verificação travada"]),
         ("dependencia detenida", ["dependency stalled", "dépendance à l'arrêt", "dipendenza ferma", "dependência parada"]),
