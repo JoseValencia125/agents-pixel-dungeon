@@ -612,6 +612,7 @@ fn stall_label(kind: guild::sentinel::StallKind) -> String {
         DependencyStalled => "dependencia detenida",
         OrchestratorUndecided => "el orquestador no pudo decidir",
         PausedWithWork => "misión en pausa con trabajo",
+        NoProgress => "trabaja sin cambiar nada",
     })
 }
 
