@@ -39,6 +39,34 @@ pub fn rev_parse(repo: &Path, rev: &str) -> GitResult<String> { git(repo, &["rev
 
 pub fn ref_exists(repo: &Path, name: &str) -> bool { git(repo, &["show-ref", "--verify", "--quiet", name]).is_ok() }
 
+/// Whether the quest's branch has commits that `base` (where an attempt started) lacks: a task
+/// that began before a sibling integrated what it needs (FB-078). False when the ref is unknown.
+pub fn is_behind(repo: &Path, base: &str, integration_ref: &str) -> bool {
+    ref_exists(repo, integration_ref) && git(repo, &["merge-base", "--is-ancestor", integration_ref, base]).is_err()
+}
+
+/// The repository's worktrees that the guild did not make (a merge done by hand, a checkout kept
+/// for a test run), with what each takes on disk, biggest first (FB-080). The repository's own
+/// checkout and every folder in `own` are left out.
+pub fn foreign_worktrees(repo: &Path, own: &[PathBuf]) -> Vec<(PathBuf, u64)> {
+    let Ok(list) = git(repo, &["worktree", "list", "--porcelain"]) else { return vec![] };
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let skip: Vec<PathBuf> = std::iter::once(repo).chain(own.iter().map(PathBuf::as_path)).map(canon).collect();
+    let mut out: Vec<(PathBuf, u64)> = list.lines().filter_map(|l| l.strip_prefix("worktree ")).map(PathBuf::from)
+        .filter(|p| p.exists() && !skip.contains(&canon(p)))
+        .map(|p| { let size = dir_bytes(&p); (p, size) })
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out
+}
+
+/// What a folder takes on disk (`du`); 0 where it cannot be measured.
+pub fn dir_bytes(path: &Path) -> u64 {
+    std::process::Command::new("du").arg("-sk").arg(path).output().ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next().and_then(|k| k.parse::<u64>().ok()))
+        .map_or(0, |k| k * 1024)
+}
+
 pub fn current_branch(repo: &Path) -> Option<String> { git(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).ok() }
 
 /// Where an attempt's worktree lives.
@@ -588,6 +616,32 @@ mod tests {
         git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]).unwrap();
         let project = Project { id: "p".into(), name: "p".into(), repo_path: repo.display().to_string(), target_ref: "refs/heads/main".into(), setup: vec![], verifiers: vec![], playtest: None, play: None, ai_play: None, permitted_programs: vec![], permitted_reads: vec![], permitted_commands: vec![], web: true, merge_union: vec![], threads: None, seed: vec![], created_at: now() };
         (dir, project)
+    }
+
+    #[test]
+    fn a_branch_that_moved_on_is_known_and_a_hand_made_worktree_is_listed() {
+        // FB-078: a task began before its sibling integrated; FB-080: a merge done by hand left a worktree.
+        let (dir, project) = temp_repo();
+        let repo = Path::new(&project.repo_path);
+        let commit = |m: &str| git(repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", m]).unwrap();
+        let base = rev_parse(repo, "HEAD").unwrap();
+        git(repo, &["branch", "guild/quest/q"]).unwrap();
+        assert!(!is_behind(repo, &base, "refs/heads/guild/quest/q"), "level with it");
+        git(repo, &["checkout", "-q", "guild/quest/q"]).unwrap();
+        std::fs::write(repo.join("SIBLING.md"), "what the sibling made\n").unwrap();
+        git(repo, &["add", "-A"]).unwrap();
+        commit("sibling");
+        assert!(is_behind(repo, &base, "refs/heads/guild/quest/q"), "the quest's branch has the sibling's commit");
+        assert!(!is_behind(repo, &base, "refs/heads/guild/quest/none"), "an unknown ref is not a reason to start over");
+        git(repo, &["checkout", "-q", "main"]).unwrap();
+        let by_hand = dir.path().join("merge-by-hand");
+        let own = dir.path().join("guild-made");
+        git(repo, &["worktree", "add", "-q", "-b", "hand", &by_hand.display().to_string()]).unwrap();
+        git(repo, &["worktree", "add", "-q", "-b", "mine", &own.display().to_string()]).unwrap();
+        std::fs::write(by_hand.join("big.bin"), vec![0u8; 3 << 20]).unwrap();
+        let found = foreign_worktrees(repo, &[own.clone()]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].0.ends_with("merge-by-hand") && found[0].1 >= 3 << 20, "{found:?}");
     }
 
     #[test]

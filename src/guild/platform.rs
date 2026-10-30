@@ -151,6 +151,21 @@ pub fn attempt_processes(attempt_id: &str, dirs: &[&Path]) -> Vec<(i32, String)>
     found
 }
 
+/// Every process that carries some attempt's mark, with that attempt's id (FB-079): what a
+/// member started and left behind, wherever it works. Never the harnesses.
+pub fn marked_processes() -> Vec<(i32, String, String)> {
+    if cfg!(windows) { return vec![]; }
+    let me = std::process::id() as i32;
+    let skip = harness_pids();
+    let mut out = vec![];
+    for (pid, _, name) in process_table() {
+        if is_harness_name(&name) || skip.contains(&pid) || pid == me || pid <= 0 { continue; }
+        let env = process_environment(pid);
+        if let Some(id) = env.iter().find_map(|e| e.strip_prefix("GUILD_ATTEMPT=")).filter(|id| !id.is_empty()) { out.push((pid, name, id.to_string())); }
+    }
+    out
+}
+
 /// (pid, parent pid, command name) of every process; empty where `ps` is not.
 fn process_table() -> Vec<(i32, i32, String)> {
     let Ok(out) = command("ps").args(["-axo", "pid=,ppid=,comm="]).output() else { return vec![] };
@@ -214,20 +229,26 @@ fn process_environment(_pid: i32) -> Vec<String> { vec![] }
 /// Stop what an attempt left running (FB-075): SIGTERM, and SIGKILL for
 /// whatever is still there after `grace`. Returns how many it signalled.
 pub fn reap_attempt_processes(attempt_id: &str, dirs: &[&Path], grace: std::time::Duration) -> usize {
+    let pids: Vec<i32> = attempt_processes(attempt_id, dirs).into_iter().map(|(pid, _)| pid).collect();
+    reap_pids(&pids, grace)
+}
+
+/// Stop these processes: SIGTERM, and SIGKILL for whatever is still there after `grace`.
+/// Returns how many it signalled.
+pub fn reap_pids(pids: &[i32], grace: std::time::Duration) -> usize {
     #[cfg(unix)]
     {
-        let found = attempt_processes(attempt_id, dirs);
-        for (pid, _) in &found { unsafe { libc::kill(*pid, libc::SIGTERM); } }
-        if found.is_empty() { return 0; }
+        for pid in pids { unsafe { libc::kill(*pid, libc::SIGTERM); } }
+        if pids.is_empty() { return 0; }
         let deadline = std::time::Instant::now() + grace;
-        while std::time::Instant::now() < deadline && found.iter().any(|(pid, _)| unsafe { libc::kill(*pid, 0) } == 0) {
+        while std::time::Instant::now() < deadline && pids.iter().any(|pid| unsafe { libc::kill(*pid, 0) } == 0) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        for (pid, _) in &found { if unsafe { libc::kill(*pid, 0) } == 0 { unsafe { libc::kill(*pid, libc::SIGKILL); } } }
-        found.len()
+        for pid in pids { if unsafe { libc::kill(*pid, 0) } == 0 { unsafe { libc::kill(*pid, libc::SIGKILL); } } }
+        pids.len()
     }
     #[cfg(not(unix))]
-    { let _ = (attempt_id, dirs, grace); 0 }
+    { let _ = (pids, grace); 0 }
 }
 
 #[cfg(test)]
@@ -268,6 +289,7 @@ mod tests {
         let found = attempt_processes("att-mark-1", &[dir.as_path()]);
         assert!(found.iter().any(|(pid, name)| *pid == child.id() as i32 && name.contains("guild")), "{found:?}");
         assert!(attempt_processes("att-other", &[dir.as_path()]).iter().all(|(pid, _)| *pid != child.id() as i32));
+        assert!(marked_processes().iter().any(|(pid, _, id)| *pid == child.id() as i32 && id == "att-mark-1"), "FB-079: found without knowing the attempt");
         assert!(reap_attempt_processes("att-mark-1", &[dir.as_path()], Duration::from_secs(2)) >= 1);
         assert!(child.wait().is_ok(), "it was stopped");
         assert!(attempt_processes("att-mark-1", &[dir.as_path()]).is_empty());

@@ -476,12 +476,12 @@ pub struct Room {
     subagent_harnesses: Vec<String>,
     /// The state the band shows when it is not the hero's room.
     band: Option<RoomStyle>,
-    /// The guild's members, when this is the orchestrator's room.
+    /// The guild's members, when this is the delegate's room.
     training: bool,
     crew: Vec<Trainee>,
 }
 
-/// One of the guild's members in the orchestrator's room, in room-art pixels.
+/// One of the guild's members in the delegate's room, in room-art pixels.
 struct Trainee {
     name: String,
     harness: &'static str,

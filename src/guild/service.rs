@@ -22,6 +22,8 @@ pub const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How the orchestrator's instructions follow a failure, for the retry to read.
 const ORCHESTRATOR_RETRY: &str = " — the orchestrator, retrying: ";
+/// Written on an attempt the guild itself sent back because its quest's branch moved on (FB-078).
+const CAUGHT_UP: &str = " — the guild, catching up: ";
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -105,6 +107,11 @@ pub struct Service {
     sweeping: Arc<AtomicBool>,
     /// The free bytes while below the minimum.
     disk_low: Mutex<Option<u64>>,
+    /// The free bytes at the last health check, and what takes the room when it runs low or falls fast (FB-079).
+    disk_seen: Mutex<Option<u64>>,
+    disk_note: Mutex<Option<String>>,
+    /// Processes of attempts whose quest is paused: since when they were seen so (FB-079).
+    orphan_seen: Mutex<HashMap<i32, Instant>>,
     /// Members that reached their harness's usage limit, until when and why (FB-071).
     paused: Mutex<HashMap<String, (chrono::DateTime<chrono::Utc>, String)>>,
     /// Integrations that failed for git or the disk, tried again: how many times and when (FB-077).
@@ -168,6 +175,9 @@ impl Service {
             swept: Mutex::new(Instant::now()),
             sweeping: Arc::new(AtomicBool::new(false)),
             disk_low: Mutex::new(None),
+            disk_seen: Mutex::new(None),
+            disk_note: Mutex::new(None),
+            orphan_seen: Mutex::new(HashMap::new()),
             paused: Mutex::new(HashMap::new()),
             integration_tries: Mutex::new(HashMap::new()),
             sentinel_at: Mutex::new(None),
@@ -3057,9 +3067,37 @@ impl Service {
             Err(e) => Some(format!("the orchestrator could not decide: {}", e.message)),
         };
         let Ok(a) = self.update_attempt(attempt_id, |a| { a.deciding = false; a.escalation = escalation.clone(); }) else { return };
+        // What the orchestrator leaves open for want of what a sibling made is not the delegate's yet (FB-078).
+        if escalation.is_some() && self.catch_up(attempt_id) { return; }
         let (decision, reason) = done.map(|r| (r.decision, r.reason)).unwrap_or_else(|e| ("escalate".into(), e.message));
         let kind_name = if escalation.is_some() { "orchestrator.escalated" } else { "orchestrator.decided" };
         self.emit(Event::new(kind_name, "orchestrator").about_attempt(&a).with(json!({"kind": kind, "decision": decision, "reason": reason})));
+    }
+
+    /// A task that began before a sibling integrated what it needs comes back to its member
+    /// once, on the quest's branch as it is now, instead of waiting for the delegate (FB-078):
+    /// the orchestrator's doubt was often only that the work lacked what the quest had since.
+    fn catch_up(self: &Arc<Service>, attempt_id: &str) -> bool {
+        let (a, task, quest, project, base, tried) = {
+            let store = self.store.lock().unwrap();
+            let Ok(Some(a)) = store.attempt(attempt_id) else { return false };
+            let Ok(Some(task)) = store.task(&a.task_id) else { return false };
+            let Ok(Some(quest)) = store.quest(&task.quest_id) else { return false };
+            let Ok(Some(project)) = store.project(&a.project_id) else { return false };
+            let base = a.workspace_id.as_deref().and_then(|w| store.workspace(w).ok().flatten()).map(|w| w.base_sha).or_else(|| a.candidate.as_ref().map(|c| c.base_sha.clone()));
+            let tried = store.attempts_of_task(&task.id).unwrap_or_default().iter().any(|x| x.failure.as_deref().is_some_and(|f| f.contains(CAUGHT_UP)));
+            (a, task, quest, project, base, tried)
+        };
+        let over = matches!(task.state, TaskState::Completed | TaskState::Cancelled | TaskState::Accepted | TaskState::Integrating);
+        let Some(base) = base else { return false };
+        if tried || over || quest.state != QuestState::Running || !workspaces::is_behind(Path::new(&project.repo_path), &base, &quest.integration_ref) { return false; }
+        let why = "the quest's branch moved on while you worked (a sibling task integrated); your work is carried on top of it, check it against what is there now";
+        let _ = self.update_attempt(&a.id, |x| { x.failure = Some(format!("{}{CAUGHT_UP}{why}", x.failure.clone().unwrap_or_default())); x.escalation = None; });
+        self.emit(Event::new("orchestrator.caught_up", "guild").about_attempt(&a).with(json!({"reason": why})));
+        match self.task_retry(&json!({"taskId": task.id, "reason": why})) {
+            Ok(_) => true,
+            Err(e) => { self.log(&format!("task {}: could not catch up: {}", task.id, e.message)); false }
+        }
     }
 
     /// The orchestrator's ruling on one decision, from a turn of its own.
@@ -3338,6 +3376,7 @@ impl Service {
         snap.concurrency = self.concurrency.load(Ordering::Relaxed);
         snap.overlaps = self.overlaps.lock().unwrap().1.clone();
         snap.disk_low = *self.disk_low.lock().unwrap();
+        snap.disk_note = self.disk_note.lock().unwrap().clone();
         snap.paused_members = self.paused_members();
         // Each running attempt's work so far against its limit, for whoever watches the time.
         {
@@ -4865,6 +4904,99 @@ impl Service {
             seen.insert(a.id.clone(), (fingerprint, since));
         }
         *self.idle.lock().unwrap() = seen;
+        self.reap_orphans();
+        self.watch_disk();
+    }
+
+    /// What an attempt left running that nobody waits for any more is stopped (FB-079): the
+    /// attempt is over, its task or quest is gone, or its quest stayed paused for a while. A
+    /// looping test once wrote 38 GB in ten hours because only the end of a turn looked for it.
+    pub fn reap_orphans(&self) {
+        // The processes first, the records after: an attempt born in between is never missing.
+        let marked = crate::platform::marked_processes();
+        if marked.is_empty() { self.orphan_seen.lock().unwrap().clear(); return; }
+        let (quests, tasks, attempts) = {
+            let store = self.store.lock().unwrap();
+            (store.quests().unwrap_or_default(), store.tasks().unwrap_or_default(), store.attempts().unwrap_or_default())
+        };
+        let live: HashSet<String> = self.running.lock().unwrap().keys().cloned().collect();
+        let mut parked: HashSet<i32> = HashSet::new();
+        let mut stop: Vec<(i32, String, String, &str)> = vec![];
+        for (pid, name, attempt_id) in marked {
+            let attempt = attempts.iter().find(|a| a.id == attempt_id);
+            let quest = attempt.and_then(|a| tasks.iter().find(|t| t.id == a.task_id)).and_then(|t| quests.iter().find(|q| q.id == t.quest_id)).map(|q| q.state);
+            match orphan_verdict(attempt, quest, live.contains(&attempt_id)) {
+                Some(Orphan::Now) => stop.push((pid, name, attempt_id, "its attempt is over")),
+                Some(Orphan::Parked) => {
+                    parked.insert(pid);
+                    if self.orphan_seen.lock().unwrap().entry(pid).or_insert_with(Instant::now).elapsed() >= ORPHAN_PARKED { stop.push((pid, name, attempt_id, "its quest is paused")); }
+                }
+                None => {}
+            }
+        }
+        self.orphan_seen.lock().unwrap().retain(|pid, _| parked.contains(pid));
+        let mut by_attempt: Vec<(String, &str, Vec<(i32, String)>)> = vec![];
+        for (pid, name, attempt_id, why) in stop {
+            match by_attempt.iter_mut().find(|(id, _, _)| *id == attempt_id) {
+                Some((_, _, pids)) => pids.push((pid, name)),
+                None => by_attempt.push((attempt_id, why, vec![(pid, name)])),
+            }
+        }
+        for (attempt_id, why, procs) in by_attempt {
+            let pids: Vec<i32> = procs.iter().map(|(p, _)| *p).collect();
+            let n = crate::platform::reap_pids(&pids, REAP_GRACE);
+            self.orphan_seen.lock().unwrap().retain(|pid, _| !pids.contains(pid));
+            self.log(&format!("health: stopped {n} process(es) of attempt {attempt_id}: {why}"));
+            let event = Event::new("attempt.processes_stopped", "guild").with(json!({"processes": describe_processes(&procs), "count": n, "why": why}));
+            match attempts.iter().find(|a| a.id == attempt_id) {
+                Some(a) => { self.emit(event.about_attempt(a)); }
+                None => { self.emit(event.with(json!({"attemptId": attempt_id}))); }
+            }
+        }
+    }
+
+    /// The free room on the worktrees' disk, looked at every health check: a fall of
+    /// `DISK_FALL` since the last one, or a disk below the minimum, says what takes the room
+    /// (FB-079, FB-080) in `guild_status` and in an event; coming back clears it.
+    pub fn watch_disk(&self) {
+        let Some(free) = workspaces::free_bytes(&crate::paths::worktrees_dir()) else { return };
+        let before = self.disk_seen.lock().unwrap().replace(free);
+        let falling = before.is_some_and(|b| b > free && b - free >= DISK_FALL);
+        let low = self.disk_low.lock().unwrap().is_some();
+        if !falling && !low { *self.disk_note.lock().unwrap() = None; return; }
+        // Measuring folders takes a while: once while it lasts, again if it falls on.
+        if !falling && self.disk_note.lock().unwrap().is_some() { return; }
+        let note = self.disk_culprits();
+        if falling {
+            let gb = |b: u64| format!("{:.1}", b as f64 / (1u64 << 30) as f64);
+            self.log(&format!("disk: {} GB free, it was {} GB two minutes ago — {note}", gb(free), gb(before.unwrap_or(free))));
+            self.emit(Event::new("guild.disk_falling", "guild").with(json!({"freeBytes": free, "beforeBytes": before, "culprits": note})));
+        }
+        *self.disk_note.lock().unwrap() = Some(note);
+    }
+
+    /// What may be taking the room: the processes members left running, and the worktrees of
+    /// the guild's repositories that it did not make, the biggest first.
+    fn disk_culprits(&self) -> String {
+        let (members, projects, owned) = {
+            let store = self.store.lock().unwrap();
+            (store.members().unwrap_or_default(), store.projects().unwrap_or_default(), store.workspaces().unwrap_or_default())
+        };
+        let attempts = self.store.lock().unwrap().attempts().unwrap_or_default();
+        let mut parts: Vec<String> = vec![];
+        let procs: Vec<String> = crate::platform::marked_processes().into_iter().take(6).map(|(pid, name, attempt_id)| {
+            let who = attempts.iter().find(|a| a.id == attempt_id).and_then(|a| members.iter().find(|m| m.id == a.member_id)).map(|m| m.name.clone()).unwrap_or_else(|| "no one".into());
+            format!("{name} (pid {pid}, {who}'s attempt {attempt_id})")
+        }).collect();
+        if !procs.is_empty() { parts.push(format!("processes of attempts: {}", procs.join(", "))); }
+        let own: Vec<PathBuf> = owned.iter().filter(|w| w.state != WorkspaceState::Removed).map(|w| PathBuf::from(&w.path)).collect();
+        let mut foreign: Vec<(PathBuf, u64)> = projects.iter().flat_map(|p| workspaces::foreign_worktrees(Path::new(&p.repo_path), &own)).collect();
+        foreign.sort_by(|a, b| b.1.cmp(&a.1));
+        if !foreign.is_empty() {
+            let list: Vec<String> = foreign.iter().take(5).map(|(p, b)| format!("{} ({:.1} GB)", p.display(), *b as f64 / (1u64 << 30) as f64)).collect();
+            parts.push(format!("worktrees of the repository the guild did not make (remove them when their work is merged): {}", list.join(", ")));
+        }
+        if parts.is_empty() { "no process of an attempt and no worktree of its own explains it: look at the folders members write outside the worktree (an engine's logs, a cache)".into() } else { parts.join("; ") }
     }
 
     /// "I have it": no more notices or alerts for this wait; it stays listed until it ends.
@@ -5089,6 +5221,10 @@ fn changed_files(ws: &Workspace) -> Vec<String> {
 
 /// How often the guild looks whether what a member left running has ended (FB-072).
 /// How long a process an attempt left running has to end on SIGTERM before SIGKILL (FB-075).
+/// How long what an attempt left running may outlive a paused quest before it is stopped (FB-079).
+const ORPHAN_PARKED: Duration = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(10 * 60) };
+/// A fall of the free space between two health checks that is worth saying (FB-079).
+const DISK_FALL: u64 = 4 << 30;
 const REAP_GRACE: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(5) };
 
 const BACKGROUND_POLL: Duration = if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(5) };
@@ -5099,6 +5235,25 @@ const FIRST_BACKGROUND_WAIT: Duration = Duration::from_secs(10 * 60);
 
 /// Processes as the member reads them.
 fn describe_processes(list: &[(i32, String)]) -> Vec<String> { list.iter().take(8).map(|(pid, name)| format!("{name} (pid {pid})")).collect() }
+
+/// What to do about a process that carries an attempt's mark (FB-079).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Orphan {
+    /// Nobody waits for it: its attempt ended, or its task or quest is over.
+    Now,
+    /// Its quest is paused: it may be what the user wants kept for a while, not for ever.
+    Parked,
+}
+
+/// Whether a marked process has outlived what it was for. `quest` is the state of the quest of
+/// its attempt's task, `live` whether the attempt's driver still runs.
+fn orphan_verdict(attempt: Option<&Attempt>, quest: Option<QuestState>, live: bool) -> Option<Orphan> {
+    let Some(a) = attempt else { return Some(Orphan::Now) };
+    if matches!(quest, Some(QuestState::Cancelled | QuestState::Failed | QuestState::Completed)) { return Some(Orphan::Now); }
+    if a.state.is_terminal() && !live { return Some(Orphan::Now); }
+    if matches!(quest, Some(QuestState::Paused | QuestState::Blocked)) { return Some(Orphan::Parked); }
+    None
+}
 
 /// How long a new task waits before it is dispatched, for the lead to set its role,
 /// member or timeout first (FB-069).
@@ -6793,6 +6948,41 @@ mod tests {
         service.probe_harnesses();
         service.reconcile();
         (service, mock)
+    }
+
+    #[test]
+    fn what_an_attempt_left_running_is_stopped_once_nobody_waits_for_it() {
+        // FB-079: a looping test ran ten hours after its quest was paused and wrote 38 GB.
+        let home = TempHome::new();
+        let (service, _q) = seed(&home, &home.0.join("guild.db"), 1, false);
+        let running = seed_attempt(&service, "aria", AttemptState::Running, false, None, 1);
+        let over = seed_attempt(&service, "bram", AttemptState::Failed, false, None, 1);
+        assert_eq!(orphan_verdict(Some(&running), Some(QuestState::Running), true), None, "work in progress");
+        assert_eq!(orphan_verdict(Some(&over), Some(QuestState::Running), false), Some(Orphan::Now), "its attempt ended");
+        assert_eq!(orphan_verdict(Some(&over), Some(QuestState::Running), true), None, "its driver is still closing it");
+        assert_eq!(orphan_verdict(Some(&running), Some(QuestState::Paused), true), Some(Orphan::Parked), "paused: kept for a while");
+        assert_eq!(orphan_verdict(Some(&running), Some(QuestState::Cancelled), true), Some(Orphan::Now), "cancelled: no one wants it");
+        assert_eq!(orphan_verdict(None, None, false), Some(Orphan::Now), "no such attempt");
+    }
+
+    #[test]
+    fn a_task_that_began_before_its_sibling_integrated_is_sent_back_once_on_the_new_branch() {
+        // FB-078: the orchestrator left it to the delegate and nobody came back for 42 minutes.
+        let home = TempHome::new();
+        let (service, quest_id) = seed(&home, &home.0.join("guild.db"), 1, false);
+        let a = seed_attempt(&service, "aria", AttemptState::Failed, false, None, 1);
+        service.move_task("t1", TaskState::Failed, Some("attempts ran out".into())).unwrap();
+        assert!(!service.catch_up(&a.id), "the quest's branch has not moved: nothing to catch up on");
+        let (project, quest) = { let store = service.store.lock().unwrap(); (store.project("p").unwrap().unwrap(), store.quest(&quest_id).unwrap().unwrap()) };
+        let repo = Path::new(&project.repo_path);
+        let tip = workspaces::rev_parse(repo, &quest.integration_ref).unwrap();
+        let tree = workspaces::git(repo, &["rev-parse", &format!("{tip}^{{tree}}")]).unwrap();
+        let sibling = workspaces::git(repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", &tree, "-p", &tip, "-m", "sibling"]).unwrap();
+        workspaces::git(repo, &["update-ref", &quest.integration_ref, &sibling]).unwrap();
+        assert!(service.catch_up(&a.id), "a sibling integrated since: the task goes again");
+        assert!(event_kinds(&service).iter().any(|k| k == "orchestrator.caught_up"));
+        assert_eq!(service.snapshot().unwrap().tasks[0].state, TaskState::Ready);
+        assert!(!service.catch_up(&a.id), "only once");
     }
 
     #[test]

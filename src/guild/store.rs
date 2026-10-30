@@ -364,6 +364,7 @@ impl Store {
             concurrency: 0,
             overlaps: vec![],
             disk_low: None,
+            disk_note: None,
             paused_members: vec![],
             stalls: self.stalls()?,
         })

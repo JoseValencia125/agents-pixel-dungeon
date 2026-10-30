@@ -164,9 +164,56 @@ fn console_line(ui: &mut Ui, spans: &[Span], codes: &[crate::ansi::Code], size: 
     egui::text_selection::LabelSelectionState::label_text_selection(ui, &response, pos, galley, Color32::from_gray(222), Stroke::NONE);
     if let Some(target) = target {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        if response.clicked() { crate::herdr::reveal_target(&target); }
+        let image = is_image(&target);
+        if response.clicked() {
+            // An image opens its preview here; the rest is shown where it lives.
+            if image { ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("image-preview"), target.clone())); } else { crate::herdr::reveal_target(&target); }
+        }
         let web = target.starts_with("http://") || target.starts_with("https://");
-        response.on_hover_text(if web { target.clone() } else { trf("Mostrar en Finder: {}", &[&crate::herdr::abbreviate_home(&target)]) });
+        response.on_hover_text(if web { target.clone() } else if image { trf("Vista previa: {}", &[&crate::herdr::abbreviate_home(&target)]) } else { trf("Mostrar en Finder: {}", &[&crate::herdr::abbreviate_home(&target)]) });
+    }
+}
+
+/// A file path whose extension the preview can decode.
+fn is_image(target: &str) -> bool {
+    !target.contains("://") && target.rsplit_once('.').is_some_and(|(_, ext)| ["png", "jpg", "jpeg", "gif", "webp"].contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+/// The image ⌘-clicked in the console, in a window over it: the file as it
+/// is (shrunk to fit, never enlarged past its size), with a button to show
+/// it in Finder. Esc, ✕ or the close button put it away.
+fn image_preview(ctx: &egui::Context) {
+    let id = egui::Id::new("image-preview");
+    let Some(path) = ctx.data(|d| d.get_temp::<String>(id)) else { return };
+    let texture_id = egui::Id::new(("image-preview-texture", &path));
+    let texture = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(texture_id)).unwrap_or_else(|| {
+        let decoded = image::open(&path).ok().map(|i| i.to_rgba8()).map(|i| egui::ColorImage::from_rgba_unmultiplied([i.width() as usize, i.height() as usize], i.as_raw()));
+        let handle = decoded.map(|c| ctx.load_texture(format!("preview/{path}"), c, egui::TextureOptions::LINEAR));
+        ctx.data_mut(|d| d.insert_temp(texture_id, handle.clone()));
+        handle
+    });
+    let mut open = true;
+    let mut close = false;
+    let screen = ctx.screen_rect().size();
+    egui::Window::new(mono(&crate::herdr::abbreviate_home(&path), 11.0)).id(egui::Id::new("image-preview-window")).open(&mut open).collapsible(false).resizable(false)
+        .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0)).show(ctx, |ui| {
+            match &texture {
+                Some(texture) => {
+                    let size = texture.size_vec2();
+                    let fit = (screen.x * 0.8 / size.x).min(screen.y * 0.7 / size.y).min(1.0);
+                    ui.image((texture.id(), size * fit));
+                    ui.label(mono(&format!("{} × {}", size.x as u32, size.y as u32), 10.0).color(DIM));
+                }
+                None => { ui.label(mono(&tr("No se pudo leer la imagen"), 11.0).color(Color32::from_rgb(255, 159, 10))); }
+            }
+            ui.horizontal(|ui| {
+                if ui.button(tr("Mostrar en Finder")).clicked() { crate::herdr::reveal_target(&path); }
+                if ui.button(tr("Cerrar vista previa")).clicked() { close = true; }
+            });
+        });
+    if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) { open = false; }
+    if !open {
+        ctx.data_mut(|d| { d.remove::<String>(id); d.remove::<Option<egui::TextureHandle>>(texture_id); });
     }
 }
 
@@ -449,7 +496,7 @@ pub struct ChatState {
     pull: Option<crate::changes::PullRequest>,
     pull_rx: Option<Receiver<Option<crate::changes::PullRequest>>>,
     next_pull: f64,
-    /// The agent orchestrates the guild: its tabs are over the chat, so
+    /// The agent is the guild's delegate: its tabs are over the chat, so
     /// the chat offers no guild mode.
     pub guild_lead: bool,
 }
@@ -511,7 +558,7 @@ impl ChatState {
 pub struct ChatAction {
     pub close: bool,
     pub terminal: bool,
-    /// Make this agent the guild's orchestrator.
+    /// Make this agent the guild's delegate.
     pub guild: bool,
     /// The console's text size: +1 bigger, -1 smaller.
     pub console_step: i8,
@@ -536,6 +583,7 @@ fn changes_open(ctx: &Context) -> bool {
 }
 
 pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatState, now: f64, wide: bool) -> ChatAction {
+    image_preview(ui.ctx());
     poll_changes(ui.ctx(), agent, state, now, wide && changes_open(ui.ctx()));
     if !(wide && changes_open(ui.ctx())) { return chat_body(ui, monitor, agent, state, now, wide); }
     // The changed files take the console's right side.
@@ -804,9 +852,9 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                 let pink = Color32::from_rgb(181, 80, 136);
                 let clicked = if wide {
                     ui.add(egui::Button::new(mono(&tr("⚔ Modo guild"), 11.0).color(pink)).fill(alpha(pink, 0.08)).stroke(Stroke::new(1.0_f32, alpha(pink, 0.35))).corner_radius(CornerRadius::same(4)))
-                        .on_hover_text(tr("Que este agente sea el orquestador de la guild: arma el equipo, reparte el trabajo y lleva el diseño")).clicked()
+                        .on_hover_text(tr("Que este agente sea el delegado de la guild: conversa contigo, arma el equipo, reparte el trabajo y lleva el diseño")).clicked()
                 } else {
-                    flat_button(ui, mono("⚔", 12.0).color(Color32::from_rgb(214, 120, 180))).on_hover_text(tr("Modo guild: que este agente sea el orquestador de la guild")).clicked()
+                    flat_button(ui, mono("⚔", 12.0).color(Color32::from_rgb(214, 120, 180))).on_hover_text(tr("Modo guild: que este agente sea el delegado de la guild")).clicked()
                 };
                 if clicked && !sending { action.guild = true; }
             }

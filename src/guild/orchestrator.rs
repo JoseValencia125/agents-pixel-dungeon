@@ -40,7 +40,7 @@ pub struct Plan {
     pub tasks: Vec<PlannedTask>,
 }
 
-/// The member who orchestrates: the enabled planner, else the first
+/// The member who speaks for the guild in the hall's chat (its delegate): the enabled planner, else the first
 /// enabled member, on a harness that is available.
 pub fn pick(members: &[Member], available: &[HarnessKind]) -> Option<Member> {
     // The guild's orchestrator decides for the members; it never talks to the user.
@@ -48,7 +48,7 @@ pub fn pick(members: &[Member], available: &[HarnessKind]) -> Option<Member> {
     members.iter().filter(usable).find(|m| m.roles.iter().any(|r| r == "planner")).or_else(|| members.iter().find(usable)).cloned()
 }
 
-pub const ROLE_PROMPT: &str = "You are the orchestrator of a game development guild. You are the only member the user talks to; the other members never hear from the user directly. Understand what the user wants, answer briefly in the user's language, and when it needs work, plan it for the members. Do not edit files: read the repository if you need to, the members do the work.";
+pub const ROLE_PROMPT: &str = "You are the delegate of a game development guild. You are the only member the user talks to; the other members never hear from the user directly. Understand what the user wants, answer briefly in the user's language, and when it needs work, plan it for the members. Do not edit files: read the repository if you need to, the members do the work.";
 
 /// How tasks are written, for the guild's own orchestrator and for an
 /// agent that orchestrates from its terminal.
@@ -194,7 +194,7 @@ fn hire_when(role: &str) -> &'static str {
 }
 
 /// What an agent that was running on its own reads when it becomes the
-/// guild's orchestrator (`guild orchestrate`): who it is now, how it
+/// guild's delegate (`guild delegate`, `guild orchestrate` before): who it is now, how it
 /// behaves when the user wants a game, the roles it can hire, how it
 /// writes tasks, the commands that change every tab the user sees, and
 /// the guild as it is.
@@ -203,10 +203,10 @@ pub fn brief(snap: &Snapshot, project: Option<&Project>, bin: &str) -> String {
     let quoted = if bin.contains(' ') { format!("'{bin}'") } else { bin.to_string() };
     let pid = project.map(|p| p.id.clone()).unwrap_or_else(|| "<project>".into());
     let mut s = String::new();
-    s.push_str("# You are the guild's orchestrator\n\n");
-    s.push_str("The user switched this session to guild mode. You keep talking with the user here, in their language, as before; you now also run a guild of agents (its members: Claude, Codex, Kiro… each in its own git worktree) that do the building. The user's dungeon shows your room with tabs — Guild (members and what each does), Quests (the work and what waits for a decision), Design (the game design document) — and every tab reads the guild's state. Change them with the commands below; never write the guild's files by hand. Members never hear from the user: everything they know is in the task you write. Use your own subagents for reading and research if your harness has them; the members are for work that lands in the repository.\n\n");
+    s.push_str("# You are the guild's delegate\n\n");
+    s.push_str("The user switched this session to guild mode. You are the guild's delegate: you keep talking with the user here, in their language, as before, and you lead a guild of agents (its members: Claude, Codex, Kiro… each in its own git worktree) that do the building. The user's dungeon shows your room with tabs — Guild (members and what each does), Quests (the work and what waits for a decision), Design (the game design document) — and every tab reads the guild's state. Change them with the commands below; never write the guild's files by hand. Members never hear from the user: everything they know is in the task you write. Use your own subagents for reading and research if your harness has them; the members are for work that lands in the repository.\n\n");
     match snap.members.iter().find(|m| m.enabled && m.roles.iter().any(|r| r == "orchestrator")) {
-        Some(o) => s.push_str(&format!("## You are the delegate, not the orchestrator\n\n{} (`{}`), the guild's orchestrator, answers the members' permissions, candidates and failures within its bounds, so nobody waits while you talk with the user. You see only what it escalates: the NEEDS YOU lines of `guild tool guild_status`, each with its reason. Settle those before and after each answer to the user.\n\n", o.name, o.id)),
+        Some(o) => s.push_str(&format!("## The orchestrator answers the members, not you\n\n{} (`{}`), the guild's orchestrator and a member like the others, answers the members' permissions, candidates and failures within its bounds, so nobody waits while you talk with the user. You see only what it escalates: the NEEDS YOU lines of `guild tool guild_status`, each with its reason. Settle those before and after each answer to the user.\n\n", o.name, o.id)),
         None => s.push_str(&format!("## Hire an orchestrator first\n\nWhile you talk with the user nobody answers the members, and they wait. Before the first quest hire the guild's orchestrator: `{g} member add orchestrator --harness claude --model haiku --role orchestrator` (any harness; a fast model is enough). It decides what it can within its bounds and leaves you the rest. Until it is there, look at `{g} tool guild_status` before and after each answer and settle what waits, the oldest first (each line says how long it has waited).\n\n")),
     }
     s.push_str("## Stay free to talk\n\nAnything that takes more than a couple of calls — writing or rebuilding a document, a long read, research, mirroring a doc — goes to a subagent of yours (it has your tools, Claude Docs included) or, when it lands in the repository, to a member as a task. A merge with its checks counts too, short as it looks. Say in a line what you sent off and keep talking; never leave the user waiting on your own long work.\n\n");
@@ -230,12 +230,12 @@ pub fn brief(snap: &Snapshot, project: Option<&Project>, bin: &str) -> String {
     s.push_str(&format!("Design tab — the living game design:\n- `{g} design {pid} doc` reads it as the user sees it  ·  `get` as JSON  ·  `set <file|->` replaces it  ·  `template`\n- `{g} design {pid} system set <id> --name N --maturity M --intent … --current … --known … --unknown …`\n- `{g} question new {pid} --question …`  ·  `{g} question resolve {pid} <Q-id> --decision … --why …` (`question reopen {pid} <Q-id> --why …` undoes one resolved by mistake)  ·  `{g} decision new {pid} --decision … --why … [--supersedes DEC-id]` (a decision that replaces another says so: tasks under way that cite the old one get a note)\n- `{g} design {pid} export` commits game-design/ to the branch guild/design/{pid}, never the checkout\n\nVisual tab — the game's look, which every task's context carries (the user drops images and palettes there):\n- `{g} visual {pid}` reads it  ·  `{g} visual {pid} add <file>… [--caption T] [--kind reference|concept|asset]` an image or a palette file  ·  `{g} visual {pid} palette <name> <#rrggbb>…`  ·  `{g} visual {pid} notes <text>`\n- Write the art direction's rules into its notes and palettes before the first asset task; an art director keeps them, and asset tasks name the palette to use.\n\n"));
     let doc = project.and_then(|p| snap.designs.iter().find(|d| d.project_id == p.id)).and_then(|d| d.doc.clone());
     s.push_str(&design_doc_section(doc.as_ref(), &pid));
-    s.push_str("Accepting a task merges it into the quest's branch guild/quest/<id>, never into the user's branch. Do not hold that branch until the quest ends: when a batch of tasks is integrated and verified, have it merged into the project's branch (a subagent or a member; after the merge, the project's setup — an engine's import — runs before its checks, as in the worktrees) and tell the user what landed; until then other agents see the old code.\n\n");
+    s.push_str("Accepting a task merges it into the quest's branch guild/quest/<id>, never into the user's branch. Do not hold that branch until the quest ends: when a batch of tasks is integrated and verified, have it merged into the project's branch (a subagent or a member; after the merge, the project's setup — an engine's import — runs before its checks, as in the worktrees) and tell the user what landed; until then other agents see the old code. A worktree you make yourself for a merge goes in the same step, once the merge is pushed (`git worktree remove`, taking out first any symlink to shared assets): one left behind took 5 GB and, with the rest, stopped the guild from starting work (FB-080).\n\n");
     s.push_str(&format!("Feedback on the guild itself — when something about the guild, a role's prompt, this brief, a harness or your own task writing helps or gets in the way, note it as it happens, with its evidence (quest, task, attempt ids) and its cause; an agent improving the guild reads these later:\n- `{g} feedback new --project {pid} --kind works|fails --cause role|brief|orchestrator|guild|harness|project --title … --evidence … [--cost …] [--proposal …] [--ref ID]…`\n- `{g} feedback list --status open`  ·  `{g} feedback export` (Markdown)  ·  `{g} feedback set <FB-id> --status proposed|applied|discarded [--commit SHA] [--note …]`\nBlame the right cause: a mistake in your own spec is `orchestrator`, not `role`. Never change the guild while a quest runs.\n\n"));
     s.push_str("## The guild now\n\n");
     match project {
         Some(p) => s.push_str(&format!("Project `{}` — {} at {} (quests start from {}).\n", p.id, p.name, p.repo_path, p.target_ref.trim_start_matches("refs/heads/"))),
-        None => s.push_str("No project yet: run `guild orchestrate <repository path>` to add it.\n"),
+        None => s.push_str("No project yet: run `guild delegate <repository path>` to add it.\n"),
     }
     s.push_str(&format!("Concurrency: {} at once.\n", snap.concurrency.max(1)));
     let members: Vec<&Member> = snap.members.iter().filter(|m| m.enabled).collect();
@@ -249,7 +249,7 @@ pub fn brief(snap: &Snapshot, project: Option<&Project>, bin: &str) -> String {
         Some(d) => s.push_str(&crate::design::prompt_context(d)),
         None => s.push_str("Design: none yet.\n"),
     }
-    s.push_str("\nNow answer the user: say in one line that you run the guild, and carry on with what they asked. If they had asked for nothing, ask what they want to make.\n");
+    s.push_str("\nNow answer the user: say in one line that you are ready as the guild's delegate, and carry on with what they asked. If they had asked for nothing, ask what they want to make.\n");
     s
 }
 
@@ -331,7 +331,7 @@ mod tests {
         assert!(b.contains("Hire an orchestrator first") && b.contains("--role orchestrator"));
         let with = Snapshot { members: vec![member("ada", "gameplay-engineer"), member("orin", "orchestrator")], roles: crate::config::role_catalog(), ..Default::default() };
         let b = brief(&with, None, "guild");
-        assert!(b.contains("You are the delegate") && b.contains("ORIN (`orin`)") && !b.contains("Hire an orchestrator first"));
+        assert!(b.contains("You are the guild's delegate") && b.contains("The orchestrator answers the members, not you") && !b.contains("You are the guild's orchestrator") && b.contains("ORIN (`orin`)") && !b.contains("Hire an orchestrator first"));
         // With Claude Docs the design is edited in a doc: made once, then linked and mirrored.
         assert!(b.contains("The design lives in a Claude Doc") && b.contains("design <project> link <its url>"));
         assert!(b.contains("## Stay free to talk") && b.contains("goes to a subagent"), "FB-033");

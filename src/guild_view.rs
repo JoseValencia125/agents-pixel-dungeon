@@ -87,7 +87,7 @@ pub struct GuildView {
     pub results: std::collections::HashMap<String, Value>,
     /// The member whose work the hall's panel shows, if one is open.
     pub hall_member: Option<String>,
-    /// What the user is writing to the orchestrator.
+    /// What the user is writing to the delegate.
     pub draft: String,
     /// The demo's conversation, as the user types to it.
     demo_chat: Vec<guild::orchestrator::ChatLine>,
@@ -341,16 +341,16 @@ impl GuildView {
 
     pub fn member_agent_id(member_id: &str) -> String { format!("{ID_PREFIX}{member_id}") }
 
-    /// The guild as one room, the orchestrator's: its hero in its own
+    /// The guild as one room, the delegate's: its hero in its own
     /// state, the members around it at the stations of what they do. The
-    /// user only talks to the orchestrator; the members work around it.
+    /// user only talks to the delegate; the members work around it.
     pub fn agents(&self) -> Vec<Agent> {
         let Some(snap) = &self.snapshot else { return vec![] };
         hall_agent(snap).into_iter().collect()
     }
 
     /// Every enabled member as a character, for the room of the agent
-    /// that orchestrates in guild mode.
+    /// that is the delegate in guild mode.
     pub fn crew(&self) -> Vec<crate::herdr::CrewMember> {
         let Some(snap) = &self.snapshot else { return vec![] };
         snap.members.iter().filter(|m| m.enabled).map(|m| crew_member(snap, m)).collect()
@@ -623,7 +623,7 @@ fn button(ui: &mut Ui, text: &str, color: Color32) -> bool {
     ui.add(egui::Button::new(label).fill(color).corner_radius(CornerRadius::same(3)).stroke(Stroke::NONE)).clicked()
 }
 
-/// The hall's panel: the chat with the orchestrator, what needs the user,
+/// The hall's panel: the chat with the delegate, what needs the user,
 /// and the crew below. A member's own work opens in place, with a way back.
 pub fn hall_panel(ui: &mut Ui, view: &mut GuildView, now: f64, wide: bool) -> PanelAction {
     let mut action = PanelAction::default();
@@ -1252,6 +1252,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         orchestrator_busy: false,
         overlaps: vec![],
         disk_low: None,
+        disk_note: None,
         paused_members: vec![],
         stalls: vec![],
         concurrency: 3,

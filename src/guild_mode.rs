@@ -1,5 +1,5 @@
 //! Guild mode: an agent already running in Herdr becomes the guild's
-//! orchestrator. One message asks it to run `guild orchestrate`, whose
+//! delegate. One message asks it to run `guild delegate`, whose
 //! brief tells it how to lead, which roles it can hire and the commands
 //! that change the guild. Its room keeps the chat and gains tabs that read
 //! the guild as the agent shapes it: the crew, the quests and the game
@@ -45,11 +45,11 @@ pub fn guild_binary() -> String {
     beside.filter(|p| p.exists()).or_else(|| guild::platform::which("agents-pixel-dungeon-guild")).map(|p| p.display().to_string()).unwrap_or_else(|| "agents-pixel-dungeon-guild".into())
 }
 
-/// The one message that makes the agent the orchestrator, on one line
+/// The one message that makes the agent the delegate, on one line
 /// (each newline would press Enter in its terminal).
 pub fn bootstrap(binary: &str, cwd: &str) -> String {
     let quote = |s: &str| if s.contains(' ') || s.contains('\'') { format!("'{}'", s.replace('\'', "'\\''")) } else { s.to_string() };
-    trf("Modo guild: desde ahora eres el orquestador de la guild de este repositorio. Ejecuta `{} orchestrate {}`, lee todo lo que imprime y síguelo; luego dime en una línea que tomaste el mando.", &[&quote(binary), &quote(cwd)])
+    trf("Modo guild: desde ahora eres el delegado de la guild de este repositorio: conversas conmigo, propones, llevas el diseño y lanzas las misiones; otro miembro, el orquestador, responde a los miembros. Ejecuta `{} delegate {}`, lee todo lo que imprime y síguelo; luego dime en una línea que estás listo.", &[&quote(binary), &quote(cwd)])
 }
 
 /// The guild's project for the agent's folder: the one whose repository
@@ -174,7 +174,7 @@ fn crew(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot) {
         ui.add_space(4.0);
     }
     if snap.members.is_empty() {
-        ui.label(mono(&tr("Sin miembros todavía. Pídele al orquestador, en el Chat, que arme el equipo: elige los roles y cuántos según el trabajo."), 11.0).color(DIM));
+        ui.label(mono(&tr("Sin miembros todavía. Pídele al delegado, en el Chat, que arme el equipo: elige los roles y cuántos según el trabajo."), 11.0).color(DIM));
         return;
     }
     // By what they do, so who works is seen at once (FB-056): at work, then
@@ -249,12 +249,12 @@ fn task_glyph(state: TaskState) -> (&'static str, Color32) {
 /// state, role, who has it; a task with a member opens its work.
 fn quests(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot, project: Option<&Project>) {
     let Some(project) = project else {
-        ui.label(mono(&tr("La guild aún no tiene este repositorio. El orquestador lo añade al pasar a modo guild."), 11.0).color(DIM));
+        ui.label(mono(&tr("La guild aún no tiene este repositorio. El delegado lo añade al pasar a modo guild."), 11.0).color(DIM));
         return;
     };
     let mut list: Vec<&Quest> = snap.quests.iter().filter(|q| q.project_id == project.id).collect();
     if list.is_empty() {
-        ui.label(mono(&tr("Sin misiones. El orquestador las crea cuando le pides trabajo en el Chat."), 11.0).color(DIM));
+        ui.label(mono(&tr("Sin misiones. El delegado las crea cuando le pides trabajo en el Chat."), 11.0).color(DIM));
         return;
     }
     let open = |q: &Quest| matches!(q.state, QuestState::Running | QuestState::Paused | QuestState::Blocked);
@@ -318,7 +318,7 @@ fn missing(ui: &mut Ui) { ui.label(mono(&tr("Aún sin escribir."), 10.5).italics
 fn design(ui: &mut Ui, snap: &Snapshot, project: Option<&Project>, wide: bool) -> bool {
     let mut edit = false;
     let Some(d) = project.and_then(|p| snap.designs.iter().find(|d| d.project_id == p.id)) else {
-        ui.label(mono(&tr("Aún no hay documento de diseño. Dile al orquestador, en el Chat, qué juego quieres hacer: propondrá el concepto y lo escribirá aquí."), 11.0).color(DIM));
+        ui.label(mono(&tr("Aún no hay documento de diseño. Dile al delegado, en el Chat, qué juego quieres hacer: propondrá el concepto y lo escribirá aquí."), 11.0).color(DIM));
         if ui.button(mono(&tr("Abrir la cámara de diseño"), 11.0)).clicked() { edit = true; }
         return edit;
     };
@@ -477,7 +477,7 @@ pub(crate) fn thumbnail(ctx: &egui::Context, state: &mut VisualState, file: &str
 /// palette files read into palettes.
 fn visual(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot, project: Option<&Project>, wide: bool) {
     let Some(project) = project else {
-        ui.label(mono(&tr("La guild aún no tiene este repositorio. El orquestador lo añade al pasar a modo guild."), 11.0).color(DIM));
+        ui.label(mono(&tr("La guild aún no tiene este repositorio. El delegado lo añade al pasar a modo guild."), 11.0).color(DIM));
         return;
     };
     let pid = project.id.clone();
@@ -767,7 +767,7 @@ mod tests {
     fn the_message_is_one_line_with_the_command_quoted() {
         let m = bootstrap("/Applications/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild", "/Users/x/my game");
         assert!(!m.contains('\n'));
-        assert!(m.contains("'/Applications/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild' orchestrate '/Users/x/my game'"), "{m}");
+        assert!(m.contains("'/Applications/Agents Pixel Dungeon.app/Contents/MacOS/agents-pixel-dungeon-guild' delegate '/Users/x/my game'"), "{m}");
     }
 
     #[test]
