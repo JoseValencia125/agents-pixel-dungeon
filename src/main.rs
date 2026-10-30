@@ -1202,7 +1202,7 @@ impl eframe::App for App {
                                     if action.terminal { self.terminals.open(ctx, &agent.cwd); }
                                     if action.close { self.monitor.select(None); }
                                     if action.guild {
-                                        // The agent becomes the orchestrator: one message, then its tabs.
+                                        // The agent becomes the delegate: one message, then its tabs.
                                         chat.send_now(&self.monitor, &agent, &guild_mode::bootstrap(&guild_mode::guild_binary(), &agent.cwd));
                                         self.prefs.guild_lead = Some(agent.id.clone());
                                         self.prefs.save();

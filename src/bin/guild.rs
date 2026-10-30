@@ -19,9 +19,9 @@ agents-pixel-dungeon-guild — the guild that plans, builds, verifies and integr
 
 USAGE
   guild serve [--daemon] [--concurrency N] [--attempt-timeout MIN] [--min-free-gb N (default 20)]
-  guild mcp                          an MCP server on stdio, so Claude Code orchestrates the guild
+  guild mcp                          an MCP server on stdio, so Claude Code leads the guild as its delegate
   guild status                       the guild at a glance
-  guild orchestrate [<path>]         make the agent running this the guild's orchestrator: adds the repository
+  guild delegate [<path>]            make the agent running this the guild's delegate (`orchestrate` still works): adds the repository
                                      and prints its brief (how to lead, the roles, the commands, the guild now)
   guild tool <name> [JSON|-]         run one of the MCP tools (guild_status, guild_start_quest, guild_wait,
                                      guild_task, guild_diff, guild_decide, guild_permission) from a shell
@@ -530,7 +530,7 @@ fn client_command(command: &str, args: &[String]) -> Result<(), String> {
             println!("{out}");
             Ok(())
         }
-        "orchestrate" => {
+        "delegate" | "orchestrate" => {
             let client = ensure_running()?;
             let mut project_id = None;
             if let Some(path) = a.positional.first() {

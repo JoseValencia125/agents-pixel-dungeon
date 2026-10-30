@@ -651,7 +651,7 @@ pub struct Snapshot {
     /// The guild's chat with its orchestrator, oldest first.
     #[serde(default)]
     pub conversation: Vec<crate::orchestrator::ChatLine>,
-    /// The member who orchestrates, and whether it is thinking now.
+    /// The member who speaks for the guild (its delegate), and whether it is thinking now.
     #[serde(default)]
     pub orchestrator: Option<String>,
     #[serde(default)]
@@ -666,6 +666,10 @@ pub struct Snapshot {
     /// guild's minimum: no work starts until there is room (FB-075).
     #[serde(default)]
     pub disk_low: Option<u64>,
+    /// What takes the room while the disk runs low or falls fast: the processes members left
+    /// behind and the repository's worktrees the guild did not make (FB-079, FB-080).
+    #[serde(default)]
+    pub disk_note: Option<String>,
     /// Members that hit their harness's usage limit: nothing is given to them
     /// until the time shown (UTC, RFC 3339) (FB-071).
     #[serde(default)]

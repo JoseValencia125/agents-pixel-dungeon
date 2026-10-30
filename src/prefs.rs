@@ -56,7 +56,7 @@ pub struct Prefs {
     /// Each repo's emblem as it was first worked out, by key, so it does not
     /// change between launches.
     pub emblems: std::collections::BTreeMap<String, crate::identity::SavedEmblem>,
-    /// The agent (its Herdr id) that orchestrates the guild in guild mode.
+    /// The agent (its Herdr id) that is the guild's delegate in guild mode.
     pub guild_lead: Option<String>,
     #[serde(skip)]
     pub path: Option<PathBuf>,

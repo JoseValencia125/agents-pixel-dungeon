@@ -177,10 +177,10 @@ pub fn reflow(screen: Vec<Vec<Span>>) -> Vec<Vec<Span>> {
         let count = t.trim_end().chars().count();
         if open && !crate::herdr::starts_block(&t) {
             let last = out.last_mut().expect("an open paragraph");
-            // A URL goes on without a space: cut at the last column, or at
-            // one of its hyphens (the terminal breaks words there too).
+            // A URL or an absolute path goes on without a space: cut at the
+            // last column, or at one of its hyphens (the terminal breaks words there too).
             let tail = text(last.as_slice()).rsplit(' ').next().unwrap_or_default().to_string();
-            let glue = tail.contains("://") && (hard || tail.ends_with('-') || t.trim_start().starts_with('-'));
+            let glue = (tail.contains("://") || tail.starts_with('/') || tail.starts_with("~/")) && (hard || tail.ends_with('-') || t.trim_start().starts_with('-'));
             // The spaces at the seam go: this line's leading ones (the line above lost its trailing ones).
             let mut skip = 0;
             for s in line.iter_mut() {
@@ -332,6 +332,13 @@ mod tests {
         // Backticks left in by a harness; nothing in a line without code.
         assert_eq!(codes(&parse("run `cargo test` now"))[0][0].text, "cargo test");
         assert!(codes(&parse("plain words only"))[0].is_empty());
+    }
+
+    #[test]
+    fn reflowing_keeps_a_cut_path_whole() {
+        let screen = "Mira el recorte aqui abajo para ver como queda:\n- Dia: /private/tmp/claude-501/-Users-\nnachovalencia-harness/scratchpad/granja.png\nY esto es otra cosa que sigue en su propia linea";
+        let joined = plain(&reflow(parse(screen)));
+        assert!(joined.iter().any(|l| l.contains("/private/tmp/claude-501/-Users-nachovalencia-harness/scratchpad/granja.png")), "{joined:?}");
     }
 
     #[test]
