@@ -246,3 +246,9 @@ Small pieces taken from reading both projects (their open issues said as much as
 - **Removing a worktree is conservative** (Gas City's reaper): never under a process that still works there (`workspace.kept`); what no commit has is committed onto the attempt's branch first (`workspace.rescued`), so the disk frees and nothing is lost; a `git stash` a member made on a guild branch (the stash is shared with the user's checkout) is kept as `guild/rescued/stash-<sha>` and taken out of the user's stash (`stash.rescued`).
 - **A note is never lost in silence** (Gas Town #4634, Gas City #6446): `task.note` answers `delivery` (`now`, `when its turn ends`, `when the task starts`; `mode: "queue"` never interrupts), `note.delivered` is recorded when the member gets it and `note.deferred` when its turn did not stop for it.
 - Already had, nothing to take: the allow/refuse/ask permission policy with its refused list (`policy.rs`), the squash-merge identity, conflicts that return to their member without costing an attempt. Not taken on purpose: a focus mode (FB-064 was discarded), running agents without permission prompts (both projects do; one of them lost its store to an `rm -rf`).
+
+## The orchestrator runs the quest (FB-083, FB-084)
+
+- Its bounds now say *decide when unsure*: missing evidence and small departures from the design are accepted with a note for a follow-up; only design questions and dangerous things escalate, and the quest goes on meanwhile.
+- An escalation waits `ESCALATION_LIMIT_MIN` (30) for the delegate or the user; then the sentinel's `Try` asks the orchestrator again with `escalate` removed from its choices (`by_default: true` in the event).
+- While a quest runs, `round_tick` makes the orchestrator look over every member each `ROUND_EVERY_MIN` (5) minutes (`orchestrator.round` event): it may send notes to members at work and restart a lost task.

@@ -40,7 +40,7 @@ pub enum StallKind {
     VerifyingHung,
     /// A task waiting on a dependency that failed, was cancelled, or is done but did not release it.
     DependencyStalled,
-    /// The orchestrator could not decide and left it to the delegate; nobody answered.
+    /// The orchestrator left it to the delegate or the user and nobody answered within `ESCALATION_LIMIT_MIN`: the orchestrator settles it (`Try`).
     OrchestratorUndecided,
     /// A paused quest with work inside that is neither done nor going anywhere.
     PausedWithWork,
@@ -144,7 +144,7 @@ impl Default for Policy {
         Policy {
             grace: HashMap::from([
                 (StallKind::IntegrationStuck, m(2)), (StallKind::FailedUnattended, m(2)), (StallKind::CandidateWaiting, m(5)), (StallKind::InputWaiting, m(5)),
-                (StallKind::SilentRunning, m(10)), (StallKind::VerifyingHung, m(20)), (StallKind::DependencyStalled, m(10)), (StallKind::OrchestratorUndecided, m(5)),
+                (StallKind::SilentRunning, m(10)), (StallKind::VerifyingHung, m(20)), (StallKind::DependencyStalled, m(10)), (StallKind::OrchestratorUndecided, m(crate::orchestrator::ESCALATION_LIMIT_MIN)),
                 (StallKind::PausedWithWork, Duration::ZERO), (StallKind::NoProgress, m(20)),
             ]),
             notice_base: m(3),

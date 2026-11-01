@@ -94,7 +94,9 @@ pub struct Service {
     settling: Mutex<(HashSet<String>, HashSet<String>)>,
     /// Decisions waiting for the guild's orchestrator (attempt, what about);
     /// the scheduler's tick hands each to a thread of its own.
-    decisions: Mutex<Vec<(String, crate::orchestrator::DecisionKind)>>,
+    decisions: Mutex<Vec<(String, crate::orchestrator::DecisionKind, bool)>>,
+    /// When the orchestrator last made its round over each running quest.
+    rounds: Mutex<HashMap<String, Instant>>,
     /// How many attempts run at once: the settings' until the orchestrator
     /// or the user changes it (`guild.concurrency`), then kept in the store.
     concurrency: AtomicUsize,
@@ -169,6 +171,7 @@ impl Service {
             orchestrating: Mutex::new(None),
             settling: Mutex::new((HashSet::new(), HashSet::new())),
             decisions: Mutex::new(vec![]),
+            rounds: Mutex::new(HashMap::new()),
             running: Mutex::new(HashMap::new()),
             overlaps: Mutex::new((None, vec![])),
             gallery: Mutex::new((None, 0)),
@@ -432,9 +435,9 @@ impl Service {
 
     fn tick_inner(self: &Arc<Service>) -> Res<()> {
         // Decisions the orchestrator was asked for since the last tick.
-        for (attempt_id, kind) in std::mem::take(&mut *self.decisions.lock().unwrap()) {
+        for (attempt_id, kind, forced) in std::mem::take(&mut *self.decisions.lock().unwrap()) {
             let service = self.clone();
-            std::thread::Builder::new().name("decision".into()).spawn(move || service.decide(&attempt_id, kind)).ok();
+            std::thread::Builder::new().name("decision".into()).spawn(move || service.decide(&attempt_id, kind, forced)).ok();
         }
         // Readiness and quest completion.
         let (quests, tasks) = {
@@ -469,6 +472,7 @@ impl Service {
         self.sweep_tick(false);
         self.retry_integrations();
         self.sentinel_tick();
+        self.round_tick();
         let room = self.disk_has_room();
         // Dispatch.
         let running_quests: Vec<String> = quests.iter().filter(|q| q.state == QuestState::Running).map(|q| q.id.clone()).collect();
@@ -3044,12 +3048,15 @@ impl Service {
 
     /// Leave a decision to the guild's orchestrator, when it has one: the
     /// attempt is marked as being decided, so nobody else needs to.
-    fn ask_orchestrator(&self, attempt_id: &str, kind: crate::orchestrator::DecisionKind) -> bool {
+    fn ask_orchestrator(&self, attempt_id: &str, kind: crate::orchestrator::DecisionKind) -> bool { self.ask_orchestrator_as(attempt_id, kind, false) }
+
+    /// `forced`: the escalation timed out, so the orchestrator is asked again and may not escalate.
+    fn ask_orchestrator_as(&self, attempt_id: &str, kind: crate::orchestrator::DecisionKind, forced: bool) -> bool {
         if self.steward().is_none() { return false; }
         {
             let mut queue = self.decisions.lock().unwrap();
-            if queue.iter().any(|(id, k)| id == attempt_id && *k == kind) { return true; }
-            queue.push((attempt_id.to_string(), kind));
+            if queue.iter().any(|(id, k, _)| id == attempt_id && *k == kind) { return true; }
+            queue.push((attempt_id.to_string(), kind, forced));
         }
         if let Ok(a) = self.update_attempt(attempt_id, |a| { a.deciding = true; a.escalation = None; }) {
             self.emit(Event::new("orchestrator.deciding", "guild").about_attempt(&a).with(json!({"kind": kind})));
@@ -3059,8 +3066,8 @@ impl Service {
 
     /// Wake the orchestrator for one decision and carry it out; whatever it
     /// cannot settle (or says to escalate) is left to the delegate or the user.
-    fn decide(self: &Arc<Service>, attempt_id: &str, kind: crate::orchestrator::DecisionKind) {
-        let done = self.rule(attempt_id, kind).and_then(|r| { self.apply_ruling(attempt_id, kind, &r)?; Ok(r) });
+    fn decide(self: &Arc<Service>, attempt_id: &str, kind: crate::orchestrator::DecisionKind, forced: bool) {
+        let done = self.rule(attempt_id, kind, forced).and_then(|r| { self.apply_ruling(attempt_id, kind, &r)?; Ok(r) });
         let escalation = match &done {
             Ok(r) if r.decision == "escalate" => Some(r.reason.clone()),
             Ok(_) => None,
@@ -3071,7 +3078,7 @@ impl Service {
         if escalation.is_some() && self.catch_up(attempt_id) { return; }
         let (decision, reason) = done.map(|r| (r.decision, r.reason)).unwrap_or_else(|e| ("escalate".into(), e.message));
         let kind_name = if escalation.is_some() { "orchestrator.escalated" } else { "orchestrator.decided" };
-        self.emit(Event::new(kind_name, "orchestrator").about_attempt(&a).with(json!({"kind": kind, "decision": decision, "reason": reason})));
+        self.emit(Event::new(kind_name, "orchestrator").about_attempt(&a).with(json!({"kind": kind, "decision": decision, "reason": reason, "by_default": forced})));
     }
 
     /// A task that began before a sibling integrated what it needs comes back to its member
@@ -3101,7 +3108,7 @@ impl Service {
     }
 
     /// The orchestrator's ruling on one decision, from a turn of its own.
-    fn rule(&self, attempt_id: &str, kind: crate::orchestrator::DecisionKind) -> Res<crate::orchestrator::Ruling> {
+    fn rule(&self, attempt_id: &str, kind: crate::orchestrator::DecisionKind, forced: bool) -> Res<crate::orchestrator::Ruling> {
         use crate::orchestrator::DecisionKind::*;
         let steward = self.steward().ok_or_else(|| ApiError::conflict("the guild has no orchestrator"))?;
         let (attempt, task, project, design, worker, workspace) = {
@@ -3138,12 +3145,12 @@ impl Service {
                 if crate::domain::cut(&mut reply, 20_000) { reply.push_str("\n… (cut)"); }
                 format!("{worker} left this candidate. Its whole reply:\n\n{}\n\nVerifiers:\n{}\n\nDiff:\n```diff\n{diff}\n```", reply.trim(), if verifiers.is_empty() { "- none".into() } else { verifiers.join("\n") })
             }
-            Stall => format!("The task **{}** has waited too long and nobody moves it: it is {:?}{}. Its last attempt, by {worker}, is {:?}{}.\n\nIts last words: {}\n\nChoose: retry (a new attempt, with your reason as its instructions: only if something should change), nudge (a note to its member, if one is at work), integrate (a task accepted whose merge failed, to try it now), cancel (only when the work is superseded or no longer wanted), or escalate. When unsure, escalate.", task.title, task.state, task.block_reason.as_ref().map(|r| format!(" ({r})")).unwrap_or_default(), attempt.state, attempt.failure.as_ref().map(|f| format!(": {f}")).unwrap_or_default(), attempt.summary.trim()),
+            Stall => format!("The task **{}** has waited too long and nobody moves it: it is {:?}{}. Its last attempt, by {worker}, is {:?}{}.\n\nIts last words: {}\n\nChoose: retry (a new attempt, with your reason as its instructions: only if something should change), nudge (a note to its member, if one is at work), integrate (a task accepted whose merge failed, to try it now), cancel (only when the work is superseded or no longer wanted), or escalate (only for what is dangerous or a design question for the user). When unsure, decide.", task.title, task.state, task.block_reason.as_ref().map(|r| format!(" ({r})")).unwrap_or_default(), attempt.state, attempt.failure.as_ref().map(|f| format!(": {f}")).unwrap_or_default(), attempt.summary.trim()),
             Failure => format!("The task ran out of attempts ({} of {}). The last one, by {worker}, failed: {}\n\nIts last words: {}", task.attempts_made, task.max_attempts, attempt.failure.clone().unwrap_or_default(), attempt.summary.trim()),
         };
-        let prompt = crate::orchestrator::decision_prompt(kind, &task, &worker, &context, design.as_ref());
+        let prompt = crate::orchestrator::decision_prompt(kind, forced, &task, &worker, &context, design.as_ref());
         let text = self.one_turn(&project, &steward, &config::default_role_prompt("orchestrator"), &prompt, Duration::from_secs(120))?;
-        crate::orchestrator::parse_ruling(&text, kind).ok_or_else(|| ApiError::new("orchestrator", "its answer had no decision"))
+        crate::orchestrator::parse_ruling(&text, kind, forced).ok_or_else(|| ApiError::new("orchestrator", "its answer had no decision"))
     }
 
     /// Carry out a ruling through the same commands the user has; a
@@ -4753,6 +4760,70 @@ impl Service {
         if let Err(e) = self.sentinel_pass() { self.log(&format!("sentinel: {}", e.message)); }
     }
 
+    /// While a quest runs, the orchestrator looks over all its members every `ROUND_EVERY_MIN` minutes,
+    /// whether or not anything asked for it. The first round comes one period after the quest starts.
+    fn round_tick(self: &Arc<Service>) {
+        if cfg!(test) || self.steward().is_none() { return; }
+        let period = Duration::from_secs(crate::orchestrator::ROUND_EVERY_MIN * 60);
+        let running: Vec<String> = self.store.lock().unwrap().quests().unwrap_or_default().into_iter().filter(|q| q.state == QuestState::Running).map(|q| q.id).collect();
+        let due: Vec<String> = {
+            let mut rounds = self.rounds.lock().unwrap();
+            rounds.retain(|id, _| running.contains(id));
+            running.iter().filter(|id| match rounds.get(*id) { Some(at) => at.elapsed() >= period, None => { rounds.insert((*id).clone(), Instant::now()); false } }).cloned().collect()
+        };
+        for id in due {
+            self.rounds.lock().unwrap().insert(id.clone(), Instant::now());
+            let service = self.clone();
+            std::thread::Builder::new().name("round".into()).spawn(move || { if let Err(e) = service.round(&id) { service.log(&format!("round {id}: {}", e.message)); } }).ok();
+        }
+    }
+
+    /// One round: the orchestrator reads the board of the quest (each task, who works on it, how long it has
+    /// been quiet) and answers with words for members and tasks to restart; both go out through the same
+    /// commands the user has.
+    fn round(self: &Arc<Service>, quest_id: &str) -> Res<crate::orchestrator::RoundReport> {
+        let steward = self.steward().ok_or_else(|| ApiError::conflict("the guild has no orchestrator"))?;
+        let (quest, project, tasks, attempts, members) = {
+            let store = self.store.lock().unwrap();
+            let quest = store.quest(quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
+            let project = store.project(&quest.project_id)?.ok_or_else(|| ApiError::not_found("project"))?;
+            let tasks: Vec<Task> = store.tasks()?.into_iter().filter(|t| t.quest_id == quest_id).collect();
+            (quest, project, tasks, store.attempts()?, store.members()?)
+        };
+        let signals = self.attempt_signals(&attempts);
+        let mins = |d: Option<Duration>| d.map(|d| format!("{} min", d.as_secs() / 60)).unwrap_or_else(|| "unknown".into());
+        let mut board = String::new();
+        for t in tasks.iter().filter(|t| !t.state.is_terminal()) {
+            let latest = attempts.iter().filter(|a| a.task_id == t.id).max_by(|a, b| a.created_at.cmp(&b.created_at));
+            let line = match latest {
+                Some(a) => {
+                    let who = members.iter().find(|m| m.id == a.member_id).map(|m| m.name.clone()).unwrap_or_else(|| a.member_id.clone());
+                    let sig = signals.get(&a.id).copied().unwrap_or_default();
+                    format!("- {} (`{}`): task {:?}, {who}'s attempt {:?}, worked {} min, harness quiet {}, worktree unchanged {}, runs something: {}{}", t.title, t.id, t.state, a.state, a.worked_seconds / 60, mins(sig.quiet_for), mins(sig.idle_for), sig.runs_something, if a.summary.trim().is_empty() { String::new() } else { format!("; last words: {}", a.summary.trim().chars().take(300).collect::<String>()) })
+                }
+                None => format!("- {} (`{}`): task {:?}, no attempt yet", t.title, t.id, t.state),
+            };
+            board.push_str(&line);
+            board.push('\n');
+        }
+        let done = tasks.iter().filter(|t| t.state.is_terminal()).count();
+        board.push_str(&format!("\n{done} of {} tasks are over.\n", tasks.len()));
+        let text = self.one_turn(&project, &steward, &config::default_role_prompt("orchestrator"), &crate::orchestrator::round_prompt(&quest.title, &board), Duration::from_secs(120))?;
+        let report = crate::orchestrator::parse_round(&text).ok_or_else(|| ApiError::new("orchestrator", "its round had no report"))?;
+        for n in &report.notes {
+            if tasks.iter().any(|t| t.id == n.task_id && !t.state.is_terminal()) {
+                if let Err(e) = self.task_note(&json!({"taskId": n.task_id, "text": format!("The orchestrator: {}", n.text), "by": "orchestrator"})) { self.log(&format!("round: {}", e.message)); }
+            }
+        }
+        for r in &report.retries {
+            if tasks.iter().any(|t| t.id == r.task_id && !t.state.is_terminal()) {
+                if let Err(e) = self.task_retry(&json!({"taskId": r.task_id, "reason": r.reason, "instructions": r.reason})) { self.log(&format!("round: {}", e.message)); }
+            }
+        }
+        self.emit(Event::new("orchestrator.round", "orchestrator").about_quest(&quest).with(json!({"summary": report.summary, "notes": report.notes.len(), "retries": report.retries.len()})));
+        Ok(report)
+    }
+
     /// What the guild sees of each running attempt besides its state: how long since its
     /// harness did anything, and whether it left something running.
     fn attempt_signals(&self, attempts: &[Attempt]) -> HashMap<String, crate::sentinel::Signals> {
@@ -4868,7 +4939,20 @@ impl Service {
                 let text = format!("The guild sees you working but nothing in your worktree has changed ({}). Say what you are doing and what blocks you, or write what you have so far.", st.reason);
                 if let Err(e) = self.task_note(&json!({"taskId": st.task_id, "text": text, "by": "guild"})) { said(&e.message); }
             }
-            OrchestratorUndecided | PausedWithWork => {}
+                        // The delegate and the user had their time: the orchestrator settles it, and may not escalate again.
+            OrchestratorUndecided => {
+                let Some(a) = latest else { return };
+                let task_failed = self.store.lock().unwrap().task(&st.task_id).ok().flatten().is_some_and(|t| t.state == TaskState::Failed);
+                let kind = match (a.state, task_failed) {
+                    (_, true) => DecisionKind::Failure,
+                    (AttemptState::WaitingInput, _) if a.pending_permission.is_some() => DecisionKind::Permission,
+                    (AttemptState::Submitted, _) => DecisionKind::Candidate,
+                    _ => DecisionKind::Stall,
+                };
+                said("nobody answered the escalation: the orchestrator settles it");
+                self.ask_orchestrator_as(&a.id, kind, true);
+            }
+            PausedWithWork => {}
         }
     }
 
@@ -5844,6 +5928,36 @@ mod tests {
         assert_ne!(snap.attempts[0].escalation.as_deref(), Some("it installs software"), "the permission's escalation outlived its answer");
         let snap = wait_for(&service, "the candidate escalated", |s| s.attempts[0].escalation.is_some() && !s.attempts[0].deciding);
         assert_eq!(snap.attempts[0].escalation.as_deref(), Some("the criteria are ambiguous"), "a candidate the orchestrator would not take waits for the delegate");
+    }
+
+    #[test]
+    fn an_escalation_nobody_answers_is_settled_by_the_orchestrator_with_no_way_out() {
+        let (_home, service, quest_id, _mock) = with_orchestrator(|prompt| {
+            if prompt.contains("you may not escalate") { assert!(!prompt.contains("\"allow\" | \"refuse\" | \"escalate\"")); "```json\n{\"decision\": \"allow\", \"reason\": \"inside its worktree\"}\n```".into() }
+            else { "```json\n{\"decision\": \"escalate\", \"reason\": \"unsure\"}\n```".into() }
+        });
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "escalated", |s| s.attempts.first().is_some_and(|a| a.escalation.is_some() && !a.deciding));
+        let id = snap.attempts[0].id.clone();
+        // The sentinel's `Try` after the time limit.
+        assert!(service.ask_orchestrator_as(&id, crate::orchestrator::DecisionKind::Permission, true));
+        let snap = wait_for(&service, "the permission was answered", |s| s.attempts[0].pending_permission.is_none() && !s.attempts[0].deciding);
+        assert_eq!(snap.attempts[0].escalation, None);
+    }
+
+    #[test]
+    fn a_round_lets_the_orchestrator_speak_to_the_members_at_work() {
+        let (_home, service, quest_id, _mock) = with_orchestrator(|prompt| {
+            if prompt.contains("Round over the quest") { "```json\n{\"summary\": \"one waits\", \"notes\": [{\"taskId\": \"t1\", \"text\": \"hand over what you have\"}], \"retries\": []}\n```".into() }
+            else { "```json\n{\"decision\": \"escalate\", \"reason\": \"unsure\"}\n```".into() }
+        });
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "at work", |s| !s.attempts.is_empty());
+        let report = service.round(&quest_id).unwrap();
+        assert_eq!(report.summary, "one waits");
+        let task = service.store.lock().unwrap().task("t1").unwrap().unwrap();
+        assert!(task.notes.iter().any(|n| n.contains("The orchestrator: hand over what you have")), "{:?}", task.notes);
+        assert!(service.store.lock().unwrap().events_after(0, 100_000).unwrap_or_default().iter().any(|e| e.kind == "orchestrator.round"));
     }
 
     #[test]
