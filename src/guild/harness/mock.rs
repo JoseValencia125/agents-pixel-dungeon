@@ -126,7 +126,7 @@ impl HarnessAdapter for MockHarness {
         if text.contains("## Guild conversation") {
             if let Some(reply) = self.orchestrator_reply.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(reply); }
         }
-        if text.contains("## Decision needed") {
+        if text.contains("## Decision needed") || text.contains("## Round over the quest") {
             if let Some(decider) = self.decider.lock().unwrap().clone() { behaviour = MockBehaviour::Reply(decider(text)); }
         }
         if text.contains("## Playtest metrics") {

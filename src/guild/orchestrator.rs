@@ -127,6 +127,57 @@ impl DecisionKind {
     }
 }
 
+impl DecisionKind {
+    /// The choices, without `escalate` once the escalation's time ran out and the orchestrator must settle it.
+    pub fn choices_when(self, forced: bool) -> Vec<&'static str> {
+        self.choices().iter().copied().filter(|c| !(forced && *c == "escalate")).collect()
+    }
+}
+
+/// Minutes an escalation may wait for the delegate or the user before the orchestrator settles it itself.
+pub const ESCALATION_LIMIT_MIN: u64 = 30;
+
+/// Minutes between the orchestrator's rounds over a running quest.
+pub const ROUND_EVERY_MIN: u64 = 5;
+
+/// What the orchestrator answers after looking over every member at work.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct RoundReport {
+    pub summary: String,
+    /// A word to a member at work: `{"taskId", "text"}`.
+    pub notes: Vec<RoundNote>,
+    /// A task that should start over with different instructions: `{"taskId", "reason"}`.
+    pub retries: Vec<RoundRetry>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct RoundNote { pub task_id: String, pub text: String }
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct RoundRetry { pub task_id: String, pub reason: String }
+
+/// The prompt of a round: `board` lists each task of the quest with who works on it and how it looks.
+pub fn round_prompt(quest_title: &str, board: &str) -> String {
+    format!("## Round over the quest \"{quest_title}\"\n\nEvery {ROUND_EVERY_MIN} minutes, while a quest runs, you look over all its members. This is the board now:\n\n{board}\n\nFor each task at work ask yourself: is it moving (recent activity, its worktree changing), or is it quiet, looping, off the task, or waiting for something that will not come (a background run it closed its turn on, a question nobody answers)? A word to a member at work (`notes`) reaches it at once: use it to redirect, to say what to do about a wait, or to tell it to hand over what it has. Use `retries` only for a task whose member is lost and needs different instructions. Do not touch a task that is moving. Do not escalate: you run this quest.\n\nAnswer with one fenced ```json block and nothing after it: {{\"summary\": \"one or two sentences on how the quest goes\", \"notes\": [{{\"taskId\": \"…\", \"text\": \"…\"}}], \"retries\": [{{\"taskId\": \"…\", \"reason\": \"…\"}}]}} (empty lists when all is well).\n")
+}
+
+/// The round's report in the orchestrator's answer.
+pub fn parse_round(text: &str) -> Option<RoundReport> {
+    let start = text.rfind("```json")?;
+    let body = &text[start + 7..];
+    let end = body.find("```")?;
+    let v: serde_json::Value = serde_json::from_str(body[..end].trim()).ok()?;
+    let list = |k: &str, f: &str, g: &str| -> Vec<(String, String)> {
+        v.get(k).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|e| Some((e.get("taskId")?.as_str()?.to_string(), e.get(f).or_else(|| e.get(g))?.as_str()?.to_string()))).collect()).unwrap_or_default()
+    };
+    Some(RoundReport {
+        summary: v.get("summary").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+        notes: list("notes", "text", "text").into_iter().map(|(task_id, text)| RoundNote { task_id, text }).collect(),
+        retries: list("retries", "reason", "reason").into_iter().map(|(task_id, reason)| RoundRetry { task_id, reason }).collect(),
+    })
+}
+
 /// The orchestrator's answer: one of its kind's choices and why.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default)]
@@ -136,12 +187,12 @@ pub struct Ruling {
 }
 
 /// What the guild's orchestrator may decide alone; anything else goes up.
-pub const ORCHESTRATOR_BOUNDS: &str = "Permissions: allow on your own whatever a member needs for its task that is not extremely dangerous — reading files anywhere but secrets (~/.ssh, keychains, .env files, tokens), running the project's and the machine's tools (the engine, Blender, image tools, scripts) with what they write kept in its worktree, its scratch folder or a folder its task names, looking around the system (which, ps, versions), git inside its own worktree (add, commit, show, log, ls-tree, fetch), searching the web for documentation, downloading an asset into its scratch folder. Escalate only what is extremely dangerous or cannot be undone: pushing or publishing anything, deleting or overwriting the user's files outside the worktree, credentials and secrets, sudo and system settings, installing software for the whole system, sending the user's data out, spending money. A member waiting on you is not working: answer permissions first and fast (FB-063). Accept a candidate when every required verifier passed and the diff and the member's report show each acceptance criterion met. Reject only for a defect you can point to — a failed required verifier, a line in the diff that breaks a criterion or the design — with a reason the member can act on (what, where). Evidence you cannot see (a test the verifiers do not run, a number the report does not give) is a reason to escalate, never to reject; so is a change that departs from the design, or criteria you cannot judge. Retry a failed task only with instructions that change what the member does; escalate when the task itself looks wrong. When unsure, escalate: a wrong yes costs more than a short wait. Before escalating for missing evidence, look for it in the member's whole reply, which you are given: escalate only what is in neither the reply nor the diff. A verifier that says `cannot-run` (exit 78) could not check anything on this machine: that is neither a pass nor a defect of the candidate, so judge by the diff and the report, and escalate what only that verifier could show. A member never merges or rebases branches (the guild brings a clash back to it, marked): refuse those.";
+pub const ORCHESTRATOR_BOUNDS: &str = "Permissions: allow on your own whatever a member needs for its task that is not extremely dangerous — reading files anywhere but secrets (~/.ssh, keychains, .env files, tokens), running the project's and the machine's tools (the engine, Blender, image tools, scripts) with what they write kept in its worktree, its scratch folder or a folder its task names, looking around the system (which, ps, versions), git inside its own worktree (add, commit, show, log, ls-tree, fetch), searching the web for documentation, downloading an asset into its scratch folder. Escalate only what is extremely dangerous or cannot be undone: pushing or publishing anything, deleting or overwriting the user's files outside the worktree, credentials and secrets, sudo and system settings, installing software for the whole system, sending the user's data out, spending money. A member waiting on you is not working: answer permissions first and fast (FB-063). Accept a candidate when every required verifier passed and the diff and the member's report show each acceptance criterion met. Reject only for a defect you can point to — a failed required verifier, a line in the diff that breaks a criterion or the design — with a reason the member can act on (what, where). Evidence you cannot see (a test the verifiers do not run, a number the report does not give) is neither a defect nor a reason to wait: accept when the verifiers pass and nothing in the diff or the report contradicts a criterion, and say in your reason what was not shown, so a follow-up task can cover it. A small departure from the design's numbers or guide (a value a hair over its cap, an icon missing for a minor item) is accepted the same way, with the departure named. Escalate only a change that contradicts a decision the user took in the design, or criteria so ambiguous that the answer changes what the user gets. Retry a failed task only with instructions that change what the member does; escalate when the task itself looks wrong. When unsure, decide: you run the quest until it ends, a wrong yes is fixed by a follow-up task, and a wait stops the whole guild. An escalation is only for what is extremely dangerous or a design question only the user can answer; it reaches the user through the delegate, and if nobody answers within the time limit you are asked again with no way to escalate and must choose. Before doubting missing evidence, look for it in the member's whole reply, which you are given. A verifier that says `cannot-run` (exit 78) could not check anything on this machine: that is neither a pass nor a defect of the candidate, so judge by the diff and the report, and accept with a note naming what that verifier would have shown, unless the diff contradicts a criterion. A member never merges or rebases branches (the guild brings a clash back to it, marked): refuse those.";
 
 /// The prompt that wakes the orchestrator for one decision. `context` is
 /// what the decision is about: the permission asked, the candidate's diff
 /// and verifiers, the failure and the member's last words.
-pub fn decision_prompt(kind: DecisionKind, task: &Task, member: &str, context: &str, design: Option<&crate::design::GameDesign>) -> String {
+pub fn decision_prompt(kind: DecisionKind, forced: bool, task: &Task, member: &str, context: &str, design: Option<&crate::design::GameDesign>) -> String {
     let mut s = format!("## Decision needed: {}\n\n{ORCHESTRATOR_BOUNDS}\n\n", kind.as_str());
     s.push_str(&format!("## The task\n\n**{}** (role {}, member {member})\n\n", task.title, task.role));
     let mut instructions = task.instructions.trim().to_string();
@@ -157,17 +208,18 @@ pub fn decision_prompt(kind: DecisionKind, task: &Task, member: &str, context: &
     }
     if let Some(d) = design { s.push_str(&crate::design::prompt_context(d)); }
     s.push_str(&format!("\n## What to decide\n\n{}\n\n", context.trim()));
-    s.push_str(&format!("Answer with one fenced ```json block and nothing after it: {{\"decision\": \"{}\", \"reason\": \"one or two sentences\"}}.\n", kind.choices().join("\" | \"")));
+    if forced { s.push_str(&format!("This was escalated and nobody answered within {ESCALATION_LIMIT_MIN} minutes, so it is yours to settle now: you may not escalate. Take the option you would have proposed, and write the reason as a note the user will read later (what you chose and what to check).\n\n")); }
+    s.push_str(&format!("Answer with one fenced ```json block and nothing after it: {{\"decision\": \"{}\", \"reason\": \"one or two sentences\"}}.\n", kind.choices_when(forced).join("\" | \"")));
     s
 }
 
 /// The ruling in the orchestrator's answer, if it gave one of its choices.
-pub fn parse_ruling(text: &str, kind: DecisionKind) -> Option<Ruling> {
+pub fn parse_ruling(text: &str, kind: DecisionKind, forced: bool) -> Option<Ruling> {
     let start = text.rfind("```json")?;
     let body = &text[start + 7..];
     let end = body.find("```")?;
     let ruling: Ruling = serde_json::from_str(body[..end].trim()).ok()?;
-    kind.choices().contains(&ruling.decision.as_str()).then_some(ruling)
+    kind.choices_when(forced).contains(&ruling.decision.as_str()).then_some(ruling)
 }
 
 /// When to hire each role of the catalogue, for an orchestrator sizing
@@ -206,7 +258,7 @@ pub fn brief(snap: &Snapshot, project: Option<&Project>, bin: &str) -> String {
     s.push_str("# You are the guild's delegate\n\n");
     s.push_str("The user switched this session to guild mode. You are the guild's delegate: you keep talking with the user here, in their language, as before, and you lead a guild of agents (its members: Claude, Codex, Kiro… each in its own git worktree) that do the building. The user's dungeon shows your room with tabs — Guild (members and what each does), Quests (the work and what waits for a decision), Design (the game design document) — and every tab reads the guild's state. Change them with the commands below; never write the guild's files by hand. Members never hear from the user: everything they know is in the task you write. Use your own subagents for reading and research if your harness has them; the members are for work that lands in the repository.\n\n");
     match snap.members.iter().find(|m| m.enabled && m.roles.iter().any(|r| r == "orchestrator")) {
-        Some(o) => s.push_str(&format!("## The orchestrator answers the members, not you\n\n{} (`{}`), the guild's orchestrator and a member like the others, answers the members' permissions, candidates and failures within its bounds, so nobody waits while you talk with the user. You see only what it escalates: the NEEDS YOU lines of `guild tool guild_status`, each with its reason. Settle those before and after each answer to the user.\n\n", o.name, o.id)),
+        Some(o) => s.push_str(&format!("## The orchestrator answers the members, not you\n\n{} (`{}`), the guild's orchestrator and a member like the others, answers the members' permissions, candidates and failures within its bounds, so nobody waits while you talk with the user. You see only what it escalates: the NEEDS YOU lines of `guild tool guild_status`, each with its reason. Settle those before and after each answer to the user. The orchestrator escalates only design questions and what is dangerous, and keeps the quest going meanwhile; every 5 minutes it looks over all the members on its own, and an escalation nobody answers in 30 minutes it settles itself and notes why.\n\n", o.name, o.id)),
         None => s.push_str(&format!("## Hire an orchestrator first\n\nWhile you talk with the user nobody answers the members, and they wait. Before the first quest hire the guild's orchestrator: `{g} member add orchestrator --harness claude --model haiku --role orchestrator` (any harness; a fast model is enough). It decides what it can within its bounds and leaves you the rest. Until it is there, look at `{g} tool guild_status` before and after each answer and settle what waits, the oldest first (each line says how long it has waited).\n\n")),
     }
     s.push_str("## Stay free to talk\n\nAnything that takes more than a couple of calls — writing or rebuilding a document, a long read, research, mirroring a doc — goes to a subagent of yours (it has your tools, Claude Docs included) or, when it lands in the repository, to a member as a task. A merge with its checks counts too, short as it looks. Say in a line what you sent off and keep talking; never leave the user waiting on your own long work.\n\n");
@@ -282,6 +334,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_round_report_carries_notes_and_retries_and_may_be_empty() {
+        let r = parse_round("ok\n```json\n{\"summary\": \"two move, one waits\", \"notes\": [{\"taskId\": \"t2\", \"text\": \"hand over what you have\"}], \"retries\": []}\n```").unwrap();
+        assert_eq!((r.summary.as_str(), r.notes.len(), r.notes[0].task_id.as_str(), r.retries.len()), ("two move, one waits", 1, "t2", 0));
+        assert_eq!(parse_round("```json\n{\"summary\": \"fine\"}\n```").unwrap().notes.len(), 0);
+        assert!(parse_round("no block").is_none());
+    }
+
+    #[test]
     fn the_plan_block_leaves_the_reply_and_becomes_tasks() {
         let (reply, plan) = parse("Sure, two steps.\n```json\n{\"title\": \"Poison\", \"tasks\": [{\"id\": \"t1\", \"title\": \"Status\", \"role\": \"gameplay-engineer\"}, {\"id\": \"t2\", \"title\": \"Test\", \"dependsOn\": [\"t1\"]}]}\n```\n");
         assert_eq!(reply, "Sure, two steps.");
@@ -315,10 +375,12 @@ mod tests {
 
     #[test]
     fn a_ruling_is_one_of_its_kinds_choices() {
-        let r = parse_ruling("Looks fine.\n```json\n{\"decision\": \"allow\", \"reason\": \"inside its worktree\"}\n```", DecisionKind::Permission).unwrap();
+        let r = parse_ruling("Looks fine.\n```json\n{\"decision\": \"allow\", \"reason\": \"inside its worktree\"}\n```", DecisionKind::Permission, false).unwrap();
         assert_eq!((r.decision.as_str(), r.reason.as_str()), ("allow", "inside its worktree"));
-        assert!(parse_ruling("```json\n{\"decision\": \"accept\"}\n```", DecisionKind::Permission).is_none(), "accept is not a permission's answer");
-        assert!(parse_ruling("I would allow it.", DecisionKind::Permission).is_none(), "no block, no ruling");
+        assert!(parse_ruling("```json\n{\"decision\": \"accept\"}\n```", DecisionKind::Permission, false).is_none(), "accept is not a permission's answer");
+        assert!(parse_ruling("```json\n{\"decision\": \"escalate\", \"reason\": \"x\"}\n```", DecisionKind::Candidate, false).is_some());
+        assert!(parse_ruling("```json\n{\"decision\": \"escalate\", \"reason\": \"x\"}\n```", DecisionKind::Candidate, true).is_none(), "once the time ran out the orchestrator cannot escalate again");
+        assert!(parse_ruling("I would allow it.", DecisionKind::Permission, false).is_none(), "no block, no ruling");
         assert_eq!(DecisionKind::Failure.choices(), &["retry", "escalate"], "a failure is never accepted");
         assert!(DecisionKind::Stall.choices().contains(&"nudge") && !DecisionKind::Stall.choices().contains(&"accept"), "nor is a stall");
     }
