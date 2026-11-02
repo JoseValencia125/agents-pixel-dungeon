@@ -166,12 +166,23 @@ pub fn plain(lines: &[Vec<Span>]) -> Vec<String> {
 /// to its own width. A line that filled the terminal's width continues on
 /// the next one unless that one starts a block of its own; a URL cut at the
 /// last column goes on without a space.
+/// Whether the terminal cut a word in two between `above` and the line below: `above` filled the
+/// terminal's width and ends in a word that is alone on its line or looks like a path, an id or a
+/// quoted value (long, with `/ _ - . " ' : =` in it), as a command's pieces do even when it has
+/// spaces earlier on the line. A line that fills the width at a plain word break is not a cut.
+fn cut_inside_word(above: &str, filled: bool) -> bool {
+    if !filled { return false; }
+    let above = above.trim();
+    let tail = above.rsplit(' ').next().unwrap_or_default();
+    !above.contains(' ') || (tail.chars().count() >= 8 && tail.chars().any(|c| "/_-.\"':={}\\".contains(c)))
+}
+
 pub fn reflow(screen: Vec<Vec<Span>>) -> Vec<Vec<Span>> {
     let text = |l: &[Span]| l.iter().map(|s| s.text.as_str()).collect::<String>();
     let widest = screen.iter().map(|l| text(l).trim_end().chars().count()).max().unwrap_or(0);
     if widest < 40 { return screen; }
     let mut out: Vec<Vec<Span>> = Vec::with_capacity(screen.len());
-    let (mut open, mut hard, mut single) = (false, false, false);
+    let (mut open, mut hard) = (false, false);
     for mut line in screen {
         let t = text(&line);
         let count = t.trim_end().chars().count();
@@ -189,8 +200,9 @@ pub fn reflow(screen: Vec<Vec<Span>>) -> Vec<Vec<Span>> {
             }
             // Code cut by the wrap stays one piece: no space where a word was cut, and a space in its own colour where it broke at one.
             let code = last.last().is_some_and(is_code) && line.iter().skip(skip).next().is_some_and(is_code);
-            // Cut inside a word only when that word filled a line by itself.
-            if code && !(hard && single) {
+            // Cut inside a word: the line above ended in a word the terminal broke.
+            let cut = cut_inside_word(&text(last.as_slice()), hard);
+            if code && !cut {
                 let style = last.last().cloned().unwrap();
                 last.push(Span { text: " ".into(), ..style });
             } else if !glue && !code {
@@ -211,7 +223,6 @@ pub fn reflow(screen: Vec<Vec<Span>>) -> Vec<Vec<Span>> {
         }
         open = count > 0 && count + 12 >= widest;
         hard = count >= widest;
-        single = !t.trim().contains(' ');
     }
     out
 }
@@ -287,8 +298,7 @@ pub fn codes(lines: &[Vec<Span>]) -> Vec<Vec<Code>> {
         let goes_on = chain.last().is_some_and(|&(l, _)| l + 1 == i) && first.start <= indent;
         if goes_on {
             let above = text(&lines[i - 1]).trim_end().chars().count();
-            // A word is cut by the wrap only when it filled the line above by itself.
-            let cut = above >= widest && !text(&lines[i - 1]).trim().contains(' ');
+            let cut = cut_inside_word(&text(&lines[i - 1]), above >= widest);
             whole = format!("{}{}{}", whole.trim_end(), if cut { "" } else { " " }, first.text.trim_start());
             chain.push((i, 0));
         } else {
@@ -349,6 +359,17 @@ mod tests {
         let found = codes(&joined);
         let all: Vec<&str> = found.iter().flatten().map(|c| c.text.as_str()).collect();
         assert!(!all.is_empty() && all.iter().all(|c| *c == "gh pr merge 68 --merge"), "every piece copies all of it: {all:?} in {:?}", plain(&joined));
+    }
+
+    #[test]
+    fn a_command_cut_inside_its_words_copies_without_spaces() {
+        // As Claude Code wraps it at 42 columns: a path cut in the middle of three words, the line above it holding more than that word.
+        let c = "\x1b[38;2;177;185;249m";
+        let screen = format!("  corre esto en tu terminal para ver:\n  {c}! \"/Users/nachovalencia/agents-pixel-dun\x1b[0m\n  {c}geon/build/Agents Pixel Dungeon.app/Cont\x1b[0m\n  {c}ents/MacOS/guild\" tool\x1b[0m y listo.");
+        let joined = reflow(parse(&screen));
+        let all: Vec<String> = codes(&joined).iter().flatten().map(|c| c.text.clone()).collect();
+        assert!(!all.is_empty() && all.iter().all(|t| t == "! \"/Users/nachovalencia/agents-pixel-dungeon/build/Agents Pixel Dungeon.app/Contents/MacOS/guild\" tool"), "{all:?} in {:?}", plain(&joined));
+        assert!(plain(&joined).iter().any(|l| l.contains("agents-pixel-dungeon/build/Agents Pixel Dungeon.app/Contents/MacOS")), "{:?}", plain(&joined));
     }
 
     /// A real screen (`HPD_SCREEN=<file of herdr agent read --format ansi>`): prints what can be copied.
