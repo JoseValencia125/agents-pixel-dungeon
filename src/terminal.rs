@@ -153,6 +153,8 @@ impl Terminals {
                     .with_inner_size([850.0, 520.0]).with_min_inner_size([400.0, 240.0]),
                 |ctx, _| {
                     if ctx.input(|i| i.viewport().close_requested()) { session.visible = false; }
+                    // The pty's output wakes the root viewport (the backend asks from its own thread), not this window: without its own tick the echo of a key, a backspace's erase above all, shows only at the next event.
+                    ctx.request_repaint_after(std::time::Duration::from_millis(33));
                     if session.backend.is_none() && session.error.is_none() {
                         let settings = settings_for(&session.cwd, session.command.as_ref());
                         match TerminalBackend::new(session.id, ctx.clone(), sender.clone(), settings) {
