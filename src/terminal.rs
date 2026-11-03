@@ -1,6 +1,6 @@
 //! Local PTY shells, independent from the agents managed by Herdr.
 use crate::l10n::tr;
-use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
+use egui_term::{BackendSettings, Binding, BindingAction, InputKind, PtyEvent, TerminalBackend, TerminalView};
 use std::{path::PathBuf, sync::mpsc};
 
 struct Session {
@@ -182,7 +182,9 @@ impl Terminals {
                     });
                     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::BLACK)).show(ctx, |ui| {
                         if let Some(backend) = &mut session.backend {
-                            let view = TerminalView::new(ui, backend).set_focus(!session.exited);
+                            let view = TerminalView::new(ui, backend)
+                                .set_focus(!session.exited)
+                                .add_bindings(vec![shift_enter()]);
                             ui.add(view);
                         }
                     });
@@ -190,6 +192,18 @@ impl Terminals {
             );
         }
     }
+}
+
+/// Shift+Enter sends ESC CR (the same as Alt+Enter) so the agent's prompt takes it as a line break; egui_term
+/// sends a bare CR, which submits.
+fn shift_enter() -> (Binding<InputKind>, BindingAction) {
+    let binding = Binding {
+        target: InputKind::KeyCode(egui::Key::Enter),
+        modifiers: egui::Modifiers::SHIFT,
+        terminal_mode_include: egui_term::TerminalMode::empty(),
+        terminal_mode_exclude: egui_term::TerminalMode::empty(),
+    };
+    (binding, BindingAction::Esc("\x1b\r".into()))
 }
 
 #[cfg(test)]
