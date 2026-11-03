@@ -4515,7 +4515,8 @@ impl Service {
             let _ = self.attempt_cancel(&a.id);
         }
         let task = self.store.lock().unwrap().task(task_id)?.ok_or_else(|| ApiError::not_found("task"))?;
-        if !task.state.is_terminal() && !(running && task.state == TaskState::Running) {
+        // A failed task is not over: retrying reopens it, so cancelling it must close it (FB-086).
+        if !matches!(task.state, TaskState::Completed | TaskState::Cancelled) && !(running && task.state == TaskState::Running) {
             self.move_task(task_id, TaskState::Cancelled, None)?;
         }
         Ok(json!({"cancelled": task_id, "repointed": replaced}))
@@ -5958,6 +5959,21 @@ mod tests {
         let task = service.store.lock().unwrap().task("t1").unwrap().unwrap();
         assert!(task.notes.iter().any(|n| n.contains("The orchestrator: hand over what you have")), "{:?}", task.notes);
         assert!(service.store.lock().unwrap().events_after(0, 100_000).unwrap_or_default().iter().any(|e| e.kind == "orchestrator.round"));
+    }
+
+    #[test]
+    fn cancelling_a_failed_task_closes_it_and_ends_what_waited_on_it() {
+        let (_home, service, quest_id, mock) = with_orchestrator(|_| "```json\n{\"decision\": \"escalate\", \"reason\": \"unsure\"}\n```".into());
+        mock.set_behaviour(MockBehaviour::Fail("parse error".into()));
+        let mut t = service.store.lock().unwrap().task("t1").unwrap().unwrap();
+        t.max_attempts = 1;
+        service.store.lock().unwrap().put_task(&t).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "failed", |s| s.tasks[0].state == TaskState::Failed);
+        let out = service.handle("task.cancel", &json!({"taskId": "t1"})).unwrap();
+        assert_eq!(out["cancelled"], "t1");
+        let snap = wait_for(&service, "cancelled", |s| s.tasks[0].state == TaskState::Cancelled);
+        assert_eq!(snap.tasks[0].state, TaskState::Cancelled, "the answer said cancelled and the task stayed failed");
     }
 
     #[test]

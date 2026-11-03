@@ -729,7 +729,8 @@ pub fn task_transition(from: TaskState, to: TaskState) -> Result<(), String> {
             | (Accepted, Integrating) | (Accepted, Ready) | (Accepted, Cancelled)
             | (Integrating, Completed) | (Integrating, Blocked) | (Integrating, Accepted)
             | (Blocked, Pending) | (Blocked, Ready) | (Blocked, Accepted) | (Blocked, Failed) | (Blocked, Cancelled)
-            | (Failed, Ready) | (Failed, Pending)
+            // A failed task nobody retries is closed by cancelling it (FB-086).
+            | (Failed, Ready) | (Failed, Pending) | (Failed, Cancelled)
             // A failed verdict the user overrides (`accept --override`).
             | (Failed, Verifying) | (Ready, Verifying) | (Blocked, Verifying)
     );
