@@ -2267,7 +2267,7 @@ impl Service {
             store.attempt(attempt_id).ok().flatten().and_then(|a| a.workspace_id).and_then(|w| store.workspace(&w).ok().flatten()).map(|w| PathBuf::from(w.path))
         };
         let scratch = crate::paths::scratch_dir(attempt_id);
-        let mut waits = 0;
+        let (mut waits, mut nudges) = (0, 0);
         for round in 1..=8 {
             let redirected = matches!(&outcome, TurnOutcome::Completed { stop_reason } if stop_reason == "redirected");
             let done = matches!(&outcome, TurnOutcome::Completed { stop_reason } if stop_reason != "interrupted");
@@ -2297,8 +2297,16 @@ impl Service {
             }
             let notes = notes_of(self);
             let added: Vec<&String> = notes.iter().filter(|n| !seen.contains(n)).collect();
-            if added.is_empty() && running.is_empty() && finished.is_empty() { break; }
+            // A turn that ends announcing what is still to do, or with nothing written, is not a delivery
+            // (FB-082, FB-085): the guild goes on in the same session, up to twice, instead of taking it as a candidate.
+            let unfinished = if added.is_empty() && running.is_empty() && finished.is_empty() && !redirected && nudges < MAX_NUDGES { self.unfinished_turn(attempt_id, attempt) } else { None };
+            if added.is_empty() && running.is_empty() && finished.is_empty() && unfinished.is_none() { break; }
             let mut follow = String::new();
+            if let Some(why) = &unfinished {
+                nudges += 1;
+                self.emit(Event::new("turn.unfinished", "guild").about_attempt(attempt).with(json!({"why": why, "nudge": nudges})));
+                follow.push_str(&format!("Your turn ended but the task is not delivered: {why}. Never end a turn to wait for something: run it in the foreground with a time limit, or start it in the background and then check it yourself until it ends. Go on now, in the same worktree, and finish with the summary of the whole task: what you wrote (the files) and what each acceptance criterion shows.\n"));
+            }
             if !finished.is_empty() {
                 follow.push_str(&format!("What you left running has finished: {}. Your worktree is as you left it. Use what it produced (check its log for errors), then finish with the summary of the whole task.\n", describe_processes(&finished).join(", ")));
             }
@@ -2324,6 +2332,29 @@ impl Service {
         // What it still has running is no one's now: a hung engine must not outlive its attempt (FB-075).
         self.reap_processes(attempt, folders.as_deref(), &scratch);
         self.finish_attempt_of(attempt_id, attempt.generation, outcome)
+    }
+
+    /// Why a turn that ended well is still not a delivery: the worktree has nothing new on a task that
+    /// asks for work, or the member's last words say it waits for something. `None` when it may be taken.
+    fn unfinished_turn(&self, attempt_id: &str, attempt: &Attempt) -> Option<String> {
+        let (task, workspace, last) = {
+            let store = self.store.lock().unwrap();
+            let task = store.task(&attempt.task_id).ok().flatten()?;
+            let workspace = attempt.workspace_id.as_deref().and_then(|w| store.workspace(w).ok().flatten())?;
+            let events = store.events_of_attempt(attempt_id, 20_000).unwrap_or_default();
+            let mut last = String::new();
+            for e in events {
+                if e.kind == "turn.started" { last.clear(); }
+                if e.kind == "turn.text" { last.push_str(e.payload["text"].as_str().unwrap_or("")); }
+            }
+            (task, workspace, last)
+        };
+        if task.spike { return None; }
+        let path = Path::new(&workspace.path);
+        let clean = workspaces::git(path, &["status", "--porcelain"]).is_ok_and(|o| o.trim().is_empty());
+        let moved = workspaces::rev_parse(path, "HEAD").map(|h| h != workspace.base_sha).unwrap_or(true);
+        if clean && !moved { return Some("nothing in your worktree has changed".into()); }
+        waits_for_something(&last).then(|| "your last words say you wait for something".into())
     }
 
     /// Stop what an attempt left running in its worktree, its scratch folder or
@@ -4211,8 +4242,10 @@ impl Service {
             let task = store.task(task_id)?.ok_or_else(|| ApiError::not_found(format!("task {task_id}")))?;
             let path: &[TaskState] = match task.state {
                 TaskState::Blocked | TaskState::Verifying => &[TaskState::Accepted, TaskState::Integrating, TaskState::Completed],
+                // A failed task whose work was integrated by hand (FB-086).
+                TaskState::Failed => &[TaskState::Verifying, TaskState::Accepted, TaskState::Integrating, TaskState::Completed],
                 TaskState::Accepted => &[TaskState::Integrating, TaskState::Completed],
-                other => return Err(ApiError::conflict(format!("task is {other:?}: only a blocked, verifying or accepted task is completed by hand"))),
+                other => return Err(ApiError::conflict(format!("task is {other:?}: only a failed, blocked, verifying or accepted task is completed by hand"))),
             };
             let quest = store.quest(&task.quest_id)?.ok_or_else(|| ApiError::not_found("quest"))?;
             self.atomic(&store, || {
@@ -5219,6 +5252,17 @@ impl Service {
 const TEMPFAIL: i32 = 75;
 
 /// How often the sentinel looks at the whole guild.
+/// How many times the guild takes up a turn that ended without delivering before it takes it as it is.
+const MAX_NUDGES: u32 = 2;
+
+/// Whether the end of a reply announces a wait ("espero a que termine", "I'll wait for the run"): its
+/// last paragraph says so and has no summary after it.
+fn waits_for_something(reply: &str) -> bool {
+    let tail: String = reply.trim().rsplit("\n\n").next().unwrap_or_default().to_lowercase();
+    let tail = &tail[tail.char_indices().rev().nth(400).map(|(i, _)| i).unwrap_or(0)..];
+    ["espero a que", "espero que termine", "espero la corrida", "esperando a que", "i'll wait", "i will wait", "waiting for the", "wait for the run", "once it finishes", "when it finishes", "cuando termine", "now i wait", "ahora espero"].iter().any(|p| tail.contains(p))
+}
+
 const SENTINEL_EVERY: Duration = Duration::from_secs(10);
 
 /// How often the health check runs, and how long the sentinel may go without looking before it counts as stale.
@@ -5974,6 +6018,50 @@ mod tests {
         assert_eq!(out["cancelled"], "t1");
         let snap = wait_for(&service, "cancelled", |s| s.tasks[0].state == TaskState::Cancelled);
         assert_eq!(snap.tasks[0].state, TaskState::Cancelled, "the answer said cancelled and the task stayed failed");
+    }
+
+    #[test]
+    fn a_turn_that_ends_waiting_with_nothing_written_is_taken_up_again_not_submitted() {
+        let (_home, service, quest_id, mock) = with_orchestrator(|_| "```json\n{\"decision\": \"escalate\", \"reason\": \"unsure\"}\n```".into());
+        mock.set_behaviour(MockBehaviour::Reply("Espero a que aparezca batch.done y sigo.".into()));
+        mock.set_on_nudge(MockBehaviour::Succeed { file: "x.txt".into(), content: "x".into() });
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "delivered", |s| s.attempts.iter().any(|a| a.state == AttemptState::Submitted));
+        let a = snap.attempts.iter().find(|a| a.state == AttemptState::Submitted).unwrap();
+        assert!(a.candidate.as_ref().is_some_and(|c| c.files_changed > 0), "it was submitted empty: {:?}", a.candidate);
+        assert_eq!(mock.prompts().iter().filter(|p| p.contains("Your turn ended but the task is not delivered")).count(), 1);
+        assert!(service.store.lock().unwrap().events_of_attempt(&a.id, 10_000).unwrap().iter().any(|e| e.kind == "turn.unfinished"));
+    }
+
+    #[test]
+    fn a_member_that_keeps_waiting_is_taken_up_twice_and_then_submitted_as_it_is() {
+        let (_home, service, quest_id, mock) = with_orchestrator(|_| "```json\n{\"decision\": \"escalate\", \"reason\": \"unsure\"}\n```".into());
+        mock.set_behaviour(MockBehaviour::Reply("Espero la corrida en segundo plano.".into()));
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "submitted", |s| s.attempts.iter().any(|a| a.state == AttemptState::Submitted));
+        assert_eq!(mock.prompts().iter().filter(|p| p.contains("Your turn ended but the task is not delivered")).count(), 2, "never more than twice");
+    }
+
+    #[test]
+    fn what_ends_a_reply_waiting_is_told_from_a_summary() {
+        assert!(waits_for_something("Lancé el lote.\n\nEspero a que aparezca batch.done y sigo con el análisis."));
+        assert!(waits_for_something("Done with the setup.\n\nI'll wait for the run to finish."));
+        assert!(!waits_for_something("Escribí docs/espiral.md.\n\nResumen: cumple AC-1 y AC-2, los verificadores pasan."));
+        assert!(!waits_for_something(""));
+    }
+
+    #[test]
+    fn a_failed_task_whose_work_was_integrated_by_hand_is_completed() {
+        let (_home, service, quest_id, mock) = with_orchestrator(|_| "```json\n{\"decision\": \"escalate\", \"reason\": \"unsure\"}\n```".into());
+        mock.set_behaviour(MockBehaviour::Fail("parse error".into()));
+        let mut t = service.store.lock().unwrap().task("t1").unwrap().unwrap();
+        t.max_attempts = 1;
+        service.store.lock().unwrap().put_task(&t).unwrap();
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "failed", |s| s.tasks[0].state == TaskState::Failed);
+        service.handle("task.complete", &json!({"taskId": "t1", "reason": "done by hand"})).unwrap();
+        let snap = wait_for(&service, "completed", |s| s.tasks[0].state == TaskState::Completed);
+        assert_eq!(snap.tasks[0].state, TaskState::Completed);
     }
 
     #[test]
