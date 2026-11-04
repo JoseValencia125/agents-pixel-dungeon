@@ -368,6 +368,7 @@ impl Store {
             paused_members: vec![],
             stalls: self.stalls()?,
             rounds: vec![],
+            health: None,
         })
     }
 }
