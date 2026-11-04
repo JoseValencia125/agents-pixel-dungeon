@@ -1190,7 +1190,19 @@ impl eframe::App for App {
                                     self.prefs.save();
                                     self.guild_tab = guild_mode::Tab::Chat;
                                 }
-                                let rest = ui.available_rect_before_wrap();
+                                let mut rest = ui.available_rect_before_wrap();
+                                // The chat with the crew beside it, as wide as a room, when there is space for both.
+                                if lead && self.guild_tab == guild_mode::Tab::Chat && rest.width() >= scene::width_for(1) + 360.0 {
+                                    let side = Rect::from_min_max(egui::pos2(rest.max.x - scene::width_for(1), rest.min.y), rest.max);
+                                    rest.max.x = side.min.x - 8.0;
+                                    ui.painter().vline(side.min.x - 4.0, side.y_range(), egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(254, 174, 52, 60)));
+                                    let action = ui.scope_builder(egui::UiBuilder::new().max_rect(side), |ui| {
+                                        ui.set_clip_rect(side);
+                                        guild_mode::body(ui, guild_mode::Tab::Guild, &mut self.guild, &agent.cwd, now, false)
+                                    }).inner;
+                                    if let Some(path) = action.terminal { self.terminals.open(ctx, &path); }
+                                    if action.studio { self.show_studio = true; }
+                                }
                                 let step = ui.scope_builder(egui::UiBuilder::new().max_rect(rest), |ui| {
                                     if lead && self.guild_tab != guild_mode::Tab::Chat {
                                         let action = guild_mode::body(ui, self.guild_tab, &mut self.guild, &agent.cwd, now, fullscreen);

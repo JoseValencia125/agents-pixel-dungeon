@@ -367,6 +367,7 @@ impl Store {
             disk_note: None,
             paused_members: vec![],
             stalls: self.stalls()?,
+            rounds: vec![],
         })
     }
 }

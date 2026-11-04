@@ -164,6 +164,7 @@ fn crew(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot) {
         ui.label(mono(&n.to_string(), 12.0).strong().color(INK));
         if ui.add_enabled(n < 16, egui::Button::new(mono("+", 11.0))).clicked() { view.command("guild.concurrency", json!({"concurrency": n + 1})); }
     });
+    sentinel_card(ui, view, snap);
     let waiting = asking(snap);
     if !waiting.is_empty() {
         ui.label(mono(&tr("Necesita tu atención"), 10.5).strong().color(GOLD));
@@ -200,25 +201,110 @@ fn crew(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot) {
     }
 }
 
-/// One member: its state's colour, name, roles, harness and what it does now.
+/// One member: its state's colour, name, roles, harness and what it does now; at work or stopped, the
+/// quick actions over its attempt.
 fn member_row(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot, m: &Member, agent: &Agent) {
     let color = if m.enabled { state_color(&agent.status) } else { Color32::from_gray(90) };
     let roles: Vec<String> = m.roles.iter().map(|r| crate::guild_studio::role_name(&snap.roles, r)).collect();
     let frame = Frame::new().fill(Color32::from_rgba_unmultiplied(255, 255, 255, 6)).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(8, 5));
-    let response = frame.show(ui, |ui| {
+    let mut open = false;
+    frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.label(mono("●", 11.0).color(color));
-            ui.label(mono(&m.name, 12.0).strong().color(if m.enabled { INK } else { DIM }));
+            open |= ui.add(egui::Label::new(mono(&m.name, 12.0).strong().color(if m.enabled { INK } else { DIM })).sense(egui::Sense::click())).on_hover_text(tr("Ver su trabajo")).clicked();
             ui.label(mono(&roles.join(", "), 10.5).color(GOLD));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(mono(&format!("{} · {}", m.harness, m.model_id.clone().unwrap_or_else(|| tr("modelo por defecto"))), 10.0).color(DIM));
             });
         });
         let doing = if m.enabled { agent.activity.clone() } else { tr("Desactivado") };
-        ui.add(egui::Label::new(mono(&doing, 10.5).color(DIM)).truncate());
-    }).response.interact(egui::Sense::click());
-    if response.on_hover_text(tr("Ver su trabajo")).clicked() { view.hall_member = Some(m.id.clone()); }
+        open |= ui.add(egui::Label::new(mono(&doing, 10.5).color(DIM)).truncate().sense(egui::Sense::click())).clicked();
+        if m.enabled { member_actions(ui, view, snap, m, agent); }
+    });
+    if open { view.hall_member = Some(m.id.clone()); }
+}
+
+/// What can be done at once over a member that works or stands still: have the orchestrator look over
+/// its quest, interrupt what it does, or start its attempt again.
+fn member_actions(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot, m: &Member, agent: &Agent) {
+    let Some(attempt) = snap.attempts.iter().filter(|a| a.member_id == m.id && a.kind == AttemptKind::Work && matches!(a.state, AttemptState::Provisioning | AttemptState::Running | AttemptState::WaitingInput)).max_by(|a, b| a.created_at.cmp(&b.created_at)) else { return };
+    let quest = snap.tasks.iter().find(|t| t.id == attempt.task_id).and_then(|t| snap.quests.iter().find(|q| q.id == t.quest_id)).filter(|q| q.state == QuestState::Running);
+    let stalled = snap.stalls.iter().any(|s| !s.dormant && s.task_id == attempt.task_id) || agent.status == "blocked";
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let act = |ui: &mut Ui, label: &str, tip: &str| ui.add(egui::Button::new(mono(label, 10.0).color(GOLD)).small().fill(Color32::from_rgba_unmultiplied(254, 174, 52, 14))).on_hover_text(tip).clicked();
+        if let Some(q) = quest {
+            if act(ui, &tr("Revisar"), &tr("El orquestador revisa ahora la misión de este miembro")) { view.command("quest.review", json!({"questId": q.id})); }
+        }
+        if stalled {
+            if act(ui, &tr("Reiniciar"), &tr("Vuelve a empezar su intento con lo que ya escribió")) { view.command("attempt.restart", json!({"attemptId": attempt.id})); }
+        } else if attempt.state == AttemptState::Running && act(ui, &tr("Interrumpir"), &tr("Corta el turno que hace ahora; el intento sigue")) {
+            view.command("attempt.interrupt", json!({"attemptId": attempt.id}));
+        }
+    });
+}
+
+/// The minutes since an RFC 3339 time, as "hace N min".
+fn ago(at: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(at) {
+        Ok(t) => trf("hace {} min", &[&(chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_minutes().max(0)]),
+        Err(_) => String::new(),
+    }
+}
+
+fn stall_label(kind: guild::sentinel::StallKind) -> String {
+    use guild::sentinel::StallKind::*;
+    tr(match kind {
+        IntegrationStuck => "integración atascada",
+        FailedUnattended => "fallida sin atender",
+        CandidateWaiting => "candidato esperando",
+        InputWaiting => "espera una respuesta",
+        SilentRunning => "en silencio",
+        VerifyingHung => "verificación colgada",
+        DependencyStalled => "dependencia parada",
+        OrchestratorUndecided => "sin decidir",
+        PausedWithWork => "pausada con trabajo",
+        NoProgress => "sin avance",
+    })
+}
+
+/// The sentinel and the orchestrator it serves: what the orchestrator does, when it last looked over each
+/// running quest (with a way to ask for a round now), and what waits that nobody moves.
+fn sentinel_card(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot) {
+    let running: Vec<&Quest> = snap.quests.iter().filter(|q| q.state == QuestState::Running).collect();
+    let stalls: Vec<&guild::sentinel::Stall> = snap.stalls.iter().filter(|s| !s.dormant).collect();
+    let (state, color) = if snap.orchestrator.is_none() { (tr("sin orquestador"), DIM) }
+        else if snap.orchestrator_busy { (tr("decidiendo"), YELLOW) }
+        else if running.is_empty() { (tr("en reposo"), DIM) }
+        else if stalls.iter().any(|s| !s.acked) { (tr("hay esperas"), GOLD) }
+        else { (tr("vigilando"), GREEN) };
+    let frame = Frame::new().fill(Color32::from_rgba_unmultiplied(254, 174, 52, 10)).stroke(Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(254, 174, 52, 50))).corner_radius(CornerRadius::same(4)).inner_margin(Margin::symmetric(8, 5));
+    frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(mono(&tr("Vigilante"), 11.0).strong().color(INK));
+            ui.label(mono(&format!("● {state}"), 10.5).color(color));
+        });
+        for q in &running {
+            let round = snap.rounds.iter().find(|r| r.quest_id == q.id);
+            ui.horizontal(|ui| {
+                let text = match round { Some(r) => format!("{} · {}", q.title, ago(&r.at)), None => format!("{} · {}", q.title, tr("sin ronda aún")) };
+                let label = ui.add(egui::Label::new(mono(&text, 10.0).color(DIM)).truncate());
+                if let Some(r) = round { label.on_hover_text(format!("{}\n{} · {}", r.summary, trf("{} avisos", &[&r.notes]), trf("{} reinicios", &[&r.retries]))); }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let ask = egui::Button::new(mono(&tr("Revisar ahora"), 10.0).color(GOLD)).small().fill(Color32::from_rgba_unmultiplied(254, 174, 52, 14));
+                    if ui.add(ask).on_hover_text(tr("El orquestador revisa ahora a todos los miembros de esta misión")).clicked() { view.command("quest.review", json!({"questId": q.id})); }
+                });
+            });
+        }
+        for s in stalls.iter().take(4) {
+            let who = snap.tasks.iter().find(|t| t.id == s.task_id).map(|t| t.title.clone()).unwrap_or_else(|| s.subject.clone());
+            ui.add(egui::Label::new(mono(&format!("▸ {} · {who} · {}", stall_label(s.kind), ago(&s.since)), 10.0).color(if s.acked { DIM } else { GOLD })).truncate()).on_hover_text(&s.reason);
+        }
+        if stalls.len() > 4 { ui.label(mono(&trf("… y {} esperas más", &[&(stalls.len() - 4)]), 10.0).color(DIM)); }
+    });
+    ui.add_space(4.0);
 }
 
 fn quest_state(state: QuestState) -> String {
