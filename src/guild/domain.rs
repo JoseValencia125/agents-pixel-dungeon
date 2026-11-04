@@ -677,6 +677,19 @@ pub struct Snapshot {
     /// What waits and nobody moves, as the sentinel sees it (see `sentinel`).
     #[serde(default)]
     pub stalls: Vec<crate::sentinel::Stall>,
+    /// The orchestrator's last round over each quest that has had one.
+    #[serde(default)]
+    pub rounds: Vec<RoundStatus>,
+}
+
+/// What the orchestrator's last round over a quest found.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RoundStatus {
+    pub quest_id: String,
+    pub at: String,
+    pub summary: String,
+    pub notes: usize,
+    pub retries: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

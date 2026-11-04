@@ -97,6 +97,8 @@ pub struct Service {
     decisions: Mutex<Vec<(String, crate::orchestrator::DecisionKind, bool)>>,
     /// When the orchestrator last made its round over each running quest.
     rounds: Mutex<HashMap<String, Instant>>,
+    /// What each quest's last round found, for the snapshot.
+    round_log: Mutex<HashMap<String, RoundStatus>>,
     /// How many attempts run at once: the settings' until the orchestrator
     /// or the user changes it (`guild.concurrency`), then kept in the store.
     concurrency: AtomicUsize,
@@ -172,6 +174,7 @@ impl Service {
             settling: Mutex::new((HashSet::new(), HashSet::new())),
             decisions: Mutex::new(vec![]),
             rounds: Mutex::new(HashMap::new()),
+            round_log: Mutex::new(HashMap::new()),
             running: Mutex::new(HashMap::new()),
             overlaps: Mutex::new((None, vec![])),
             gallery: Mutex::new((None, 0)),
@@ -3411,6 +3414,7 @@ impl Service {
         snap.conversation = self.conversation(200)?;
         snap.orchestrator = crate::orchestrator::pick(&snap.members, &self.available_harnesses()).map(|m| m.id);
         snap.orchestrator_busy = self.orchestrating.lock().unwrap().is_some();
+        snap.rounds = self.round_log.lock().unwrap().values().cloned().collect();
         snap.concurrency = self.concurrency.load(Ordering::Relaxed);
         snap.overlaps = self.overlaps.lock().unwrap().1.clone();
         snap.disk_low = *self.disk_low.lock().unwrap();
@@ -3548,6 +3552,7 @@ impl Service {
             "task.complete" => self.task_complete(params),
             "member.release" => self.member_release(params),
             "quest.start" => self.quest_start(params),
+            "quest.review" => self.quest_review(p_str(params, "questId")?),
             "quest.sync" => self.quest_sync(params),
             "quest.note" => self.quest_note(params),
             "gallery.build" => {
@@ -4854,8 +4859,21 @@ impl Service {
                 if let Err(e) = self.task_retry(&json!({"taskId": r.task_id, "reason": r.reason, "instructions": r.reason})) { self.log(&format!("round: {}", e.message)); }
             }
         }
+        self.round_log.lock().unwrap().insert(quest.id.clone(), RoundStatus { quest_id: quest.id.clone(), at: now(), summary: report.summary.clone(), notes: report.notes.len(), retries: report.retries.len() });
         self.emit(Event::new("orchestrator.round", "orchestrator").about_quest(&quest).with(json!({"summary": report.summary, "notes": report.notes.len(), "retries": report.retries.len()})));
         Ok(report)
+    }
+
+    /// A round now, because the user asked: the next scheduled one counts from here.
+    fn quest_review(self: &Arc<Service>, quest_id: &str) -> ApiResult {
+        if self.steward().is_none() { return Err(ApiError::conflict("the guild has no orchestrator")); }
+        let quest = self.store.lock().unwrap().quest(quest_id)?.ok_or_else(|| ApiError::not_found(format!("quest {quest_id}")))?;
+        if quest.state != QuestState::Running { return Err(ApiError::conflict(format!("quest is {:?}: only a running quest is reviewed", quest.state))); }
+        self.rounds.lock().unwrap().insert(quest.id.clone(), Instant::now());
+        let service = self.clone();
+        let id = quest.id.clone();
+        std::thread::Builder::new().name("round".into()).spawn(move || { if let Err(e) = service.round(&id) { service.log(&format!("round {id}: {}", e.message)); } }).ok();
+        Ok(json!({"reviewing": quest_id}))
     }
 
     /// What the guild sees of each running attempt besides its state: how long since its
@@ -5988,6 +6006,20 @@ mod tests {
         assert!(service.ask_orchestrator_as(&id, crate::orchestrator::DecisionKind::Permission, true));
         let snap = wait_for(&service, "the permission was answered", |s| s.attempts[0].pending_permission.is_none() && !s.attempts[0].deciding);
         assert_eq!(snap.attempts[0].escalation, None);
+    }
+
+    #[test]
+    fn a_review_asked_by_the_user_runs_a_round_and_the_snapshot_keeps_what_it_found() {
+        let (_home, service, quest_id, _mock) = with_orchestrator(|prompt| {
+            if prompt.contains("Round over the quest") { "```json\n{\"summary\": \"all quiet\", \"notes\": [], \"retries\": []}\n```".into() }
+            else { "```json\n{\"decision\": \"escalate\", \"reason\": \"unsure\"}\n```".into() }
+        });
+        assert!(service.handle("quest.review", &json!({"questId": quest_id})).is_err(), "a quest that has not started is not reviewed");
+        service.handle("quest.start", &json!({"questId": quest_id})).unwrap();
+        wait_for(&service, "at work", |s| !s.attempts.is_empty());
+        service.handle("quest.review", &json!({"questId": quest_id})).unwrap();
+        let snap = wait_for(&service, "the round's report", |s| !s.rounds.is_empty());
+        assert_eq!((snap.rounds[0].quest_id.as_str(), snap.rounds[0].summary.as_str()), (quest_id.as_str(), "all quiet"));
     }
 
     #[test]

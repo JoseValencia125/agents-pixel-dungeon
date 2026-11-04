@@ -1255,6 +1255,7 @@ fn demo_snapshot(tick: usize) -> Snapshot {
         disk_note: None,
         paused_members: vec![],
         stalls: vec![],
+        rounds: vec![],
         concurrency: 3,
     }
 }
