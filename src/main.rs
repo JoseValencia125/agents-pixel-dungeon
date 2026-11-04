@@ -835,7 +835,7 @@ impl eframe::App for App {
         if let Ok(v) = std::env::var("HPD_TEST_GUILD") {
             if now > 1.3 && now < 1.5 {
                 if let Some(id) = self.monitor.selected.clone() { self.prefs.guild_lead = Some(id); }
-                self.guild_tab = match v.as_str() { "guild" => guild_mode::Tab::Guild, "quests" => guild_mode::Tab::Quests, "design" => guild_mode::Tab::Design, "visual" => guild_mode::Tab::Visual, _ => guild_mode::Tab::Chat };
+                self.guild_tab = match v.as_str() { "quests" => guild_mode::Tab::Quests, "design" => guild_mode::Tab::Design, "visual" => guild_mode::Tab::Visual, _ => guild_mode::Tab::Chat };
             }
         }
         // HPD_TEST_SHOT=<file.png>: save what the window shows after 3 s (or
@@ -941,11 +941,11 @@ impl eframe::App for App {
         let opening = (self.monitor.selected.is_some() || self.monitor.composing) && !was_open;
         if opening && self.shown_columns() == 1 { self.widened = true; }
         if !self.monitor.composing && self.monitor.selected.is_none() && self.widened { self.widened = false; needs_fit = true; }
-        // With an agent in guild mode, the guild's hall opens its room, on the crew.
+        // With an agent in guild mode, the guild's hall opens its room, on the chat with the crew beside it.
         if self.monitor.selected.as_deref() == Some(guild_view::HALL_ID) {
             if let Some(lead) = self.prefs.guild_lead.clone().filter(|id| self.monitor.agents.iter().any(|a| &a.id == id)) {
                 self.monitor.select(Some(lead));
-                self.guild_tab = guild_mode::Tab::Guild;
+                self.guild_tab = guild_mode::Tab::Chat;
             }
         }
         // The chat panel follows the selection.
@@ -1194,10 +1194,11 @@ impl eframe::App for App {
                                 // The chat with the crew beside it, as wide as a room, when there is space for both.
                                 if lead && self.guild_tab == guild_mode::Tab::Chat && rest.width() >= scene::width_for(1) + 360.0 {
                                     let side = Rect::from_min_max(egui::pos2(rest.max.x - scene::width_for(1), rest.min.y), rest.max);
-                                    rest.max.x = side.min.x - 8.0;
-                                    ui.painter().vline(side.min.x - 4.0, side.y_range(), egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(254, 174, 52, 60)));
-                                    let action = ui.scope_builder(egui::UiBuilder::new().max_rect(side), |ui| {
-                                        ui.set_clip_rect(side);
+                                    rest.max.x = side.min.x - 16.0;
+                                    ui.painter().vline(side.min.x - 8.0, side.y_range(), egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(254, 174, 52, 60)));
+                                    let inside = Rect::from_min_max(egui::pos2(side.min.x + 4.0, side.min.y), egui::pos2(side.max.x - 6.0, side.max.y));
+                                    let action = ui.scope_builder(egui::UiBuilder::new().max_rect(inside), |ui| {
+                                        ui.set_clip_rect(inside);
                                         guild_mode::body(ui, guild_mode::Tab::Guild, &mut self.guild, &agent.cwd, now, false)
                                     }).inner;
                                     if let Some(path) = action.terminal { self.terminals.open(ctx, &path); }

@@ -99,6 +99,8 @@ pub struct Service {
     rounds: Mutex<HashMap<String, Instant>>,
     /// What each quest's last round found, for the snapshot.
     round_log: Mutex<HashMap<String, RoundStatus>>,
+    /// When the health check last ran.
+    health_at: Mutex<Option<String>>,
     /// How many attempts run at once: the settings' until the orchestrator
     /// or the user changes it (`guild.concurrency`), then kept in the store.
     concurrency: AtomicUsize,
@@ -175,6 +177,7 @@ impl Service {
             decisions: Mutex::new(vec![]),
             rounds: Mutex::new(HashMap::new()),
             round_log: Mutex::new(HashMap::new()),
+            health_at: Mutex::new(None),
             running: Mutex::new(HashMap::new()),
             overlaps: Mutex::new((None, vec![])),
             gallery: Mutex::new((None, 0)),
@@ -3415,6 +3418,12 @@ impl Service {
         snap.orchestrator = crate::orchestrator::pick(&snap.members, &self.available_harnesses()).map(|m| m.id);
         snap.orchestrator_busy = self.orchestrating.lock().unwrap().is_some();
         snap.rounds = self.round_log.lock().unwrap().values().cloned().collect();
+        snap.health = self.health_at.lock().unwrap().clone().map(|at| Health {
+            at,
+            sentinel_stale: self.sentinel_stale.load(Ordering::Relaxed),
+            free_bytes: *self.disk_seen.lock().unwrap(),
+            unchanged: self.idle.lock().unwrap().iter().map(|(id, (_, since))| UnchangedWorktree { attempt_id: id.clone(), minutes: since.elapsed().as_secs() / 60 }).collect(),
+        });
         snap.concurrency = self.concurrency.load(Ordering::Relaxed);
         snap.overlaps = self.overlaps.lock().unwrap().1.clone();
         snap.disk_low = *self.disk_low.lock().unwrap();
@@ -5042,6 +5051,7 @@ impl Service {
         *self.idle.lock().unwrap() = seen;
         self.reap_orphans();
         self.watch_disk();
+        *self.health_at.lock().unwrap() = Some(now());
     }
 
     /// What an attempt left running that nobody waits for any more is stopped (FB-079): the
@@ -6006,6 +6016,15 @@ mod tests {
         assert!(service.ask_orchestrator_as(&id, crate::orchestrator::DecisionKind::Permission, true));
         let snap = wait_for(&service, "the permission was answered", |s| s.attempts[0].pending_permission.is_none() && !s.attempts[0].deciding);
         assert_eq!(snap.attempts[0].escalation, None);
+    }
+
+    #[test]
+    fn the_snapshot_shows_when_the_health_check_last_ran() {
+        let (_home, service, _quest_id, _mock) = with_orchestrator(|_| "```json\n{\"decision\": \"escalate\", \"reason\": \"unsure\"}\n```".into());
+        assert!(service.snapshot().unwrap().health.is_none(), "nothing has run yet");
+        service.health_pass();
+        let health = service.snapshot().unwrap().health.expect("the pass left its mark");
+        assert!(!health.sentinel_stale);
     }
 
     #[test]
