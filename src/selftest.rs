@@ -222,6 +222,18 @@ pub fn run() {
     let head = crate::herdr::menu_head(&models, models.len() - 12);
     let menu = MenuOptions::new(&models[head..]);
     assert_eq!((menu.options.len(), menu.highlighted, menu.options[9].text.split_whitespace().take(2).collect::<Vec<_>>().join(" ")), (10, Some(1), "Opus 4.8".to_string()), "A long menu lost its first or last option");
+    // Claude Code (2.1.322): a question whose options run long, a two-line
+    // description under each, keeps its header, its question and option 1.
+    let long_ask = ["⚠ Your login expires in 2 days · run /login to renew", "", "❯ Usa AskUserQuestion para preguntarme por la estrategia de despliegue,", "  con opciones largas.", "──────────────────────────────────────────", " ☐ Estrategia", "", "│ Para desplegar esta aplicación, ¿qué estrategia prefieres usar? Hay cuatro enfoques habituales, cada uno con", "│ distintos equilibrios entre velocidad, riesgo y costo.", "", "❯ 1. Reemplazo total de una sola vez, con reversión manual posterior", "     Todas las instancias se actualizan a la vez. Es la opción más simple y barata, pero cualquier error afecta a", "     todos los usuarios de inmediato.", "  2. Actualización progresiva por lotes (rolling), sin tiempo de inactividad", "     Se reemplazan las instancias en grupos pequeños, verificando la salud de cada lote antes de continuar. Evita", "     caídas completas, aunque conviven dos versiones.", "  3. Entorno azul-verde completo con cambio instantáneo de tráfico entre versiones", "     Se mantienen dos entornos idénticos: uno en producción y otro con la nueva versión. La reversión es igual de", "     rápida, pero duplica los costos de infraestructura.", "  4. Canary: liberar primero a un pequeño porcentaje de usuarios, luego ampliar", "     La nueva versión llega primero a un pequeño grupo de usuarios, mientras se monitorean errores y latencia. Si", "     todo se ve bien, el porcentaje aumenta.", "  5. Type something.", "──────────────────────────────────────────", "  6. Chat about this", "", "Enter to select · ↑/↓ to navigate · Esc to cancel"].join("\n");
+    let rows = crate::herdr::blocked_rows(&long_ask);
+    let menu = MenuOptions::new(&rows);
+    assert_eq!((rows[0].trim(), rows[1].starts_with("│ Para desplegar"), menu.options.len(), menu.highlighted), ("☐ Estrategia", true, 6, Some(0)), "A long question lost its header, question or first options: {rows:?}");
+    // Claude Code's /mcp (2.1.325): a list without numbers, its ❯ on the
+    // first server, more than a dozen lines above the footer.
+    let mcp = ["❯ /mcp", "", "──────────────────────────────────────────", "  Manage MCP servers", "  28 servers", "", "    User MCPs (/Users/me/.claude.json)", "  ❯ ✔ blender                    22 tools", "    ✔ discord                    22 tools", "    ✔ photopea                   46 tools", "    ✔ whatsapp                   5 tools", "", "    claude.ai", "    ✔ claude.ai Claude Data      11 tools", "    ✔ claude.ai Claude Docs      8 tools", "    ✔ claude.ai Figma            44 tools", "    → Show unused connectors     18 hidden", "", "    Built-in MCPs (always available)", "    ✔ claude-in-chrome           20 tools", "    ✔ plugin:aseprite:aseprite   18 tools", "", "  https://code.claude.com/docs/en/mcp for help", " ↑/↓ to navigate · Enter to confirm · Esc to cancel"].join("\n");
+    let rows = crate::herdr::blocked_rows(&mcp);
+    let menu = MenuOptions::new(&rows);
+    assert_eq!((rows[0].trim(), menu.highlighted.map(|h| menu.options[h].text.contains("blender"))), ("Manage MCP servers", Some(true)), "/mcp lost its highlighted server: {rows:?}");
     // Cursor (2026.10): its command approval points with → and has no footer;
     // its workspace trust points with ▶ at lettered options under a footer.
     let cursor_approval: Vec<String> = [" $  cat README.md in .", " Run this command?", " Not in allowlist: cat", "  → Run (once) (y)", "    Add Shell(cat) to allowlist? (tab)", "    Run Everything (shift+tab)", "    Skip & tell the agent what to do instead (esc or n)"].map(String::from).to_vec();
@@ -473,7 +485,8 @@ pub fn run() {
     assert!(natural_cmp("w2:p1", "w10:p1") == std::cmp::Ordering::Less && natural_cmp("a", "A") == std::cmp::Ordering::Equal);
     assert_eq!(l10n::trf("Tú → {}: {}", &[&"a", &"b"]), l10n::text("Tú → {}: {}", &l10n::CURRENT).replacen("{}", "a", 1).replacen("{}", "b", 1));
     window_sizing();
-    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, window sizing, background shells, {} bundled sprites", ROOM_FILES.len() + 1);
+    safe_close();
+    println!("PASS: snapshot states, filtering, empty/error handling, monitor transitions, room art, heroes, subagent sessions, subagents keep agents busy, tool actions, translations, git branch, sound alerts + prefs, notifications + prefs, chat selection, question options, filters and search, connection notes, flex-wrap columns, sessions, agent creation, codex + kiro actions, herdr events, question extraction, Herdr error codes, live background jobs, usage limits, HP viewer, natural order, window sizing, safe close, background shells, {} bundled sprites", ROOM_FILES.len() + 1);
 }
 
 /// The widget's size: fitted to the agents until the user resizes it, then
@@ -534,4 +547,50 @@ mod tests {
     fn self_test() {
         super::run();
     }
+}
+
+/// Closing an agent safely: a worktree with a commit on no remote, or a
+/// file left untracked, stays; once all is pushed and clean, it goes, with
+/// its branch.
+fn safe_close() {
+    use std::process::Command;
+    let root = std::env::temp_dir().join(format!("hpd-close-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&root, &["init", "-q", "--bare", "remote.git"]);
+    git(&root, &["clone", "-q", "remote.git", "main"]);
+    let main = root.join("main");
+    std::fs::write(main.join("a.txt"), "a").unwrap();
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "-qm", "a"]);
+    git(&main, &["push", "-q", "origin", "HEAD"]);
+    git(&main, &["worktree", "add", "-q", "-b", "feat", "../wt"]);
+    let wt = root.join("wt");
+    std::fs::write(wt.join("b.txt"), "b").unwrap();
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-qm", "b"]);
+    let mut closing = agent("w1:p1", "claude", "idle", "p", "", &wt.to_string_lossy());
+    let verdict = crate::closing::check(&closing, &[]);
+    assert_eq!(verdict.blockers, vec![l10n::trf("{} commit(s) que no están en ningún remoto.", &[&"1"])], "An unpushed commit must stop the close");
+    git(&wt, &["push", "-q", "origin", "feat"]);
+    std::fs::write(wt.join("loose.txt"), "x").unwrap();
+    closing.status = "working".into();
+    let verdict = crate::closing::check(&closing, &[agent("w2:p1", "claude", "idle", "p", "", &wt.to_string_lossy())]);
+    assert_eq!(verdict.blockers.len(), 3, "Working, a loose file and a second agent in the worktree: {:?}", verdict.blockers);
+    std::fs::remove_file(wt.join("loose.txt")).unwrap();
+    closing.status = "idle".into();
+    let verdict = crate::closing::check(&closing, &[]);
+    let worktree = verdict.worktree.clone().expect("the worktree, to remove");
+    assert!(verdict.blockers.is_empty() && worktree.branch.as_deref() == Some("feat"), "A pushed, clean worktree is safe: {verdict:?}");
+    assert_eq!(crate::closing::remove(&worktree), None);
+    let branches = Command::new("git").arg("-C").arg(&main).args(["branch", "--list", "feat"]).output().unwrap();
+    assert!(!wt.exists() && branches.stdout.is_empty(), "The worktree and its branch must go");
+    // The main checkout itself is never a worktree to remove.
+    let verdict = crate::closing::check(&agent("w3:p1", "claude", "idle", "p", "", &main.to_string_lossy()), &[]);
+    assert!(verdict.blockers.is_empty() && verdict.worktree.is_none(), "The main checkout: {verdict:?}");
+    let _ = std::fs::remove_dir_all(&root);
 }

@@ -1832,6 +1832,8 @@ fn cover_corners(painter: &Painter, rect: Rect, radius: f32, color: Color32) {
 pub struct SceneResponse {
     pub clicked: Option<String>,
     pub finish: Option<String>,
+    /// Close it if nothing would be lost, its worktree with it.
+    pub close_safely: Option<String>,
     /// A terminal in this agent's folder was asked for from its room's menu.
     pub terminal: Option<String>,
     /// The spare "+" room was clicked.
@@ -2061,7 +2063,7 @@ impl Scene {
         let dt = match self.last_time { Some(last) if !self.reduced_motion => ((now - last) as f32).clamp(0.0, 0.1), _ => 0.0 };
         self.last_time = Some(now);
         self.clock += dt;
-        let mut response = SceneResponse { clicked: None, finish: None, terminal: None, summon: false, summon_rect: None, edit_emblem: None, reorder: None, file_hover: None, file_drop: None };
+        let mut response = SceneResponse { clicked: None, finish: None, close_safely: None, terminal: None, summon: false, summon_rect: None, edit_emblem: None, reorder: None, file_hover: None, file_drop: None };
         // Files dragged from outside: where they are over the dungeon, read
         // from the system, since the pointer stands still for egui meanwhile.
         let (files_hovered, files_dropped) = ui.ctx().input(|i| (!i.raw.hovered_files.is_empty(), !i.raw.dropped_files.is_empty()));
@@ -2148,6 +2150,10 @@ impl Scene {
                         let guild_member = id.starts_with(crate::guild_view::ID_PREFIX);
                         // The hall is the guild itself: it closes as a whole.
                         let label = if id == crate::guild_view::HALL_ID { "Cerrar la guild" } else if guild_member { "Quitar de la guild" } else { "Finalizar agente (/exit)" };
+                        if !guild_member && id != crate::guild_view::HALL_ID && ui.button(tr("Cerrar si es seguro…")).on_hover_text(tr("Revisa que no haya cambios sin commit ni commits sin subir; si todo está a salvo, lo cierra y borra su worktree")).clicked() {
+                            response.close_safely = Some(id.clone());
+                            ui.close_menu();
+                        }
                         if ui.button(tr(label)).clicked() {
                             response.finish = Some(id.clone());
                             ui.close_menu();

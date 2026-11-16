@@ -562,6 +562,17 @@ pub struct ChatAction {
     pub guild: bool,
     /// The console's text size: +1 bigger, -1 smaller.
     pub console_step: i8,
+    /// A `!` command to run in a terminal of the app instead, where it can
+    /// be answered (an agent's `!` gives it no keyboard).
+    pub run_in_terminal: Option<String>,
+    /// Close the agent if nothing would be lost, its worktree with it.
+    pub close_safely: bool,
+}
+
+/// The command of a draft that starts with `!` (the harness's shell mode).
+pub(crate) fn bang_command(draft: &str) -> Option<String> {
+    let command = draft.trim().strip_prefix('!')?.trim();
+    (!command.is_empty()).then(|| command.to_string())
 }
 
 /// Opens under the rooms when one is clicked: the tail of the agent's
@@ -729,7 +740,7 @@ fn changes_column(ui: &mut Ui, agent: &Agent, state: &mut ChatState) {
 }
 
 fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatState, now: f64, wide: bool) -> ChatAction {
-    let mut action = ChatAction { close: false, terminal: false, guild: false, console_step: 0 };
+    let mut action = ChatAction { close: false, terminal: false, guild: false, console_step: 0, run_in_terminal: None, close_safely: false };
     // Files dropped on the window go to the message as paths.
     let dropped = dropped_paths(ui);
     if !dropped.is_empty() { add_paths(&mut state.draft, &dropped); state.focus = true; }
@@ -893,6 +904,9 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                     if button(ui, ">_ Terminal", Color32::from_rgb(254, 174, 52)).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
                         action.terminal = true;
                     }
+                    if !standalone && button(ui, &tr("⏻ Cerrar"), Color32::from_gray(190)).on_hover_text(tr("Revisa que no haya cambios sin commit ni commits sin subir; si todo está a salvo, lo cierra y borra su worktree")).clicked() {
+                        action.close_safely = true;
+                    }
                     return;
                 }
                 if flat_button(ui, mono("x", 13.0).color(Color32::WHITE)).on_hover_text(tr("Cerrar")).clicked() { action.close = true; }
@@ -901,6 +915,9 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                 }
                 if flat_button(ui, mono(">_", 11.0).strong().color(Color32::from_gray(200))).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
                     action.terminal = true;
+                }
+                if !standalone && flat_button(ui, mono("⏻", 12.0).color(Color32::from_gray(200))).on_hover_text(tr("Cerrar si es seguro: revisa que no haya cambios sin commit ni commits sin subir, y borra su worktree")).clicked() {
+                    action.close_safely = true;
                 }
                 // The console's own text size.
                 if flat_button(ui, mono("A+", 11.0).color(Color32::from_gray(200))).on_hover_text(format!("{} (⌘⇧+)", tr("Consola más grande"))).clicked() { action.console_step = 1; }
@@ -927,7 +944,7 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
         // The box under the console grows to three rows with what is typed.
         let box_height = input_height(draft_rows(&state.draft, (ui.available_width() / (fs(13.0) * 0.62)) as usize), fs(13.0), true) + 10.0;
         let strip = shells_strip(ui, agent, state, now);
-        let body_height = total - 7.0 * 2.0 - 22.0 - strip - acknowledgement_height - if standalone { 14.0 } else if inline { 0.0 } else { box_height } - if state.note.is_some() { 16.0 } else { 0.0 };
+        let body_height = total - 7.0 * 2.0 - 22.0 - strip - acknowledgement_height - if standalone { 14.0 } else if inline { 0.0 } else { box_height } - if state.note.is_some() { 16.0 } else { 0.0 } - if !standalone && bang_command(&state.draft).is_some() { 24.0 } else { 0.0 };
         Frame::new().fill(alpha(Color32::BLACK, 0.45)).corner_radius(CornerRadius::same(5)).inner_margin(Margin::same(6)).show(ui, |ui| {
             ui.set_min_height(body_height.max(40.0));
             ui.set_max_height(body_height.max(40.0));
@@ -1008,6 +1025,17 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
         if !inline { input_row(ui, monitor, agent, state, &menu, sending, fs(13.0), true); }
         if let Some(note) = &state.note {
             ui.label(RichText::new(note).size(fs(10.0)).color(Color32::from_rgb(255, 159, 10)));
+        }
+        // The harness runs a ! command with no keyboard: a login or a menu it
+        // shows ends on its own. A terminal here can answer it.
+        if let Some(command) = bang_command(&state.draft) {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(tr("Con ! el comando no recibe teclado: un login o un menú se cierra solo.")).size(fs(10.0)).color(DIM));
+                if ui.small_button(tr("Correr en una terminal")).on_hover_text(trf("Abrir una terminal en su carpeta que corra: {}", &[&command])).clicked() {
+                    action.run_in_terminal = Some(command);
+                    state.draft.clear();
+                }
+            });
         }
     });
     action
@@ -1134,7 +1162,9 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
         if state.focus {
             if response.has_focus() { state.focus = false; } else if !sending { response.request_focus(); ui.ctx().request_repaint(); }
         }
-        let submitted = response.has_focus() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+        // consume_key matches Shift+Enter too (egui ignores shift there):
+        // Shift+Enter is the box's line break and must not send.
+        let submitted = response.has_focus() && ui.input_mut(|i| !i.modifiers.shift && i.consume_key(egui::Modifiers::NONE, Key::Enter));
         if menu_open {
             let chosen = &matches[state.slash_choice].0;
             if submitted && draft.trim() != format!("/{chosen}") { complete = Some(chosen.clone()); }
