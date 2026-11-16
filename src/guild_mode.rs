@@ -71,8 +71,6 @@ pub fn tab_strip(ui: &mut Ui, tab: &mut Tab, view: &GuildView, cwd: &str) -> boo
     let mut leave = false;
     let snap = view.snapshot.as_ref();
     let project = snap.and_then(|s| project_for(s, cwd));
-    let members = snap.map(|s| s.members.iter().filter(|m| m.enabled).count()).unwrap_or(0);
-    let waiting = snap.map(|s| asking(s).len()).unwrap_or(0);
     let quests = snap.zip(project).map(|(s, p)| s.quests.iter().filter(|q| q.project_id == p.id && matches!(q.state, QuestState::Running | QuestState::Paused | QuestState::Blocked)).count()).unwrap_or(0);
     let design = snap.zip(project).and_then(|(s, p)| s.designs.iter().find(|d| d.project_id == p.id));
     // The tabs wrap to a second line rather than widen the panel; the way
@@ -91,7 +89,6 @@ pub fn tab_strip(ui: &mut Ui, tab: &mut Tab, view: &GuildView, cwd: &str) -> boo
             if ui.add(button).clicked() { *tab = which; }
         };
         chip(ui, Tab::Chat, tr("Chat"), false);
-        chip(ui, Tab::Guild, if waiting > 0 { format!("{} · {members} · {waiting}!", tr("Gremio")) } else { format!("{} · {members}", tr("Gremio")) }, waiting > 0);
         chip(ui, Tab::Quests, format!("{} · {quests}", tr("Misiones")), false);
         chip(ui, Tab::Design, match design { Some(d) => format!("{} · {}%", tr("Diseño"), guild::design::maturity_percent(d)), None => tr("Diseño") }, false);
         let visuals = design.map(|d| d.visual.images.len() + d.visual.palettes.len()).unwrap_or(0);
@@ -213,11 +210,9 @@ fn member_row(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot, m: &Member, ag
         ui.horizontal(|ui| {
             ui.label(mono("●", 11.0).color(color));
             open |= ui.add(egui::Label::new(mono(&m.name, 12.0).strong().color(if m.enabled { INK } else { DIM })).sense(egui::Sense::click())).on_hover_text(tr("Ver su trabajo")).clicked();
-            ui.label(mono(&roles.join(", "), 10.5).color(GOLD));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(mono(&format!("{} · {}", m.harness, m.model_id.clone().unwrap_or_else(|| tr("modelo por defecto"))), 10.0).color(DIM));
-            });
+            ui.add(egui::Label::new(mono(&roles.join(", "), 10.5).color(GOLD)).truncate());
         });
+        ui.add(egui::Label::new(mono(&format!("{} · {}", m.harness, m.model_id.clone().unwrap_or_else(|| tr("modelo por defecto"))), 10.0).color(DIM)).truncate());
         let doing = if m.enabled { agent.activity.clone() } else { tr("Desactivado") };
         open |= ui.add(egui::Label::new(mono(&doing, 10.5).color(DIM)).truncate().sense(egui::Sense::click())).clicked();
         if m.enabled { member_actions(ui, view, snap, m, agent); }
@@ -269,6 +264,22 @@ fn stall_label(kind: guild::sentinel::StallKind) -> String {
     })
 }
 
+/// The health check every two minutes: whether it ran lately and the sentinel kept up, the free disk,
+/// and the members whose worktree has not changed for a while.
+fn health_lines(ui: &mut Ui, snap: &Snapshot) {
+    let Some(h) = &snap.health else {
+        ui.label(mono(&tr("Chequeo de salud: aún sin correr"), 10.0).color(DIM));
+        return;
+    };
+    let (state, color) = if h.sentinel_stale { (tr("el vigilante se atrasó"), RED) } else { (tr("al día"), GREEN) };
+    let free = h.free_bytes.map(|b| format!(" · {}", trf("{} GB libres", &[&format!("{:.0}", b as f64 / (1u64 << 30) as f64)]))).unwrap_or_default();
+    ui.add(egui::Label::new(mono(&format!("♥ {} · {} · {state}{free}", tr("Chequeo"), ago(&h.at)), 10.0).color(color)).truncate()).on_hover_text(tr("La guild mira cada 2 minutos que el vigilante, el disco y los worktrees sigan en orden"));
+    for u in h.unchanged.iter().filter(|u| u.minutes >= 10).take(3) {
+        let who = snap.attempts.iter().find(|a| a.id == u.attempt_id).and_then(|a| snap.members.iter().find(|m| m.id == a.member_id)).map(|m| m.name.clone()).unwrap_or_default();
+        ui.add(egui::Label::new(mono(&format!("▸ {who} · {}", trf("worktree sin cambios hace {} min", &[&u.minutes])), 10.0).color(GOLD)).truncate());
+    }
+}
+
 /// The sentinel and the orchestrator it serves: what the orchestrator does, when it last looked over each
 /// running quest (with a way to ask for a round now), and what waits that nobody moves.
 fn sentinel_card(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot) {
@@ -288,21 +299,18 @@ fn sentinel_card(ui: &mut Ui, view: &mut GuildView, snap: &Snapshot) {
         });
         for q in &running {
             let round = snap.rounds.iter().find(|r| r.quest_id == q.id);
-            ui.horizontal(|ui| {
-                let text = match round { Some(r) => format!("{} · {}", q.title, ago(&r.at)), None => format!("{} · {}", q.title, tr("sin ronda aún")) };
-                let label = ui.add(egui::Label::new(mono(&text, 10.0).color(DIM)).truncate());
-                if let Some(r) = round { label.on_hover_text(format!("{}\n{} · {}", r.summary, trf("{} avisos", &[&r.notes]), trf("{} reinicios", &[&r.retries]))); }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let ask = egui::Button::new(mono(&tr("Revisar ahora"), 10.0).color(GOLD)).small().fill(Color32::from_rgba_unmultiplied(254, 174, 52, 14));
-                    if ui.add(ask).on_hover_text(tr("El orquestador revisa ahora a todos los miembros de esta misión")).clicked() { view.command("quest.review", json!({"questId": q.id})); }
-                });
-            });
+            let text = match round { Some(r) => format!("{} · {}", q.title, ago(&r.at)), None => format!("{} · {}", q.title, tr("sin ronda aún")) };
+            let label = ui.add(egui::Label::new(mono(&text, 10.0).color(DIM)).truncate());
+            if let Some(r) = round { label.on_hover_text(format!("{}\n{} · {}", r.summary, trf("{} avisos", &[&r.notes]), trf("{} reinicios", &[&r.retries]))); }
+            let ask = egui::Button::new(mono(&tr("Revisar ahora"), 10.0).color(GOLD)).small().fill(Color32::from_rgba_unmultiplied(254, 174, 52, 14));
+            if ui.add(ask).on_hover_text(tr("El orquestador revisa ahora a todos los miembros de esta misión")).clicked() { view.command("quest.review", json!({"questId": q.id})); }
         }
         for s in stalls.iter().take(4) {
             let who = snap.tasks.iter().find(|t| t.id == s.task_id).map(|t| t.title.clone()).unwrap_or_else(|| s.subject.clone());
             ui.add(egui::Label::new(mono(&format!("▸ {} · {who} · {}", stall_label(s.kind), ago(&s.since)), 10.0).color(if s.acked { DIM } else { GOLD })).truncate()).on_hover_text(&s.reason);
         }
         if stalls.len() > 4 { ui.label(mono(&trf("… y {} esperas más", &[&(stalls.len() - 4)]), 10.0).color(DIM)); }
+        health_lines(ui, snap);
     });
     ui.add_space(4.0);
 }

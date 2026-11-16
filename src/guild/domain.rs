@@ -680,6 +680,25 @@ pub struct Snapshot {
     /// The orchestrator's last round over each quest that has had one.
     #[serde(default)]
     pub rounds: Vec<RoundStatus>,
+    /// What the last health check saw (none until the first one runs).
+    #[serde(default)]
+    pub health: Option<Health>,
+}
+
+/// The health check's last pass: when, whether the sentinel kept up, the free room on the worktrees'
+/// disk, and the running attempts whose worktree has not changed.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Health {
+    pub at: String,
+    pub sentinel_stale: bool,
+    pub free_bytes: Option<u64>,
+    pub unchanged: Vec<UnchangedWorktree>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UnchangedWorktree {
+    pub attempt_id: String,
+    pub minutes: u64,
 }
 
 /// What the orchestrator's last round over a quest found.
