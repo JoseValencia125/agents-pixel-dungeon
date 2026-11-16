@@ -713,6 +713,35 @@ impl Monitor {
         rx
     }
 
+    /// Close an agent `closing::check` found safe to close: /exit, then,
+    /// once its pane is back at the shell, its worktree and local branch go,
+    /// and the shell leaves the folder that no longer exists.
+    pub fn close_safely(&self, agent: &Agent, worktree: Option<crate::closing::Worktree>) -> Receiver<Option<String>> {
+        let (tx, rx) = channel();
+        let exited = self.finish(agent);
+        let session = self.session.clone();
+        let demo = self.demo;
+        let pane = agent.id.clone();
+        std::thread::spawn(move || {
+            if let Some(failure) = exited.recv().unwrap_or(None) { let _ = tx.send(Some(failure)); return; }
+            let Some(worktree) = worktree.filter(|_| !demo) else { let _ = tx.send(None); return };
+            let shell = |name: &str| ["zsh", "bash", "fish", "sh"].contains(&name.trim_start_matches('-'));
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !pane_process(&session, &pane).is_some_and(|p| shell(&p)) {
+                if Instant::now() > deadline { let _ = tx.send(Some(tr("El agente no salió a tiempo; su worktree sigue ahí."))); return; }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            let failure = crate::closing::remove(&worktree);
+            if failure.is_none() {
+                let cd = format!("cd '{}'", worktree.main.to_string_lossy().replace('\'', "'\\''"));
+                let _ = run_herdr(&["pane", "send-text", &pane, &cd], &session, Duration::from_secs(3));
+                let _ = run_herdr(&["pane", "send-keys", &pane, "enter"], &session, Duration::from_secs(3));
+            }
+            let _ = tx.send(failure);
+        });
+        rx
+    }
+
     /// The agent's terminal as it shows, colours included (ANSI): the
     /// visible screen, or with `history` the last thousand lines (Herdr's most) of its
     /// scrollback, to scroll through. Demo mode paints a plausible screen.
@@ -924,15 +953,17 @@ impl Monitor {
                     format!("● {}\n  ⎿ {}", agent.activity, tr("Leyendo archivos del proyecto…"))
                 }
             } else {
-                run_herdr(&["agent", "read", &agent.id, "--source", "recent", "--lines", "60", "--format", "text"], &session, Duration::from_secs(4))
+                // A question reads further back: its options can run long.
+                let read = if agent.status == "blocked" { "200" } else { "60" };
+                run_herdr(&["agent", "read", &agent.id, "--source", "recent", "--lines", read, "--format", "text"], &session, Duration::from_secs(4))
                     .map(|d| String::from_utf8_lossy(&d).to_string())
                     .unwrap_or_default()
             };
-            let rows = meaningful_lines(&text);
-            let keep = if agent.status == "blocked" { 12 } else { lines };
-            let start = rows.len().saturating_sub(keep);
-            let start = if agent.status == "blocked" { menu_head(&rows, start) } else { start };
-            let _ = tx.send(rows[start..].to_vec());
+            let rows = if agent.status == "blocked" { blocked_rows(&text) } else {
+                let rows = meaningful_lines(&text);
+                rows[rows.len().saturating_sub(lines)..].to_vec()
+            };
+            let _ = tx.send(rows);
             wake();
         });
         rx

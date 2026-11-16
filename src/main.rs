@@ -9,6 +9,7 @@ mod codex_settings;
 mod alerts;
 mod ansi;
 mod changes;
+mod closing;
 mod assets;
 mod commands;
 mod events;
@@ -259,6 +260,10 @@ struct App {
     usage_rx: Option<std::sync::mpsc::Receiver<Vec<usage::HarnessUsage>>>,
     next_usage: f64,
     terminals: terminal::Terminals,
+    /// An agent being closed safely: its name, and how removing its worktree went.
+    closing: Option<(String, std::sync::mpsc::Receiver<Option<String>>)>,
+    /// The chat's ⏻ asked to close this agent safely (checked after the frame's panels).
+    safe_close_asked: Option<String>,
     /// Full screen's calls to action already answered: the state each agent
     /// was in when its chat was open. It is called again once that changes.
     calls_seen: std::collections::HashMap<String, String>,
@@ -306,6 +311,8 @@ impl App {
         let mut app = App {
             monitor,
             terminals: terminal::Terminals::default(),
+            closing: None,
+            safe_close_asked: None,
             calls_seen: Default::default(),
             room_opened: false,
             emblem_editor: None,
@@ -753,6 +760,39 @@ impl App {
         self.terminals.open(ctx, &cwd);
     }
 
+    /// Check whether an agent can be closed without losing work: if not, say
+    /// why; if so, ask, then /exit it and remove its worktree.
+    fn confirm_safe_close(&mut self, id: &str) {
+        let Some(agent) = self.monitor.agents.iter().find(|a| a.id == id).cloned() else { return };
+        let verdict = closing::check(&agent, &self.monitor.agents);
+        if !verdict.blockers.is_empty() {
+            let reasons: String = verdict.blockers.iter().map(|b| format!("• {b}\n")).collect();
+            rfd::MessageDialog::new()
+                .set_title(trf("Todavía no es seguro cerrar {}", &[&agent.project]))
+                .set_description(format!("{reasons}\n{}", tr("Revisa su chat o su diff, y vuelve a intentarlo.")))
+                .set_level(rfd::MessageLevel::Warning)
+                .set_buttons(rfd::MessageButtons::Ok)
+                .show();
+            return;
+        }
+        let what = match &verdict.worktree {
+            Some(w) => {
+                let branch = w.branch.as_deref().map(|b| trf(" y su rama local {}", &[&b])).unwrap_or_default();
+                trf("Se escribirá /exit en su chat y se borrará su worktree {}{}.", &[&herdr::abbreviate_home(&w.path.to_string_lossy()), &branch])
+            }
+            None => tr("Se escribirá /exit en su chat. No trabaja en un worktree: no se borra ninguna carpeta."),
+        };
+        let answer = rfd::MessageDialog::new()
+            .set_title(trf("Es seguro cerrar {}", &[&agent.project]))
+            .set_description(format!("{}\n\n{what}", tr("Nada corriendo, sin cambios sin commit y todos sus commits están en el remoto.")))
+            .set_level(rfd::MessageLevel::Info)
+            .set_buttons(rfd::MessageButtons::OkCancelCustom(tr("Cerrar"), tr("Cancelar")))
+            .show();
+        if matches!(&answer, rfd::MessageDialogResult::Ok) || matches!(&answer, rfd::MessageDialogResult::Custom(l) if *l == tr("Cerrar")) {
+            self.closing = Some((agent.project.clone(), self.monitor.close_safely(&agent, verdict.worktree)));
+        }
+    }
+
     /// Ask before typing /exit into an agent's chat.
     fn confirm_finish(&mut self, id: &str) {
         let Some(agent) = self.monitor.agents.iter().find(|a| a.id == id).cloned() else { return };
@@ -1080,6 +1120,7 @@ impl eframe::App for App {
                 needs_fit = true;
             }
             if let Some(id) = response.finish { self.confirm_finish(&id); }
+            if let Some(id) = response.close_safely { self.confirm_safe_close(&id); }
             if let Some(id) = response.terminal { self.open_terminal_for(ctx, Some(&id)); }
             if let Some((emblem, repo_name, demo)) = response.edit_emblem.and_then(|id| self.scene.emblem_of(&id)) {
                 let taken = identity::SavedEmblem::colours_of(self.scene.emblems.iter().filter(|(k, _)| **k != emblem.key).map(|(_, e)| e));
@@ -1212,6 +1253,8 @@ impl eframe::App for App {
                                     }
                                     let action = ui::chat_panel(ui, &self.monitor, &agent, chat, now, fullscreen);
                                     if action.terminal { self.terminals.open(ctx, &agent.cwd); }
+                                    if let Some(command) = &action.run_in_terminal { self.terminals.shell_running(ctx, &agent.cwd, command); }
+                                    if action.close_safely { self.safe_close_asked = Some(agent.id.clone()); }
                                     if action.close { self.monitor.select(None); }
                                     if action.guild {
                                         // The agent becomes the delegate: one message, then its tabs.
@@ -1239,6 +1282,19 @@ impl eframe::App for App {
         });
 
         self.terminals.show(ctx);
+        if let Some(id) = self.safe_close_asked.take() { self.confirm_safe_close(&id); }
+        if let Some((name, rx)) = &self.closing {
+            match rx.try_recv() {
+                Ok(failure) => {
+                    if let Some(failure) = failure {
+                        rfd::MessageDialog::new().set_title(trf("No se pudo cerrar {} del todo", &[name])).set_description(failure).set_level(rfd::MessageLevel::Error).set_buttons(rfd::MessageButtons::Ok).show();
+                    }
+                    self.closing = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(300)),
+                Err(_) => self.closing = None,
+            }
+        }
         if let Some(editor) = &mut self.codex_settings {
             if !editor.show(ctx) { self.codex_settings = None; }
         }

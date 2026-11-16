@@ -120,6 +120,22 @@ impl Terminals {
         self.sessions.push(Session { id, cwd: working_directory(cwd), command: Some((argv, env)), tag: Some(tag.into()), reported: false, backend: None, error: None, exited: false, visible: true });
     }
 
+    /// A new terminal in `cwd` that runs `command` in the login shell and
+    /// stays open in that shell afterwards: for a command that asks things
+    /// (a login, a menu), which an agent's `!` cannot answer.
+    pub fn shell_running(&mut self, ctx: &egui::Context, cwd: &str, command: &str) {
+        #[cfg(windows)]
+        { let _ = command; self.open(ctx, cwd); }
+        #[cfg(not(windows))]
+        {
+            let _ = ctx;
+            let (shell, _) = login_shell();
+            let argv = vec![shell.clone(), "-lc".into(), format!("{command}; exec {shell} -l")];
+            let id = self.sessions.len() as u64 + 1;
+            self.sessions.push(Session { id, cwd: working_directory(cwd), command: Some((argv, vec![])), tag: None, reported: false, backend: None, error: None, exited: false, visible: true });
+        }
+    }
+
     /// Tags of programs started with `run` that have exited since the last call.
     pub fn take_finished(&mut self) -> Vec<String> {
         std::mem::take(&mut self.finished)

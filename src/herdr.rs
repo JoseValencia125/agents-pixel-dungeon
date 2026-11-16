@@ -1485,10 +1485,13 @@ impl MenuOptions {
         let mut menu = MenuOptions::default();
         let footer_at = lines.iter().rposition(|l| is_menu_footer(l.trim()));
         let footer = footer_at.unwrap_or(lines.len());
-        let Some(marked) = lines[..footer].iter().rposition(|l| {
+        let pointed = |l: &String| {
             let t = l.trim_start();
             after_marker(t).is_some_and(|rest| !rest.trim().is_empty()) && (t.starts_with(MENU_ONLY_MARKERS) || footer_at.is_some())
-        }) else { return menu };
+        };
+        // Claude Code's ❯ wins over an arrow in an entry's text (/mcp's
+        // "→ Show unused connectors"); Cursor's → and ▶ have no ❯ beside them.
+        let Some(marked) = lines[..footer].iter().rposition(|l| pointed(l) && l.trim_start().starts_with('❯')).or_else(|| lines[..footer].iter().rposition(pointed)) else { return menu };
         let marker = lines[marked].chars().take_while(|c| c.is_whitespace()).count();
         let column = marker + 1 + lines[marked].chars().skip(marker + 1).take_while(|c| c.is_whitespace()).count();
         let text_at = |line: &String| -> Option<String> {
@@ -1578,6 +1581,31 @@ pub fn menu_head(rows: &[String], start: usize) -> usize {
     let Some(first) = rows[start..].iter().find_map(|l| option_prefix(l.trim()).map(|(_, n, _)| n)) else { return start };
     if first <= 1 { return start; }
     (start.saturating_sub(40)..start).rev().find(|&i| option_prefix(rows[i].trim()).is_some_and(|(_, n, _)| n == 1)).unwrap_or(start)
+}
+
+/// What a blocked agent's terminal shows of its question: the whole dialog,
+/// from the rule above it (Claude Code draws one over its permission
+/// prompts and AskUserQuestion) through its options. A question with long
+/// options and a description under each runs past any fixed count of lines,
+/// which cut off the question and its first options. Without a menu or a
+/// rule in reach, the last lines, moved back to the menu's first option.
+pub fn blocked_rows(text: &str) -> Vec<String> {
+    let raw: Vec<String> = text.split('\n').map(str::to_string).collect();
+    let rule = |l: &String| { let t = l.trim(); t.chars().count() >= 8 && t.chars().all(|c| matches!(c, '─' | '━' | '═')) };
+    // From the first option, up to 40 lines of question above it; a menu
+    // read without options (/mcp's sections) from its footer, as far as a
+    // long list goes.
+    let anchor = MenuOptions::new(&raw).options.first().map(|o| (o.line, 40))
+        .or_else(|| raw.iter().rposition(|l| is_menu_footer(l.trim())).map(|f| (f, 80)));
+    if let Some((line, reach)) = anchor {
+        let reach = line.saturating_sub(reach);
+        if let Some(top) = raw[reach..line].iter().rposition(rule) {
+            return meaningful_lines(&raw[reach + top + 1..].join("\n"));
+        }
+    }
+    let rows = meaningful_lines(text);
+    let start = menu_head(&rows, rows.len().saturating_sub(12));
+    rows[start..].to_vec()
 }
 
 /// The lines of an agent's terminal that say something, without Claude
