@@ -99,6 +99,29 @@ fn apply_sgr(style: &mut Style, params: &str) {
     }
 }
 
+/// The coloured circles and squares (🟡 🟥…) egui's emoji font lacks, or
+/// draws in the text's colour (🔴 🔵): a ● or ■ the font has, in the
+/// emoji's own colour, instead of a missing-glyph box.
+pub fn color_shape(c: char) -> Option<(char, Color32)> {
+    let (r, g, b) = match c {
+        '🔴' | '🟥' => (232, 59, 59),
+        '🔵' | '🟦' => (62, 140, 240),
+        '🟠' | '🟧' => (250, 150, 40),
+        '🟡' | '🟨' => (250, 210, 50),
+        '🟢' | '🟩' => (90, 200, 80),
+        '🟣' | '🟪' => (170, 100, 220),
+        '🟤' | '🟫' => (165, 110, 70),
+        _ => return None,
+    };
+    let shape = if matches!(c, '🟥' | '🟦' | '🟧' | '🟨' | '🟩' | '🟪' | '🟫') { '■' } else { '●' };
+    Some((shape, Color32::from_rgb(r, g, b)))
+}
+
+/// A line's text with the coloured shapes as ● or ■, for text drawn in one colour.
+pub fn plain_shapes(text: &str) -> String {
+    text.chars().map(|c| color_shape(c).map_or(c, |(shape, _)| shape)).collect()
+}
+
 /// Lines of styled runs. `\r` is dropped, tabs become spaces, and every
 /// escape sequence other than styling (cursor moves, OSC titles…) is
 /// skipped.
@@ -147,7 +170,15 @@ pub fn parse(text: &str) -> Vec<Vec<Span>> {
             '\t' => { let n = 8 - column % 8; run.extend(std::iter::repeat(' ').take(n)); column += n; }
             '\u{a0}' => { run.push(' '); column += 1; }
             c if c.is_control() => {}
-            c => { run.push(c); column += 1; }
+            c => match color_shape(c) {
+                // Its own run, in its colour; it fills two columns, as an emoji does.
+                Some((shape, color)) => {
+                    flush(&mut lines, &mut run, &style);
+                    lines.last_mut().unwrap().push(Span { text: shape.to_string(), fg: Some(color), ..style.span(String::new()) });
+                    column += 2;
+                }
+                None => { run.push(c); column += 1; }
+            },
         }
         i += 1;
     }
@@ -376,6 +407,17 @@ mod tests {
         let all: Vec<String> = codes(&joined).iter().flatten().map(|c| c.text.clone()).collect();
         assert!(!all.is_empty() && all.iter().all(|t| t == "! \"/Users/nachovalencia/agents-pixel-dungeon/build/Agents Pixel Dungeon.app/Contents/MacOS/guild\" tool"), "{all:?} in {:?}", plain(&joined));
         assert!(plain(&joined).iter().any(|l| l.contains("agents-pixel-dungeon/build/Agents Pixel Dungeon.app/Contents/MacOS")), "{:?}", plain(&joined));
+    }
+
+    #[test]
+    fn coloured_shapes_show_in_their_colour() {
+        let lines = parse("  Para ti: 🟡 Amarilla \x1b[1m🟥\x1b[0m");
+        let yellow = lines[0].iter().find(|s| s.text == "●").expect("the circle");
+        assert_eq!(yellow.fg, color_shape('🟡').map(|(_, c)| c));
+        let square = lines[0].iter().find(|s| s.text == "■").expect("the square");
+        assert!(square.bold, "it keeps the run's style");
+        assert_eq!(plain(&lines)[0], "  Para ti: ● Amarilla ■");
+        assert_eq!(plain_shapes("🟠 Naranja"), "● Naranja");
     }
 
     #[test]

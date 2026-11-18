@@ -1004,7 +1004,7 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                     let option = menu.options.iter().position(|o| o.line == i);
                     let highlighted = option.is_some() && option == state.choice.or(menu.highlighted);
                     let lead = asking && i == 0 && agent.question.is_some();
-                    let text = mono(line, 11.0).color(if highlighted || lead { Color32::WHITE } else { Color32::from_gray(222) });
+                    let text = mono(&crate::ansi::plain_shapes(line), 11.0).color(if highlighted || lead { Color32::WHITE } else { Color32::from_gray(222) });
                     let text = if highlighted || lead { text.strong() } else { text };
                     let label = egui::Label::new(text).wrap();
                     let response = if option.is_some() {
@@ -1164,6 +1164,8 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
         }
         // consume_key matches Shift+Enter too (egui ignores shift there):
         // Shift+Enter is the box's line break and must not send.
+        // Ctrl+⏎ goes to the harness: Claude Code sends a queued message right away with it.
+        let send_now = response.has_focus() && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, Key::Enter));
         let submitted = response.has_focus() && ui.input_mut(|i| !i.modifiers.shift && i.consume_key(egui::Modifiers::NONE, Key::Enter));
         if menu_open {
             let chosen = &matches[state.slash_choice].0;
@@ -1205,6 +1207,11 @@ fn input_row(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
             } else {
                 submit(state, monitor, agent, menu);
             }
+            state.focus = true;
+        }
+        if send_now && !sending {
+            // Something typed goes first, as ⏎ would send it.
+            if empty { state.run(monitor.press(&["ctrl+enter".into()], agent)); } else { submit(state, monitor, agent, menu); }
             state.focus = true;
         }
         if ui.add_enabled(!sending && !empty, egui::Button::new(mono("→", 13.0)).frame(false)).on_hover_text(tr("Enviar (⏎)")).clicked() {
