@@ -308,6 +308,7 @@ impl App {
         visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(30, 27, 36);
         visuals.extreme_bg_color = Color32::from_rgb(8, 9, 11);
         cc.egui_ctx.set_visuals(visuals);
+        terminal::install_symbol_fonts(&cc.egui_ctx);
         let mut app = App {
             monitor,
             terminals: terminal::Terminals::default(),

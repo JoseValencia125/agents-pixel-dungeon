@@ -18,7 +18,6 @@ struct Session {
 }
 
 pub struct Terminals {
-    fonts_ready: bool,
     sessions: Vec<Session>,
     sender: mpsc::Sender<(u64, PtyEvent)>,
     receiver: mpsc::Receiver<(u64, PtyEvent)>,
@@ -28,7 +27,7 @@ pub struct Terminals {
 impl Default for Terminals {
     fn default() -> Self {
         let (sender, receiver) = mpsc::channel();
-        Self { fonts_ready: false, sessions: Vec::new(), sender, receiver, finished: Vec::new() }
+        Self { sessions: Vec::new(), sender, receiver, finished: Vec::new() }
     }
 }
 
@@ -43,7 +42,9 @@ fn symbol_fonts() -> Vec<PathBuf> {
 }
 
 /// The app sets no fonts of its own, so egui's defaults are the base.
-fn install_symbol_fonts(ctx: &egui::Context) {
+/// Installed at start: the chat's console draws the same symbols (Claude
+/// Code's ⎿ and its ✻ spinner) without a terminal open.
+pub fn install_symbol_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     for (i, path) in symbol_fonts().into_iter().enumerate() {
         let Ok(bytes) = std::fs::read(&path) else { continue };
@@ -155,10 +156,6 @@ impl Terminals {
 
     pub fn show(&mut self, ctx: &egui::Context) {
         self.drain_events();
-        if !self.fonts_ready && self.sessions.iter().any(|s| s.visible) {
-            install_symbol_fonts(ctx);
-            self.fonts_ready = true;
-        }
         for session in &mut self.sessions {
             if !session.visible { continue; }
             let sender = self.sender.clone();
