@@ -182,11 +182,15 @@ pub fn reflow(screen: Vec<Vec<Span>>) -> Vec<Vec<Span>> {
     let widest = screen.iter().map(|l| text(l).trim_end().chars().count()).max().unwrap_or(0);
     if widest < 40 { return screen; }
     let mut out: Vec<Vec<Span>> = Vec::with_capacity(screen.len());
+    let rows = crate::herdr::table_rows(&screen.iter().map(|l| text(l)).collect::<Vec<_>>());
     let (mut open, mut hard) = (false, false);
-    for mut line in screen {
+    for (mut line, row) in screen.into_iter().zip(rows) {
+        use crate::herdr::Row;
+        if row == Row::Gap { continue; }
         let t = text(&line);
         let count = t.trim_end().chars().count();
-        if open && !crate::herdr::starts_block(&t) {
+        let join = match row { Row::Field => false, Row::FieldMore => !out.is_empty(), _ => open && !crate::herdr::starts_block(&t) };
+        if join {
             let last = out.last_mut().expect("an open paragraph");
             // A URL or an absolute path goes on without a space: cut at the
             // last column, or at one of its hyphens (the terminal breaks words there too).
@@ -221,8 +225,10 @@ pub fn reflow(screen: Vec<Vec<Span>>) -> Vec<Vec<Span>> {
                 if s.text.is_empty() { last.pop(); } else { break; }
             }
         }
-        open = count > 0 && count + 12 >= widest;
-        hard = count >= widest;
+        // A rule ends a paragraph: the line under it starts a new one.
+        let rule = crate::herdr::is_rule(&t);
+        open = count > 0 && count + 12 >= widest && !rule;
+        hard = count >= widest && !rule;
     }
     out
 }
@@ -370,6 +376,31 @@ mod tests {
         let all: Vec<String> = codes(&joined).iter().flatten().map(|c| c.text.clone()).collect();
         assert!(!all.is_empty() && all.iter().all(|t| t == "! \"/Users/nachovalencia/agents-pixel-dungeon/build/Agents Pixel Dungeon.app/Contents/MacOS/guild\" tool"), "{all:?} in {:?}", plain(&joined));
         assert!(plain(&joined).iter().any(|l| l.contains("agents-pixel-dungeon/build/Agents Pixel Dungeon.app/Contents/MacOS")), "{:?}", plain(&joined));
+    }
+
+    #[test]
+    fn a_table_drawn_as_records_keeps_one_field_per_line() {
+        // A markdown table Claude Code drew as records in a 42-column terminal.
+        let screen = include_str!("../fixtures/narrow-table.txt");
+        let lines: Vec<String> = plain(&reflow(parse(screen))).into_iter().filter(|l| !l.trim().is_empty()).collect();
+        let at = |start: &str| lines.iter().find(|l| l.trim_start().starts_with(start)).cloned().unwrap_or_default();
+        assert_eq!(at("Receta: Rainbow").trim(), "Receta: Rainbow Fin Albacore", "{lines:#?}");
+        assert_eq!(at("Dónde: Lindea").trim(), "Dónde: Lindea Rabonne (Southshore) y otros", "{lines:#?}");
+        assert!(at("¿Vale la pena?: Sí").ends_with("pero se pone verde rápido"), "{lines:#?}");
+        assert_eq!(at("Receta: Bristle").trim(), "Receta: Bristle Whisker Catfish", "{lines:#?}");
+        assert!(lines.iter().any(|l| crate::herdr::is_rule(l)), "the rules between rows stay: {lines:#?}");
+        assert!(at("No compres").ends_with("llegues a 120."), "prose after the table still flows: {lines:#?}");
+        assert!(at("⏺ En Menethil").ends_with("Cooking en 107:"), "{lines:#?}");
+        // The plain re-flow agrees.
+        let flowed = crate::herdr::paragraphs(&screen.lines().map(str::to_string).collect::<Vec<_>>());
+        assert!(flowed.iter().any(|l| l.trim() == "Costo: 12s") && flowed.iter().any(|l| l.trim() == "Receta: Crocolisk Steak"), "{flowed:#?}");
+    }
+
+    #[test]
+    fn a_sentence_starting_with_a_header_still_flows() {
+        let screen = "  Esto es un parrafo largo que llena todo el ancho de la\n  Nota: la terminal lo corto aqui y sigue en esta linea\n  y termina aqui.";
+        let lines = plain(&reflow(parse(screen)));
+        assert_eq!(lines.len(), 1, "{lines:#?}");
     }
 
     /// A real screen (`HPD_SCREEN=<file of herdr agent read --format ansi>`): prints what can be copied.
