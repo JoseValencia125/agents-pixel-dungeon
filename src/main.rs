@@ -367,7 +367,10 @@ impl App {
         ui::set_console_scale(app.prefs.console_scale);
         app.monitor.refresh();
         // HPD_TEST_COMPOSE: the summon form already open (for captures).
-        if std::env::var_os("HPD_TEST_COMPOSE").is_some() { app.monitor.set_composing(true); }
+        if std::env::var_os("HPD_TEST_COMPOSE").is_some() {
+            app.monitor.set_composing(true);
+            app.compose.prompt = std::env::var("HPD_TEST_DRAFT").unwrap_or_default();
+        }
         app
     }
 
@@ -859,6 +862,8 @@ impl eframe::App for App {
                 if let Some(id) = id { self.monitor.select(Some(id)); }
             }
         }
+        // Full screen opens a room of its own: the summon form opens again over it.
+        if std::env::var_os("HPD_TEST_COMPOSE").is_some() && now > 1.3 && now < 1.5 { self.monitor.set_composing(true); }
         if let Ok(v) = std::env::var("HPD_TEST_BOARD") {
             if now > 1.0 && now < 1.2 { self.show_board = true; self.guild.form.open = v == "form"; }
         }
