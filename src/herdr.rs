@@ -1648,11 +1648,15 @@ pub fn meaningful_lines(text: &str) -> Vec<String> {
 /// a tool line, an option, a heading…).
 pub fn paragraphs(lines: &[String]) -> Vec<String> {
     let widest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let rows = table_rows(lines);
     let mut out: Vec<String> = vec![];
     let mut open = false; // the last paragraph may continue
-    for line in lines {
-        let full = widest >= 40 && line.chars().count() >= widest.saturating_sub(12);
-        if open && !starts_block(line) {
+    for (line, row) in lines.iter().zip(rows) {
+        if row == Row::Gap { continue; }
+        // A rule ends a paragraph: the line under it starts a new one.
+        let full = widest >= 40 && line.chars().count() >= widest.saturating_sub(12) && !is_rule(line);
+        let join = match row { Row::Field => false, Row::FieldMore => !out.is_empty(), _ => open && !starts_block(line) };
+        if join {
             if let Some(last) = out.last_mut() {
                 last.push(' ');
                 last.push_str(line.trim());
@@ -1673,6 +1677,79 @@ pub fn starts_block(line: &str) -> bool {
         || ["●", "⎿", "❯", "›", "│", "╭", "╰", "├", "└", "⏺", "✻", "✳", "✢", "✽", "✶", "※", "✘", "✔", "- ", "* ", "• ", "> ", "#", "⏵"].iter().any(|m| t.starts_with(m))
         || option_prefix(t).is_some()
         || t.trim_end().chars().all(|c| matches!(c, '─' | '━' | '═' | '╌' | '┄' | '-'))
+}
+
+/// A line that is only a rule (─, ━, ═…), as wide as the terminal draws it.
+pub fn is_rule(line: &str) -> bool {
+    let t = line.trim();
+    t.chars().count() >= 8 && t.chars().all(|c| matches!(c, '─' | '━' | '═' | '╌' | '┄' | '-'))
+}
+
+/// How a line joins the one above when a reflow re-flows a terminal's text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Row {
+    /// Joins by the usual rule: the line above filled the terminal.
+    Plain,
+    /// A `Header: value` line of a table: its own line.
+    Field,
+    /// A field's value going on (indented under it): joins the field.
+    FieldMore,
+    /// A blank line inside a field's value: dropped.
+    Gap,
+}
+
+/// Whether a line starts like `Header: value`, a short header (up to four
+/// words) and a colon.
+fn field_head(line: &str) -> bool {
+    let t = line.trim();
+    let Some(at) = t.find(": ") else { return false };
+    let key = &t[..at];
+    let first = key.chars().next();
+    !key.is_empty() && key.chars().count() <= 30 && key.split_whitespace().count() <= 4 && !key.contains(':')
+        && first.is_some_and(|c| c.is_alphanumeric() || c == '¿' || c == '¡')
+        && !t[at + 2..].trim().is_empty()
+}
+
+/// The tables a narrow terminal shows as records: Claude Code draws a table
+/// too wide for it one row at a time, each cell on a `Header: value` line
+/// (the value going on indented under it), the rows between rules. Those
+/// lines are fields: each starts a line of its own (a full line above does
+/// not swallow it) and its indented rest joins it. A header line counts
+/// when the line next to it, past its indented rest, is one too, so a
+/// sentence that happens to start with "Nota: " keeps flowing.
+pub fn table_rows(lines: &[String]) -> Vec<Row> {
+    let indent = |l: &str| l.chars().take_while(|c| *c == ' ').count();
+    let blank = |l: &str| l.trim().is_empty();
+    let heads: Vec<bool> = lines.iter().map(|l| field_head(l)).collect();
+    // The next line at this one's indent or less, past deeper ones and blank
+    // lines inside them; none across a rule or a blank line before a line as shallow.
+    let near = |i: usize, back: bool| -> Option<usize> {
+        let depth = indent(&lines[i]);
+        let mut j = i;
+        loop {
+            if back { j = j.checked_sub(1)?; } else { j += 1; if j >= lines.len() { return None; } }
+            let l = &lines[j];
+            if blank(l) { continue; }
+            if is_rule(l) { return None; }
+            if indent(l) <= depth { return Some(j); }
+        }
+    };
+    let field: Vec<bool> = (0..lines.len()).map(|i| heads[i] && [near(i, true), near(i, false)].iter().flatten().any(|&j| heads[j] && indent(&lines[j]) == indent(&lines[i]))).collect();
+    let mut rows = vec![Row::Plain; lines.len()];
+    let mut open: Option<usize> = None; // the indent of the field being read
+    for (i, line) in lines.iter().enumerate() {
+        if field[i] { rows[i] = Row::Field; open = Some(indent(line)); continue; }
+        let Some(depth) = open else { continue };
+        if is_rule(line) || (!blank(line) && starts_block(line)) { open = None; continue; }
+        if blank(line) {
+            // Inside the value only when it goes on, deeper, below.
+            let next = lines[i + 1..].iter().find(|l| !blank(l));
+            if next.is_some_and(|l| indent(l) > depth && !is_rule(l)) { rows[i] = Row::Gap; } else { open = None; }
+            continue;
+        }
+        if indent(line) > depth { rows[i] = Row::FieldMore; }
+    }
+    rows
 }
 
 /// What a Claude Code session is doing right now, from the last 128 KB of
