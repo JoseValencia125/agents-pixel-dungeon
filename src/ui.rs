@@ -1470,8 +1470,12 @@ pub fn compose_panel(ui: &mut Ui, monitor: &Monitor, prefs: &mut Prefs, state: &
         Frame::new().fill(alpha(Color32::BLACK, 0.45)).corner_radius(CornerRadius::same(5)).inner_margin(Margin::same(3)).show(ui, |ui| {
             let height = total - 7.0 * 3.0 - 22.0 - 24.0 - 24.0;
             ui.set_width(ui.available_width());
-            let edit = egui::TextEdit::multiline(&mut state.prompt).hint_text(tr("Primer prompt (opcional)")).font(FontId::monospace(fs(11.0))).desired_rows(4).frame(false).desired_width(f32::INFINITY).interactive(!busy);
-            ui.add_sized(vec2(ui.available_width(), height.max(40.0)), edit);
+            let height = height.max(40.0);
+            // A long prompt scrolls inside its box instead of pushing the button out.
+            egui::ScrollArea::vertical().id_salt("compose_prompt").max_height(height).auto_shrink([false, true]).show(ui, |ui| {
+                let edit = egui::TextEdit::multiline(&mut state.prompt).hint_text(tr("Primer prompt (opcional)")).font(FontId::monospace(fs(11.0))).desired_rows(4).frame(false).desired_width(f32::INFINITY).min_size(vec2(0.0, height)).interactive(!busy);
+                ui.add(edit);
+            });
         });
         // A failure says what to do, so it wraps above the button instead of being cut.
         if let (false, Some(note)) = (busy, &state.note) {
@@ -1592,7 +1596,12 @@ pub fn summon_form(ui: &mut Ui, monitor: &Monitor, assets: &crate::assets::Asset
     // gives up a row so the room still holds it.
     let note = state.note.clone().filter(|_| !busy);
     let edit = egui::TextEdit::multiline(&mut state.prompt).hint_text(tr("Primer prompt (opcional)")).font(FontId::monospace(fs(10.0))).desired_rows(if note.is_some() { 1 } else { 2 }).desired_width(f32::INFINITY).interactive(!busy);
-    ui.add(edit);
+    // A long prompt scrolls inside the room, so the button below it stays in reach.
+    let spacing = ui.spacing().item_spacing.y;
+    let note_h = note.as_ref().map_or(0.0, |n| ui.fonts(|f| f.layout(n.clone(), FontId::proportional(fs(9.0)), Color32::WHITE, ui.available_width()).size().y) + spacing);
+    let button_h = ui.spacing().interact_size.y.max(fs(11.0) + 2.0 * ui.spacing().button_padding.y + 4.0);
+    let room = (ui.available_height() - note_h - button_h - spacing).max(fs(10.0) * 1.6);
+    egui::ScrollArea::vertical().id_salt("summon_prompt").max_height(room).auto_shrink([false, true]).show(ui, |ui| { ui.add(edit); });
     if let Some(note) = note {
         ui.label(RichText::new(note).size(fs(9.0)).color(Color32::from_rgb(255, 159, 10)));
     }
