@@ -1369,6 +1369,98 @@ pub fn last_assistant_text(tail: &str) -> Option<String> {
     if joined.is_empty() { None } else { Some(joined) }
 }
 
+/// One step of the agent's turn in the reading view: what it wrote (as
+/// Markdown), or a tool it called, with what the tool worked on, the lines
+/// an edit added and removed, and whether it went well (none while it runs).
+#[derive(Clone, Debug, PartialEq)]
+pub enum TurnItem {
+    Text(String),
+    Tool { id: String, name: String, detail: String, added: usize, removed: usize, ok: Option<bool> },
+}
+
+/// What a tool call worked on, for its row: a command's first line, a
+/// file's path, a search's pattern…; and an edit's lines added and removed.
+fn tool_detail(name: &str, input: &Value) -> (String, usize, usize) {
+    let field = |key: &str| str_of(input, key).unwrap_or_default().to_string();
+    let lines = |key: &str| str_of(input, key).map(|t| t.lines().count()).unwrap_or(0);
+    match name {
+        "Bash" => (field("command").lines().next().unwrap_or_default().to_string(), 0, 0),
+        "Edit" => (field("file_path"), lines("new_string"), lines("old_string")),
+        "MultiEdit" => {
+            let edits = input.get("edits").and_then(Value::as_array).cloned().unwrap_or_default();
+            let count = |key: &str| edits.iter().map(|e| str_of(e, key).map(|t| t.lines().count()).unwrap_or(0)).sum();
+            (field("file_path"), count("new_string"), count("old_string"))
+        }
+        "Write" => (field("file_path"), lines("content"), 0),
+        "Read" => (field("file_path"), 0, 0),
+        "NotebookEdit" => (field("notebook_path"), 0, 0),
+        "Grep" | "Glob" => (field("pattern"), 0, 0),
+        "WebFetch" => (field("url"), 0, 0),
+        "WebSearch" => (field("query"), 0, 0),
+        "Task" | "Agent" => (field("description"), 0, 0),
+        "Skill" => (field("skill"), 0, 0),
+        _ => (String::new(), 0, 0),
+    }
+}
+
+/// What the agent did since your last message: the text of each assistant
+/// message (as Markdown) and each tool it called, in order, in the tail of
+/// a Claude Code transcript. A tool's result marks it done or failed. Rows
+/// of tool results, the harness's notes, a slash command's output and a
+/// compacted session's summary are not a prompt, so the turn before them
+/// stays; a subagent's own turns are left out.
+pub fn turn_items(tail: &str) -> Vec<TurnItem> {
+    let mut items: Vec<TurnItem> = vec![];
+    for line in tail.lines() {
+        if !(line.contains("\"assistant\"") || line.contains("\"user\"")) { continue; }
+        let Ok(row) = serde_json::from_str::<Value>(line) else { continue };
+        let flag = |key: &str| row.get(key).and_then(Value::as_bool) == Some(true);
+        if flag("isSidechain") { continue; }
+        let content = row.get("message").and_then(|m| m.get("content"));
+        match str_of(&row, "type") {
+            Some("assistant") => {
+                for block in content.and_then(Value::as_array).into_iter().flatten() {
+                    match str_of(block, "type") {
+                        Some("text") => if let Some(t) = str_of(block, "text").map(str::trim).filter(|t| !t.is_empty()) { items.push(TurnItem::Text(t.to_string())); },
+                        Some("tool_use") => {
+                            let name = str_of(block, "name").unwrap_or("?");
+                            let (detail, added, removed) = tool_detail(name, block.get("input").unwrap_or(&Value::Null));
+                            // An MCP tool shows by its own name, without its server's.
+                            let short = name.rsplit("__").next().unwrap_or(name).to_string();
+                            items.push(TurnItem::Tool { id: str_of(block, "id").unwrap_or_default().to_string(), name: short, detail, added, removed, ok: None });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("user") => {
+                if user_is_only_tool_result(&row) {
+                    for block in content.and_then(Value::as_array).into_iter().flatten() {
+                        let Some(id) = str_of(block, "tool_use_id").filter(|id| !id.is_empty()) else { continue };
+                        let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                        for item in items.iter_mut().rev() {
+                            if let TurnItem::Tool { id: tool, ok, .. } = item { if tool == id { *ok = Some(!failed); break; } }
+                        }
+                    }
+                    continue;
+                }
+                if flag("isMeta") || flag("isCompactSummary") { continue; }
+                // A slash command's own rows (<command-name>, its output) are not a prompt.
+                let typed = match content {
+                    Some(Value::String(t)) => t.clone(),
+                    Some(Value::Array(blocks)) => blocks.iter().filter_map(|b| str_of(b, "text")).collect::<Vec<_>>().join(""),
+                    _ => String::new(),
+                };
+                let typed = typed.trim_start();
+                if typed.is_empty() || typed.starts_with("<command-") || typed.starts_with("<local-command") || typed.starts_with("<system-reminder") { continue; }
+                items.clear();
+            }
+            _ => {}
+        }
+    }
+    items
+}
+
 /// The question in an assistant message: from the line that asks it (the
 /// job's `needs`, or a "needs input:" line) to the end, so its options come
 /// along. Markdown emphasis is dropped; the panel is plain text.

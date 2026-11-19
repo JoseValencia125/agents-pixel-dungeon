@@ -316,6 +316,36 @@ pub fn run() {
                         r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Segunda parte"}]}}"#);
     assert_eq!(last_assistant_text(split).as_deref(), Some("Primera parte\nSegunda parte"), "Split assistant message not joined");
     assert_eq!(last_assistant_text(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"solo"}]}}"#).as_deref(), Some("solo"));
+    let turn = [
+        r#"{"type":"user","message":{"content":"primera pregunta"}}"#,
+        r#"{"type":"assistant","message":{"id":"a","content":[{"type":"text","text":"respuesta vieja"}]}}"#,
+        r#"{"type":"user","message":{"content":"segunda pregunta"}}"#,
+        r#"{"type":"assistant","message":{"id":"b","content":[{"type":"text","text":"Reviso."},{"type":"tool_use","name":"Bash"}]}}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#,
+        r#"{"type":"user","isMeta":true,"message":{"content":"nota del harness"}}"#,
+        r#"{"type":"user","message":{"content":"<local-command-stdout>x</local-command-stdout>"}}"#,
+        r#"{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued"}}"#,
+        r#"{"type":"assistant","isSidechain":true,"message":{"id":"s","content":[{"type":"text","text":"de un subagente"}]}}"#,
+        r#"{"type":"assistant","message":{"id":"c","content":[{"type":"text","text":"| a | b |\n|---|---|\n| 1 | 2 |"}]}}"#,
+    ].join("\n");
+    use crate::herdr::TurnItem;
+    assert_eq!(crate::herdr::turn_items(&turn), vec![
+        TurnItem::Text("Reviso.".into()),
+        TurnItem::Tool { id: String::new(), name: "Bash".into(), detail: String::new(), added: 0, removed: 0, ok: None },
+        TurnItem::Text("| a | b |\n|---|---|\n| 1 | 2 |".into()),
+    ], "The reading view must hold the turn since the last prompt");
+    let tools = [
+        r#"{"type":"user","message":{"content":"arregla"}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"/r/src/a.rs","old_string":"x\ny","new_string":"x\ny\nz"}}]}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"cargo test\n--release"}}]}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t3","name":"mcp__chrome__navigate","input":{}}]}}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1"},{"type":"tool_result","tool_use_id":"t2","is_error":true}]}}"#,
+    ].join("\n");
+    assert_eq!(crate::herdr::turn_items(&tools), vec![
+        TurnItem::Tool { id: "t1".into(), name: "Edit".into(), detail: "/r/src/a.rs".into(), added: 3, removed: 2, ok: Some(true) },
+        TurnItem::Tool { id: "t2".into(), name: "Bash".into(), detail: "cargo test".into(), added: 0, removed: 0, ok: Some(false) },
+        TurnItem::Tool { id: "t3".into(), name: "navigate".into(), detail: String::new(), added: 0, removed: 0, ok: None },
+    ], "Tool rows: what they worked on, lines, and their result");
     let wrapped: Vec<String> = ["● Bash(ls)", "  ⎿ ok", "Tipografía. Propongo pixel font solo para títulos, nombres y números grandes, y Manrope", "para texto pequeño. Una pixel font a 12 px no se lee en móvil. Se decide con capturas.", "  - Primer paso. Un vertical slice de 3 a 4 días: marco del bestiario, un goblin con sus", "tags, el ataque de rayo completo y la barra de HP.", "❯ 1. Yes"].iter().map(|s| s.to_string()).collect();
     let flowed = paragraphs(&wrapped);
     assert_eq!(flowed.len(), 5, "Hard-wrapped lines not joined: {flowed:?}");
