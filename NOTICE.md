@@ -8,7 +8,7 @@ The room backgrounds (Resources/Sprites/rooms) and the heroes (Resources/Sprites
 
 ## Dependencies
 
-The app is written in Rust and links MIT/Apache-2.0 crates (egui/eframe, tray-icon, notify-rust, rodio, rfd, auto-launch and their dependencies); `cargo tree` lists them. egui bundles the Ubuntu (UFL), Hack (MIT) and Noto Emoji (OFL) fonts.
+The app is written in Rust and links MIT/Apache-2.0 crates (egui/eframe, tray-icon, notify-rust, rodio, rfd, auto-launch and their dependencies); `cargo tree` lists them. egui bundles the Ubuntu (UFL), Hack (MIT) and Noto Emoji (OFL) fonts. The chat's reading view draws Markdown with [egui_commonmark](https://github.com/lampsitter/egui_commonmark) (MIT/Apache-2.0), in SF Mono read from the system on macOS (not bundled).
 
 ## Inspiration
 

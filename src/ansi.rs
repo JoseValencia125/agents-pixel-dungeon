@@ -445,6 +445,15 @@ mod tests {
         assert_eq!(lines.len(), 1, "{lines:#?}");
     }
 
+    /// A real transcript (`HPD_TRANSCRIPT=<session>.jsonl`): prints what the reading view shows.
+    #[test]
+    #[ignore]
+    fn reading_on_a_real_transcript() {
+        let Ok(file) = std::env::var("HPD_TRANSCRIPT") else { return };
+        let tail = crate::herdr::file_tail(&file, 262_144).unwrap_or_default();
+        for item in crate::herdr::turn_items(&tail) { eprintln!("{item:?}"); }
+    }
+
     /// A real screen (`HPD_SCREEN=<file of herdr agent read --format ansi>`): prints what can be copied.
     #[test]
     #[ignore]

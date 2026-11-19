@@ -54,6 +54,7 @@ pub fn install_symbol_fonts(ctx: &egui::Context) {
             fonts.families.entry(family).or_default().push(name.clone());
         }
     }
+    crate::ui::add_reading_fonts(&mut fonts);
     ctx.set_fonts(fonts);
 }
 

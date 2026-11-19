@@ -876,6 +876,8 @@ impl eframe::App for App {
             }
         }
         if std::env::var("HPD_TEST_DIFF").is_ok() && now > 1.0 && now < 1.2 { self.guild.diff_open = true; }
+        // HPD_TEST_READING=1: the chat shows the reading view (for captures).
+        if std::env::var_os("HPD_TEST_READING").is_some() && now < 1.2 { ctx.data_mut(|d| d.insert_temp(egui::Id::new("reading-open"), true)); }
         // HPD_TEST_GUILD=chat|guild|quests|design: the open room in guild mode on that
         // tab, kept in memory only (for captures).
         if let Ok(v) = std::env::var("HPD_TEST_GUILD") {

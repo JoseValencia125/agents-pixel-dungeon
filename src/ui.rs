@@ -499,11 +499,19 @@ pub struct ChatState {
     /// The agent is the guild's delegate: its tabs are over the chat, so
     /// the chat offers no guild mode.
     pub guild_lead: bool,
+    /// The reading view: what the agent did since your last message (its
+    /// words as Markdown, its tools as rows) from its transcript (re-read every 2 s while it shows), the
+    /// transcript's path (looked up once) and the viewer's cache.
+    reading: Vec<crate::herdr::TurnItem>,
+    reading_rx: Option<Receiver<(Option<String>, Vec<crate::herdr::TurnItem>)>>,
+    next_reading: f64,
+    transcript: Option<Option<String>>,
+    markdown: egui_commonmark::CommonMarkCache,
 }
 
 impl ChatState {
     pub fn new(agent_id: &str) -> ChatState {
-        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], codes: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false, shell_open: None, shell_stop: None, changes: None, changes_rx: None, next_changes: 0.0, diff_path: None, diff: vec![], diff_rx: None, pull: None, pull_rx: None, next_pull: 0.0, model: None, model_rx: None, next_model: 0.0, guild_lead: false }
+        ChatState { agent_id: agent_id.to_string(), draft: String::new(), lines: vec![], note: None, sending: None, choice: None, tail_rx: None, next_tail: 0.0, focus: true, status_seen: String::new(), screen: vec![], codes: vec![], screen_rx: None, next_screen: 0.0, slash: None, slash_choice: 0, cols: 0, last_sent: None, restored: false, shell_open: None, shell_stop: None, changes: None, changes_rx: None, next_changes: 0.0, diff_path: None, diff: vec![], diff_rx: None, pull: None, pull_rx: None, next_pull: 0.0, model: None, model_rx: None, next_model: 0.0, guild_lead: false, reading: vec![], reading_rx: None, next_reading: 0.0, transcript: None, markdown: Default::default() }
     }
 
     /// Send this message now, as if typed in the box: what is left in the
@@ -593,9 +601,139 @@ fn changes_open(ctx: &Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(egui::Id::new("changes-open"))).unwrap_or(false)
 }
 
+/// Whether the chat shows the reading view instead of the console (for
+/// every agent that has one, until it is turned off).
+fn reading_open(ctx: &Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::new("reading-open"))).unwrap_or(false)
+}
+
+/// Agents whose transcript the reading view can read: Claude Code's (the
+/// demo's too, with a sample answer).
+fn can_read(monitor: &Monitor, agent: &Agent) -> bool {
+    (agent.session.is_some() || monitor.demo) && crate::herdr::harness_for(&agent.name) == "claude"
+}
+
+/// The demo's turn in the reading view.
+fn demo_reading() -> Vec<crate::herdr::TurnItem> {
+    use crate::herdr::TurnItem;
+    let tool = |name: &str, detail: &str, added: usize, removed: usize, ok: Option<bool>| TurnItem::Tool { id: String::new(), name: name.into(), detail: detail.into(), added, removed, ok };
+    vec![
+        TurnItem::Text(tr("Reviso la página de ajustes y corro las pruebas.")),
+        tool("Read", "~/demo/website/src/settings.rs", 0, 0, Some(true)),
+        tool("Edit", "~/demo/website/src/settings.rs", 12, 3, Some(true)),
+        tool("Bash", "cargo test --release", 0, 0, Some(true)),
+        TurnItem::Text(tr(DEMO_READING)),
+        tool("Bash", "cargo build --release", 0, 0, None),
+    ]
+}
+
+const DEMO_READING: &str = "Revisé la página de ajustes. Esto es lo que queda:\n\n## Pendientes\n\n| Parte | Estado | Nota |\n|---|---|---|\n| Formulario | Listo | Valida el correo |\n| Tema oscuro | En curso | Faltan los iconos |\n| Pruebas | Pendiente | `cargo test --release` |\n\nPara probarlo:\n\n```sh\ncargo test --release\n```\n\n- **Siguiente:** los iconos del tema oscuro\n- Después, las pruebas de la página";
+
+/// Keep the reading view's text fresh (every 2 s, off the UI thread) while it shows.
+fn poll_reading(ctx: &Context, monitor: &Monitor, agent: &Agent, state: &mut ChatState, now: f64) {
+    if !(reading_open(ctx) && can_read(monitor, agent)) { return; }
+    if monitor.demo { state.reading = demo_reading(); return; }
+    if now >= state.next_reading && state.reading_rx.is_none() {
+        state.next_reading = now + 2.0;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (session, known, ctx) = (agent.session.clone().unwrap_or_default(), state.transcript.clone().flatten(), ctx.clone());
+        std::thread::spawn(move || {
+            let path = known.or_else(|| crate::herdr::claude_transcript(&session));
+            let texts = path.as_deref().and_then(|p| crate::herdr::file_tail(p, 262_144)).map(|t| crate::herdr::turn_items(&t)).unwrap_or_default();
+            let _ = tx.send((path, texts));
+            ctx.request_repaint();
+        });
+        state.reading_rx = Some(rx);
+    }
+    if let Some(Ok((path, texts))) = state.reading_rx.as_ref().map(|rx| rx.try_recv()) {
+        if path.is_some() { state.transcript = Some(path); }
+        state.reading = texts;
+        state.reading_rx = None;
+    }
+}
+
+/// The reading view's fonts: SF Mono, the font of macOS's Terminal (read
+/// from the system: Apple's license does not let the app ship it), its
+/// Semibold for headings; elsewhere egui's monospace (Hack). Each falls
+/// back to the monospace family's fonts (emoji, symbols) for what it lacks.
+pub fn add_reading_fonts(fonts: &mut egui::FontDefinitions) {
+    let fallbacks = fonts.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
+    let dir = std::path::Path::new("/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts");
+    for (name, file) in [("reading", "SF-Mono-Regular.otf"), ("reading-heading", "SF-Mono-Semibold.otf")] {
+        let mut family = vec![];
+        if let Ok(bytes) = std::fs::read(dir.join(file)) {
+            fonts.font_data.insert(name.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+            family.push(name.to_string());
+        }
+        family.extend(fallbacks.iter().cloned());
+        fonts.families.insert(egui::FontFamily::Name(name.into()), family);
+    }
+}
+
+/// The reading view: what the agent did since your last message, in
+/// order: its words as Markdown at the panel's width (tables as tables,
+/// code in its own font), each tool it called as a short row (what it
+/// worked on, an edit's lines, ✓ or ✗), and while it works, what it is doing.
+fn reading_view(ui: &mut Ui, agent: &Agent, state: &mut ChatState) {
+    use crate::herdr::TurnItem;
+    let scale = console_scale();
+    {
+        let style = ui.style_mut();
+        // As a terminal reads: SF Mono throughout (code too, on its own
+        // background), headings in its Semibold, and air between blocks.
+        let text = egui::FontFamily::Name("reading".into());
+        // 11 pt, as Terminal sets SF Mono; the console's A+/A- on top.
+        style.text_styles.insert(egui::TextStyle::Body, FontId::new(fs(11.0) * scale, text.clone()));
+        style.text_styles.insert(egui::TextStyle::Monospace, FontId::new(fs(11.0) * scale, text.clone()));
+        style.text_styles.insert(egui::TextStyle::Small, FontId::new(fs(9.5) * scale, text));
+        style.text_styles.insert(egui::TextStyle::Heading, FontId::new(fs(13.0) * scale, egui::FontFamily::Name("reading-heading".into())));
+        // Body text a step under white, so **bold** (white) stands out.
+        style.visuals.widgets.noninteractive.fg_stroke.color = Color32::from_gray(212);
+        style.spacing.item_spacing = vec2(8.0, 10.0);
+    }
+    let home = crate::herdr::expand_home(&agent.cwd);
+    // The tool rows and the live line in the same font, a step smaller.
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    let row = |text: &str| RichText::new(text).font(FontId::new(body.size * 0.92, body.family.clone()));
+    egui::ScrollArea::vertical().id_salt("reading").auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+        if state.reading.is_empty() && agent.status != "working" {
+            ui.label(mono(&tr("Todavía no hay respuesta desde tu último mensaje."), 11.0).color(DIM));
+        }
+        for (i, item) in state.reading.iter().enumerate() {
+            match item {
+                TurnItem::Text(text) => { ui.push_id(i, |ui| egui_commonmark::CommonMarkViewer::new().show(ui, &mut state.markdown, text)); }
+                TurnItem::Tool { name, detail, added, removed, ok, .. } => {
+                    // A path in the agent's folder reads from there.
+                    let detail = crate::herdr::expand_home(detail);
+                    let detail = detail.strip_prefix(&format!("{home}/")).map(str::to_string).unwrap_or_else(|| crate::herdr::abbreviate_home(&detail));
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(7.0, 0.0);
+                        let (mark, color) = match ok { Some(true) => ("●", Color32::from_rgb(90, 200, 80)), Some(false) => ("●", Color32::from_rgb(232, 59, 59)), None => ("○", Color32::from_gray(150)) };
+                        ui.label(row(mark).color(color));
+                        ui.label(row(name).strong().color(Color32::WHITE));
+                        if *added > 0 { ui.label(row(&format!("+{added}")).color(Color32::from_rgb(90, 200, 80))); }
+                        if *removed > 0 { ui.label(row(&format!("−{removed}")).color(Color32::from_rgb(232, 90, 80))); }
+                        if !detail.is_empty() { ui.add(egui::Label::new(row(&detail).color(Color32::from_gray(160))).truncate()).on_hover_text(&detail); }
+                    });
+                }
+            }
+        }
+        // While it works, what it is doing now.
+        if agent.status == "working" {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                let doing = if agent.activity.is_empty() { tr("Trabajando…") } else { agent.activity.clone() };
+                ui.label(row(&doing).color(Color32::from_rgb(254, 174, 52)));
+            });
+        }
+    });
+}
+
 pub fn chat_panel(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatState, now: f64, wide: bool) -> ChatAction {
     image_preview(ui.ctx());
     poll_changes(ui.ctx(), agent, state, now, wide && changes_open(ui.ctx()));
+    poll_reading(ui.ctx(), monitor, agent, state, now);
     if !(wide && changes_open(ui.ctx())) { return chat_body(ui, monitor, agent, state, now, wide); }
     // The changed files take the console's right side.
     let full = ui.max_rect();
@@ -900,6 +1038,15 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("changes-open"), !open));
                         state.next_changes = 0.0;
                     }
+                    if can_read(monitor, agent) {
+                        let on = reading_open(ui.ctx());
+                        let paper = Color32::from_rgb(232, 214, 170);
+                        let read = egui::Button::new(mono(&tr("¶ Lectura"), 11.0).color(if on { Color32::from_rgb(40, 30, 14) } else { paper }))
+                            .fill(if on { paper } else { alpha(paper, 0.08) }).stroke(Stroke::new(1.0_f32, alpha(paper, 0.6))).corner_radius(CornerRadius::same(4));
+                        if ui.add(read).on_hover_text(tr("Ver su respuesta como texto con formato (tablas, títulos, código) en vez de la terminal")).clicked() {
+                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("reading-open"), !on));
+                        }
+                    }
                     if let Some(pull) = &state.pull { pull_chip(ui, pull); }
                     if button(ui, ">_ Terminal", Color32::from_rgb(254, 174, 52)).on_hover_text(tr("Abrir una terminal en esta carpeta")).clicked() {
                         action.terminal = true;
@@ -922,6 +1069,12 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
                 // The console's own text size.
                 if flat_button(ui, mono("A+", 11.0).color(Color32::from_gray(200))).on_hover_text(format!("{} (⌘⇧+)", tr("Consola más grande"))).clicked() { action.console_step = 1; }
                 if flat_button(ui, mono("A-", 11.0).color(Color32::from_gray(200))).on_hover_text(format!("{} (⌘⇧-)", tr("Consola más pequeña"))).clicked() { action.console_step = -1; }
+                if can_read(monitor, agent) {
+                    let on = reading_open(ui.ctx());
+                    if flat_button(ui, mono("¶", 13.0).strong().color(if on { Color32::from_rgb(232, 214, 170) } else { Color32::from_gray(200) })).on_hover_text(tr("Ver su respuesta como texto con formato (tablas, títulos, código) en vez de la terminal")).clicked() {
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("reading-open"), !on));
+                    }
+                }
                 if let Some(pull) = &state.pull { pull_chip(ui, pull); }
             });
         });
@@ -939,7 +1092,8 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
         // Full screen: the box to type in sits on the terminal's own prompt
         // line (❯, ›), where typing happens in the terminal; without one in
         // sight it stays under the console.
-        let prompt_line = if wide && !asking && !standalone { prompt_line(&state.screen) } else { None };
+        let reading = reading_open(ui.ctx()) && can_read(monitor, agent) && !asking;
+        let prompt_line = if wide && !asking && !standalone && !reading { prompt_line(&state.screen) } else { None };
         let inline = prompt_line.is_some();
         // The box under the console grows to three rows with what is typed.
         let box_height = input_height(draft_rows(&state.draft, (ui.available_width() / (fs(13.0) * 0.62)) as usize), fs(13.0), true) + 10.0;
@@ -949,6 +1103,7 @@ fn chat_body(ui: &mut Ui, monitor: &Monitor, agent: &Agent, state: &mut ChatStat
             ui.set_min_height(body_height.max(40.0));
             ui.set_max_height(body_height.max(40.0));
             ui.set_width(ui.available_width());
+            if reading { reading_view(ui, agent, state); return; }
             // The screen as the terminal paints it, colours and all.
             if !asking && !state.screen.is_empty() {
                 // Full screen: the terminal's width sets the font, so its
