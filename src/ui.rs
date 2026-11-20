@@ -158,6 +158,7 @@ fn console_line(ui: &mut Ui, spans: &[Span], codes: &[crate::ansi::Code], size: 
     let target = response.hover_pos().and_then(|pointer| {
         let index = galley.cursor_from_pos(pointer - pos).ccursor.index;
         crate::herdr::link_at(galley.text(), index).and_then(|link| crate::herdr::resolve_link(&link, cwd))
+            .or_else(|| crate::herdr::spaced_path_at(galley.text(), index, cwd))
     });
     // Painted as a selectable label too: a label left out of the selection
     // for a frame drops it, and ⌘ is held to copy what is selected.
