@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.2](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.5.1...v2.5.2) (2026-11-20)
+
+
+### Fixed
+
+* **selftest:** compare spaced paths as files so Windows passes ([63be3fb](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/63be3fb4f40252347be72bf67d76b7b74481943a))
+* **selftest:** compare spaced paths as files, so Windows' mixed separators pass ([43b2110](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/43b2110993c9bbae040e0a4e677e9b14e1077de2))
+
 ## [2.5.1](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.5.0...v2.5.1) (2026-11-20)
 
 
