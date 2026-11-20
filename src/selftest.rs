@@ -317,19 +317,21 @@ pub fn run() {
         std::fs::create_dir_all(root.join("blender")).unwrap();
         std::fs::write(root.join("blender/pases.py"), b"").unwrap();
         let whole = dir.join("06-vineta_de_pie.png").to_string_lossy().to_string();
+        // The same file however its separators are written (Windows mixes / and \\).
+        let same = |found: Option<String>, want: &str| found.and_then(|f| std::fs::canonicalize(f).ok()) == std::fs::canonicalize(want).ok();
         // The space in "Application Support", and one the wrap left in the id.
         let line = format!("como se ve en {}/Application Support/artifacts/01m7wrdvjp8pz 3dagqqfyq6999/06-vineta_de_pie.png. Por eso", root.display());
         let at = |needle: &str| line.chars().count() - line[line.find(needle).unwrap()..].chars().count() + 1;
         let cwd = root.to_string_lossy().to_string();
         for needle in ["/Application", "Support/", "3dagq", "06-vineta"] {
-            assert_eq!(spaced_path_at(&line, at(needle), &cwd).as_deref(), Some(whole.as_str()), "Spaced path not found from {needle}");
+            assert!(same(spaced_path_at(&line, at(needle), &cwd), &whole), "Spaced path not found from {needle}");
         }
         assert_eq!(spaced_path_at(&line, at("Por"), &cwd), None, "A word after the path is not part of it");
         assert_eq!(spaced_path_at(&line, at("como"), &cwd), None, "A word before the path is not part of it");
         let line = "2 files: blender/escena.py, blender/pas es.py";
         let at = |needle: &str| line.chars().count() - line[line.find(needle).unwrap()..].chars().count() + 1;
         let pases = root.join("blender/pases.py").to_string_lossy().to_string();
-        assert_eq!(spaced_path_at(line, at("es.py"), &cwd).as_deref(), Some(pases.as_str()), "A relative path cut by the wrap not joined");
+        assert!(same(spaced_path_at(line, at("es.py"), &cwd), &pases), "A relative path cut by the wrap not joined");
         let _ = std::fs::remove_dir_all(&root);
     }
     let ask = "Lo que veo:\n- algo\n\nneeds input: ¿para qué es la rama nueva? Opciones:\n\n1. **Rama de PR** desde `main`\n2. Renombrar";
