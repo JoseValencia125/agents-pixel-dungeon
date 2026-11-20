@@ -29,3 +29,6 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
+    # The signing, notary and Homebrew tap secrets only reach a called
+    # workflow when they are passed on; without this the release is ad-hoc.
+    secrets: inherit
