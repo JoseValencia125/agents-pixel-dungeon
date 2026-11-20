@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.5.0...v2.5.1) (2026-11-20)
+
+
+### Fixed
+
+* **ci:** pass secrets to the release builds so macOS is signed and notarized ([031ea8a](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/031ea8a0dc472f7ed73afe8062b62d5002613645))
+* **ci:** pass secrets to the release builds so macOS is signed and notarized ([9568e53](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/9568e535b6040e71c5fb4a61ffa7cdba6117f971))
+* **console:** ⌘-click opens paths with a space or cut by the wrap ([5d2082e](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/5d2082e46308561920663c84d4cc4c98fa5dcef2))
+* **console:** ⌘-click opens paths with a space or cut by the wrap ([90dae7d](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/90dae7d1f94712ce95a396e8dbc52681ebd690c2))
+
 ## [2.5.0](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.4.0...v2.5.0) (2026-11-19)
 
 
