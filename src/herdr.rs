@@ -850,6 +850,53 @@ pub fn resolve_link(link: &str, cwd: &str) -> Option<String> {
     full.exists().then(|| full.to_string_lossy().to_string())
 }
 
+/// The path ⌘ + click lands on when there is a space in it: a name with
+/// one ("Application Support"), or a long path the terminal's wrap cut in two
+/// and the console joined again with a space. From a word that looks like
+/// a path, the words after it are added, with the space or without it,
+/// while what they make is still the start of something on disk; the
+/// longest that exists and reaches the word at `index` wins.
+pub fn spaced_path_at(text: &str, index: usize, cwd: &str) -> Option<String> {
+    const OPEN: &[char] = &['"', '\'', '`', '<', '(', '[', '{', '•', '⎿', '●', '*', '-'];
+    const CLOSE: &[char] = &['"', '\'', '`', '>', ')', ']', '}', '.', ',', ';', '!', '?', ':'];
+    let chars: Vec<char> = text.chars().collect();
+    let mut words = vec![];
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() { i += 1; continue; }
+        let start = i;
+        while i < chars.len() && !chars[i].is_whitespace() { i += 1; }
+        words.push((start, i));
+    }
+    let at = words.iter().position(|&(start, end)| start <= index && index <= end)?;
+    let word = |w: usize| chars[words[w].0..words[w].1].iter().collect::<String>();
+    let absolute = |path: &str| { let path = expand_home(path); if is_absolute_path(&path) { PathBuf::from(path) } else { PathBuf::from(expand_home(cwd)).join(path) } };
+    // Something on disk is, or starts with, this.
+    let begins = |path: &str| {
+        let full = absolute(path);
+        if full.exists() { return true; }
+        let (Some(parent), Some(name)) = (full.parent(), full.file_name().map(|n| n.to_string_lossy().to_string())) else { return false };
+        std::fs::read_dir(parent).map(|entries| entries.flatten().any(|e| e.file_name().to_string_lossy().starts_with(&name))).unwrap_or(false)
+    };
+    for first in at.saturating_sub(4)..=at {
+        let head = word(first);
+        let head = head.trim_start_matches(OPEN);
+        if !(head.contains('/') || head.starts_with('~')) { continue; }
+        let mut path = head.to_string();
+        let mut found = None;
+        for next in first..words.len().min(first + 8) {
+            if next > first {
+                let more = word(next);
+                let Some(longer) = [format!("{path} {more}"), format!("{path}{more}")].into_iter().find(|p| begins(p.trim_end_matches(CLOSE))) else { break };
+                path = longer;
+            }
+            if next >= at { found = resolve_link(path.trim_end_matches(CLOSE), cwd).or(found); }
+        }
+        if found.is_some() { return found; }
+    }
+    None
+}
+
 /// A terminal window in `cwd`, to type a command in: Terminal on macOS,
 /// the first terminal emulator found on Linux.
 #[cfg_attr(windows, allow(unreachable_code))]

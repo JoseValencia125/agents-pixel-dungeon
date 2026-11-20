@@ -309,6 +309,29 @@ pub fn run() {
     let cwd = env!("CARGO_MANIFEST_DIR");
     assert_eq!(resolve_link("src/ui.rs:42:7", cwd), Some(std::path::Path::new(cwd).join("src/ui.rs").to_string_lossy().to_string()), "Path with line not resolved");
     assert_eq!(resolve_link("src/nope.rs", cwd), None, "A missing file must not open");
+    {
+        let root = std::env::temp_dir().join(format!("hpd-spaced-{}", std::process::id()));
+        let dir = root.join("Application Support/artifacts/01m7wrdvjp8pz3dagqqfyq6999");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("06-vineta_de_pie.png"), b"").unwrap();
+        std::fs::create_dir_all(root.join("blender")).unwrap();
+        std::fs::write(root.join("blender/pases.py"), b"").unwrap();
+        let whole = dir.join("06-vineta_de_pie.png").to_string_lossy().to_string();
+        // The space in "Application Support", and one the wrap left in the id.
+        let line = format!("como se ve en {}/Application Support/artifacts/01m7wrdvjp8pz 3dagqqfyq6999/06-vineta_de_pie.png. Por eso", root.display());
+        let at = |needle: &str| line.chars().count() - line[line.find(needle).unwrap()..].chars().count() + 1;
+        let cwd = root.to_string_lossy().to_string();
+        for needle in ["/Application", "Support/", "3dagq", "06-vineta"] {
+            assert_eq!(spaced_path_at(&line, at(needle), &cwd).as_deref(), Some(whole.as_str()), "Spaced path not found from {needle}");
+        }
+        assert_eq!(spaced_path_at(&line, at("Por"), &cwd), None, "A word after the path is not part of it");
+        assert_eq!(spaced_path_at(&line, at("como"), &cwd), None, "A word before the path is not part of it");
+        let line = "2 files: blender/escena.py, blender/pas es.py";
+        let at = |needle: &str| line.chars().count() - line[line.find(needle).unwrap()..].chars().count() + 1;
+        let pases = root.join("blender/pases.py").to_string_lossy().to_string();
+        assert_eq!(spaced_path_at(line, at("es.py"), &cwd).as_deref(), Some(pases.as_str()), "A relative path cut by the wrap not joined");
+        let _ = std::fs::remove_dir_all(&root);
+    }
     let ask = "Lo que veo:\n- algo\n\nneeds input: ¿para qué es la rama nueva? Opciones:\n\n1. **Rama de PR** desde `main`\n2. Renombrar";
     assert_eq!(question_lines(ask, Some("¿para qué es la rama nueva? Opciones:")), vec!["¿para qué es la rama nueva? Opciones:", "1. Rama de PR desde main", "2. Renombrar"], "Question not cut at the ask");
     let split = concat!(r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Primera parte"}]}}"#, "\n",
