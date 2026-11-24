@@ -1591,7 +1591,7 @@ pub fn wrapped_shell(process: &str) -> Option<String> {
 /// Enter to select, or press the key shown"), in any case.
 pub fn is_menu_footer(trimmed: &str) -> bool {
     let lower = trimmed.to_lowercase();
-    ["enter to confirm", "enter to select", "esc to cancel", "enter to continue", "↑↓ to navigate", "↵ to select", "enter to see more options", "enter select · esc", "use arrow keys to navigate", "press the key shown"].iter().any(|s| lower.contains(s))
+    ["enter to confirm", "enter to select", "esc to cancel", "enter to continue", "↑↓ to navigate", "↑/↓ to navigate", "↵ to select", "enter to see more options", "enter select · esc", "use arrow keys to navigate", "press the key shown"].iter().any(|s| lower.contains(s))
 }
 
 /// What a terminal points at its highlighted option with: ❯ (Claude Code,

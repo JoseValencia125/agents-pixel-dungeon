@@ -178,6 +178,8 @@ pub fn run() {
     assert_eq!((crate::ui::prompt_line(&quoted), crate::ui::picker_open(&quoted)), (Some(4), false), "Text quoting a picker's footer was taken for a picker");
     let kiro = crate::ansi::parse(&format!("› /model\nSelect model:   type to search\n\n❯ auto                 1.00x credits    Models chosen by task [active]\n  claude-opus-5.5      2.00x credits    Claude Opus 5.5\n(+13 more)\n{rule}\n Settings for selected model: auto      tab to switch panels\n{rule}\n esc to close · ↑↓ to navigate · ↵ to select · tab to switch panels"));
     assert_eq!((crate::ui::prompt_line(&kiro), crate::ui::picker_open(&kiro)), (None, true), "Kiro's /model picker was taken for a prompt");
+    let hooks = crate::ansi::parse(&format!("❯ /hooks\n{rule}\n  Hooks\n  4 hooks on 3 events\n\n❯ PreToolUse  before tool execution\n  PostToolUse  after tool execution\n  All events\n\n  ↑/↓ to navigate · Enter to view · Esc to close"));
+    assert_eq!((crate::ui::prompt_line(&hooks), crate::ui::picker_open(&hooks)), (None, true), "Claude's /hooks picker (↑/↓ in its footer) was taken for a prompt");
     // A new shell that asks something first eats the agent's command.
     let omz = "Restored session: Sun Oct 11 18:22:00 -03 2026\n[oh-my-zsh] Would you like to update? [Y/n] kiro-cli\n\n➜  agents-pixel-dungeon iro-cli\nzsh: correct 'iro-cli' to 'kiro-cli' [nyae]?";
     assert!(shell_blocker(omz).is_some_and(|w| w.contains("omz update")), "oh-my-zsh's update prompt not recognised");
