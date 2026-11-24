@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.3](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.5.2...v2.5.3) (2026-11-24)
+
+
+### Fixed
+
+* **console:** Claude's /hooks picker takes the arrows ([cb423d2](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/cb423d2b3e75a93f96dd8be39859ea0792050780))
+* **console:** Claude's /hooks picker takes the arrows instead of the box covering it ([e436e6a](https://github.com/JoseValencia125/agents-pixel-dungeon/commit/e436e6ad2c0e14668ac337ee934fa4cf7b8519c6))
+
 ## [2.5.2](https://github.com/JoseValencia125/agents-pixel-dungeon/compare/v2.5.1...v2.5.2) (2026-11-20)
 
 
